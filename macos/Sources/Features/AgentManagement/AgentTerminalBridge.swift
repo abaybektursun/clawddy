@@ -8,9 +8,14 @@ enum AgentState: Equatable {
     case claudeIdle(Int?)
 }
 
+/// Manages agent-to-terminal mapping, state monitoring, and script generation.
+/// Surfaces are owned by AgentDetailViewController; this class tracks keys and states.
 class AgentTerminalBridge: ObservableObject {
     @Published var agentStates: [String: AgentState] = [:]
-    private var agentControllers: [String: TerminalController] = [:]
+
+    /// Keys of agents that have active surfaces in the detail VC.
+    private(set) var activeSurfaceKeys: Set<String> = []
+
     private var timer: Timer?
     private var statusWatcher: DispatchSourceFileSystemObject?
 
@@ -25,36 +30,21 @@ class AgentTerminalBridge: ObservableObject {
         agentStates[key] ?? .notStarted
     }
 
-    // MARK: - Terminal Lifecycle
+    // MARK: - Surface Tracking
 
-    func openOrActivate(key: String, displayName: String, workingDirectory: String, ghostty: Ghostty.App) {
-        // If terminal is live, bring it forward
-        if let controller = agentControllers[key],
-           let window = controller.window,
-           window.isVisible {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
+    func markSurfaceActive(_ key: String) {
+        activeSurfaceKeys.insert(key)
+        pollStates()
+    }
 
-        // Discard stale controller (window was closed)
-        agentControllers.removeValue(forKey: key)
-
-        let scriptPath = writeAgentScript(key: key, displayName: displayName)
-
-        var config = Ghostty.SurfaceConfiguration()
-        config.command = scriptPath
-        config.workingDirectory = workingDirectory
-        config.environmentVariables = ["GHOSTTY_AGENT_NAME": key]
-
-        let controller = TerminalController.newWindow(ghostty, withBaseConfig: config)
-        agentControllers[key] = controller
+    func markSurfaceRemoved(_ key: String) {
+        activeSurfaceKeys.remove(key)
+        agentStates.removeValue(forKey: key)
+        removeFile("\(key).heartbeat")
     }
 
     func stopTracking(agent key: String) {
-        if let controller = agentControllers.removeValue(forKey: key) {
-            controller.window?.close()
-        }
+        activeSurfaceKeys.remove(key)
         agentStates.removeValue(forKey: key)
         removeFile("\(key).heartbeat")
         removeFile("\(key).session")
@@ -66,16 +56,13 @@ class AgentTerminalBridge: ObservableObject {
 
     // MARK: - Script Generation
 
-    private func writeAgentScript(key: String, displayName: String) -> String {
+    func writeAgentScript(key: String, displayName: String) -> String {
         let scriptPath = FileManager.default.temporaryDirectory
             .appendingPathComponent("ghostty-agent-\(key).sh").path
 
         let escapedKey = key.replacingOccurrences(of: "'", with: "'\\''")
         let escapedDisplay = displayName.replacingOccurrences(of: "'", with: "'\\''")
         let statusDir = "$HOME/.config/ghostty-agents/status"
-        // Resume existing session if valid, otherwise start fresh.
-        // First attempt is without exec so we can detect failure and retry.
-        // Successful resume or fresh start uses exec to replace the shell.
         let content = """
             #!/bin/zsh -l
             export GHOSTTY_AGENT_NAME='\(escapedKey)'
@@ -87,7 +74,7 @@ class AgentTerminalBridge: ObservableObject {
               # Resume failed (stale session) — remove and start fresh
               rm -f "$SESSION_FILE"
             fi
-            exec claude --continue --name '\(escapedDisplay)' --permission-mode auto 2>/dev/null || exec claude --name '\(escapedDisplay)' --permission-mode auto
+            exec claude --name '\(escapedDisplay)' --permission-mode auto
             """
         FileManager.default.createFile(atPath: scriptPath, contents: content.data(using: .utf8))
         try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
@@ -97,15 +84,8 @@ class AgentTerminalBridge: ObservableObject {
     // MARK: - State Polling
 
     private func pollStates() {
-        // Clean up controllers whose windows are no longer visible
-        for (key, controller) in agentControllers {
-            if controller.window == nil || !controller.window!.isVisible {
-                agentControllers.removeValue(forKey: key)
-            }
-        }
-
         var newStates: [String: AgentState] = [:]
-        for key in agentControllers.keys {
+        for key in activeSurfaceKeys {
             if let heartbeatAge = readHeartbeatAge(for: key) {
                 let pct = readContextPercent(for: key)
                 newStates[key] = heartbeatAge < 10 ? .claudeActive(pct) : .claudeIdle(pct)

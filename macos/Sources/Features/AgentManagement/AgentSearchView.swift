@@ -12,7 +12,7 @@ struct AgentSearchResult: Identifiable {
 struct AgentSearchView: View {
     @ObservedObject var config: AgentConfig
     @ObservedObject var bridge: AgentTerminalBridge
-    let ghostty: Ghostty.App
+    let onSelectAgent: (String, String, AgentProject) -> Void  // key, displayName, project
     let onDismiss: () -> Void
 
     @State private var query = ""
@@ -146,9 +146,8 @@ struct AgentSearchView: View {
     private func activateSelected() {
         guard selectedIndex < results.count else { return }
         let result = results[selectedIndex]
-        let project = config.projects.first(where: { $0.name == result.project })
-        let dir = project?.workingDirectory ?? NSHomeDirectory()
-        bridge.openOrActivate(key: result.key, displayName: result.agent, workingDirectory: dir, ghostty: ghostty)
+        guard let project = config.projects.first(where: { $0.name == result.project }) else { return }
+        onSelectAgent(result.key, result.agent, project)
         onDismiss()
     }
 

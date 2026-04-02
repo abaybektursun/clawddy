@@ -101,7 +101,8 @@ class AppDelegate: NSObject,
 
     /// Agent management
     private var agentStatusItem: NSStatusItem?
-    private var agentPopover: NSPopover?
+    private var agentWorkspaceWindow: NSWindow?
+    private var agentDetailVC: AgentDetailViewController?
     private var agentSearchPanel: AgentSearchPanel?
     private var agentSearchHotKeyRef: EventHotKeyRef?
     private let agentConfig = AgentConfig()
@@ -1143,23 +1144,47 @@ extension AppDelegate {
     }
 
     @objc private func agentStatusItemClicked() {
-        guard let button = agentStatusItem?.button else { return }
-        if let popover = agentPopover, popover.isShown {
-            popover.close()
-            return
+        showAgentWorkspace()
+    }
+
+    private func showAgentWorkspace() {
+        if agentWorkspaceWindow == nil {
+            let detailVC = AgentDetailViewController()
+            self.agentDetailVC = detailVC
+
+            let sidebarView = NSHostingView(rootView: AgentSidebarView(
+                config: agentConfig,
+                bridge: agentBridge,
+                onSelectAgent: { [weak self] key, displayName, project in
+                    self?.activateAgent(key: key, displayName: displayName, project: project)
+                }
+            ))
+
+            let controller = AgentWorkspaceController(sidebarView: sidebarView, detailViewController: detailVC)
+            agentWorkspaceWindow = makeAgentWorkspaceWindow(controller: controller)
         }
 
-        if agentPopover == nil {
-            let popover = NSPopover()
-            popover.contentSize = NSSize(width: 480, height: 420)
-            popover.behavior = .transient
-            popover.contentViewController = NSHostingController(
-                rootView: AgentGraphView(config: agentConfig, bridge: agentBridge, ghostty: ghostty)
-            )
-            agentPopover = popover
+        agentWorkspaceWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func activateAgent(key: String, displayName: String, project: AgentProject) {
+        guard let app = ghostty.app, let detailVC = agentDetailVC else { return }
+
+        // Only write script and create config for new surfaces
+        let isNew = detailVC.showOrSwitch(key: key, displayName: displayName, projectName: project.name) {
+            let scriptPath = self.agentBridge.writeAgentScript(key: key, displayName: displayName)
+            var config = Ghostty.SurfaceConfiguration()
+            config.command = scriptPath
+            config.workingDirectory = project.workingDirectory
+            config.environmentVariables = ["GHOSTTY_AGENT_NAME": key]
+            return (app, config)
         }
 
-        agentPopover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        if isNew {
+            agentBridge.markSurfaceActive(key)
+        }
+        agentWorkspaceWindow?.title = "\(project.name) — \(displayName)"
     }
 
     private func toggleAgentSearch() {
@@ -1168,15 +1193,24 @@ extension AppDelegate {
             return
         }
 
-        let view = AgentSearchView(config: agentConfig, bridge: agentBridge, ghostty: ghostty) { [weak self] in
-            self?.agentSearchPanel?.hide()
+        if agentSearchPanel == nil {
+            let view = AgentSearchView(
+                config: agentConfig,
+                bridge: agentBridge,
+                onSelectAgent: { [weak self] key, displayName, project in
+                    self?.showAgentWorkspace()
+                    self?.activateAgent(key: key, displayName: displayName, project: project)
+                },
+                onDismiss: { [weak self] in
+                    self?.agentSearchPanel?.hide()
+                }
+            )
+            let host = NSHostingView(rootView: view)
+            host.frame = NSRect(x: 0, y: 0, width: 560, height: 52)
+            agentSearchPanel = AgentSearchPanel(contentView: host)
         }
-        let host = NSHostingView(rootView: view)
-        host.frame = NSRect(x: 0, y: 0, width: 560, height: 52)
 
-        let panel = AgentSearchPanel(contentView: host)
-        panel.showCentered()
-        agentSearchPanel = panel
+        agentSearchPanel?.showCentered()
     }
 
     private func setupMenuImages() {

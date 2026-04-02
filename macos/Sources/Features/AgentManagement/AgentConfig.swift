@@ -57,22 +57,11 @@ class AgentConfig: ObservableObject {
     }
 
     func load() {
-        guard FileManager.default.fileExists(atPath: Self.configURL.path) else { return }
-        guard let data = try? Data(contentsOf: Self.configURL) else {
-            NSLog("[AgentConfig] Failed to read config file")
-            return
-        }
-        do {
-            let config = try JSONDecoder().decode(AgentConfigFile.self, from: data)
-            projects = config.projects
-            // Debug: write to a log file
-            let logLines = projects.map { "\($0.name): cwd=\($0.workingDirectory ?? "nil")" }
-            let log = "Loaded \(projects.count) projects:\n" + logLines.joined(separator: "\n") + "\n"
-            try? log.write(to: Self.configURL.deletingLastPathComponent().appendingPathComponent("debug.log"), atomically: true, encoding: .utf8)
-        } catch {
-            let log = "Decode error: \(error)\n"
-            try? log.write(to: Self.configURL.deletingLastPathComponent().appendingPathComponent("debug.log"), atomically: true, encoding: .utf8)
-        }
+        guard FileManager.default.fileExists(atPath: Self.configURL.path),
+              let data = try? Data(contentsOf: Self.configURL),
+              let config = try? JSONDecoder().decode(AgentConfigFile.self, from: data)
+        else { return }
+        projects = config.projects
     }
 
     func save() {
@@ -146,12 +135,11 @@ class AgentConfig: ObservableObject {
         return true
     }
 
-    func removeAgent(name: String) {
-        for pi in projects.indices {
-            for ti in projects[pi].tasks.indices {
-                projects[pi].tasks[ti].agents.removeAll { $0 == name }
-            }
-        }
+    func removeAgent(project: String, task: String, name: String) {
+        guard let pi = projects.firstIndex(where: { $0.name == project }),
+              let ti = projects[pi].tasks.firstIndex(where: { $0.name == task })
+        else { return }
+        projects[pi].tasks[ti].agents.removeAll { $0 == name }
         save()
     }
 
