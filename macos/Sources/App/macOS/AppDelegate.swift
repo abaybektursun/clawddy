@@ -3,6 +3,7 @@ import SwiftUI
 import UserNotifications
 import OSLog
 import Sparkle
+import Carbon
 import GhosttyKit
 
 class AppDelegate: NSObject,
@@ -97,6 +98,14 @@ class AppDelegate: NSObject,
 
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
+
+    /// Agent management
+    private var agentStatusItem: NSStatusItem?
+    private var agentPopover: NSPopover?
+    private var agentSearchPanel: AgentSearchPanel?
+    private var agentSearchHotKeyRef: EventHotKeyRef?
+    private let agentConfig = AgentConfig()
+    private let agentBridge = AgentTerminalBridge()
 
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
@@ -310,6 +319,9 @@ class AppDelegate: NSObject,
         // Setup signal handlers
         setupSignals()
 
+        // Agent management menu bar icon
+        setupAgentStatusItem()
+
         switch Ghostty.launchSource {
         case .app:
             // Don't have to do anything.
@@ -351,7 +363,8 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            if TerminalController.all.isEmpty && derivedConfig.initialWindow {
+            let hasAgents = !agentConfig.projects.isEmpty
+            if TerminalController.all.isEmpty && derivedConfig.initialWindow && !hasAgents {
                 undoManager.disableUndoRegistration()
                 _ = TerminalController.newWindow(ghostty)
                 undoManager.enableUndoRegistration()
@@ -1097,6 +1110,75 @@ extension AppDelegate {
     }
 
     /// Setup all the images for our menu items.
+    // MARK: - Agent Management
+
+    private func setupAgentStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        if let button = item.button {
+            button.image = NSImage(systemSymbolName: "person.3.fill", accessibilityDescription: "Agents")
+            button.action = #selector(agentStatusItemClicked)
+            button.target = self
+        }
+        agentStatusItem = item
+        registerAgentSearchHotKey()
+    }
+
+    private func registerAgentSearchHotKey() {
+        // Carbon hotkey: Option+Space — works globally, no permissions needed
+        var hotKeyID = EventHotKeyID(signature: 0x4147_4E54, id: 1) // "AGNT"
+        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+
+        let handler: EventHandlerUPP = { _, event, _ -> OSStatus in
+            DispatchQueue.main.async {
+                guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else { return }
+                appDelegate.toggleAgentSearch()
+            }
+            return noErr
+        }
+
+        InstallEventHandler(GetEventDispatcherTarget(), handler, 1, &eventType, nil, nil)
+
+        // Option = optionKey (0x0800), Space = keyCode 49
+        RegisterEventHotKey(49, UInt32(optionKey), hotKeyID, GetEventDispatcherTarget(), 0, &agentSearchHotKeyRef)
+    }
+
+    @objc private func agentStatusItemClicked() {
+        guard let button = agentStatusItem?.button else { return }
+        if let popover = agentPopover, popover.isShown {
+            popover.close()
+            return
+        }
+
+        if agentPopover == nil {
+            let popover = NSPopover()
+            popover.contentSize = NSSize(width: 480, height: 420)
+            popover.behavior = .transient
+            popover.contentViewController = NSHostingController(
+                rootView: AgentGraphView(config: agentConfig, bridge: agentBridge, ghostty: ghostty)
+            )
+            agentPopover = popover
+        }
+
+        agentPopover?.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    private func toggleAgentSearch() {
+        if let panel = agentSearchPanel, panel.isVisible {
+            panel.hide()
+            return
+        }
+
+        let view = AgentSearchView(config: agentConfig, bridge: agentBridge, ghostty: ghostty) { [weak self] in
+            self?.agentSearchPanel?.hide()
+        }
+        let host = NSHostingView(rootView: view)
+        host.frame = NSRect(x: 0, y: 0, width: 560, height: 52)
+
+        let panel = AgentSearchPanel(contentView: host)
+        panel.showCentered()
+        agentSearchPanel = panel
+    }
+
     private func setupMenuImages() {
         // Note: This COULD Be done all in the xib file, but I find it easier to
         // modify this stuff as code.
