@@ -6,7 +6,11 @@ import GhosttyKit
 /// Surfaces are created on first activation and hidden (not destroyed) when switching.
 final class AgentDetailViewController: NSViewController {
 
-    private var surfaces: [String: Ghostty.SurfaceView] = [:]
+    /// Each agent gets a SurfaceScrollView (which wraps a SurfaceView).
+    /// Using SurfaceScrollView instead of raw SurfaceView because it handles
+    /// resize → sizeDidChange → ghostty_surface_set_size propagation.
+    private var surfaceWrappers: [String: SurfaceScrollView] = [:]
+    private var surfaceViews: [String: Ghostty.SurfaceView] = [:]
     private var activeKey: String?
     private var placeholderView: NSView?
     private var headerHosting: NSHostingView<AgentDetailHeaderView>?
@@ -59,35 +63,43 @@ final class AgentDetailViewController: NSViewController {
         headerModel.isActive = true
         placeholderView?.isHidden = true
 
-        // Hide current surface
-        if let currentKey = activeKey, let current = surfaces[currentKey] {
+        // Hide current
+        if let currentKey = activeKey, let current = surfaceWrappers[currentKey] {
             current.isHidden = true
         }
 
         var isNew = false
 
-        // Create surface only if it doesn't exist
-        if surfaces[key] == nil {
+        // Create surface + scroll wrapper if first time
+        if surfaceWrappers[key] == nil {
             let (app, config) = createConfig()
-            let surface = Ghostty.SurfaceView(app, baseConfig: config)
-            surface.translatesAutoresizingMaskIntoConstraints = false
-            view.addSubview(surface)
+            let surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
+            let scrollWrapper = SurfaceScrollView(
+                contentSize: view.bounds.size,
+                surfaceView: surfaceView
+            )
+            scrollWrapper.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(scrollWrapper)
             NSLayoutConstraint.activate([
-                surface.topAnchor.constraint(equalTo: terminalTopAnchor),
-                surface.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-                surface.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-                surface.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+                scrollWrapper.topAnchor.constraint(equalTo: terminalTopAnchor),
+                scrollWrapper.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+                scrollWrapper.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                scrollWrapper.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             ])
-            surfaces[key] = surface
+            surfaceWrappers[key] = scrollWrapper
+            surfaceViews[key] = surfaceView
             isNew = true
         }
 
-        // Show target surface
-        surfaces[key]!.isHidden = false
+        // Show target
+        surfaceWrappers[key]!.isHidden = false
         activeKey = key
 
+        // Make the SurfaceView first responder for keyboard input
         DispatchQueue.main.async {
-            self.view.window?.makeFirstResponder(self.surfaces[key])
+            if let surface = self.surfaceViews[key] {
+                self.view.window?.makeFirstResponder(surface)
+            }
         }
 
         return isNew
@@ -95,9 +107,10 @@ final class AgentDetailViewController: NSViewController {
 
     /// Destroy a specific agent's surface.
     func removeSurface(key: String) {
-        if let surface = surfaces.removeValue(forKey: key) {
-            surface.removeFromSuperview()
+        if let wrapper = surfaceWrappers.removeValue(forKey: key) {
+            wrapper.removeFromSuperview()
         }
+        surfaceViews.removeValue(forKey: key)
         if activeKey == key {
             activeKey = nil
             headerModel.isActive = false
@@ -107,7 +120,7 @@ final class AgentDetailViewController: NSViewController {
 
     /// Whether a surface exists for this key.
     func hasSurface(key: String) -> Bool {
-        surfaces[key] != nil
+        surfaceWrappers[key] != nil
     }
 }
 

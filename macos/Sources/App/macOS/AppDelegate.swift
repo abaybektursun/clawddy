@@ -1161,7 +1161,11 @@ extension AppDelegate {
             ))
 
             let controller = AgentWorkspaceController(sidebarView: sidebarView, detailViewController: detailVC)
-            agentWorkspaceWindow = makeAgentWorkspaceWindow(controller: controller)
+            let window = makeAgentWorkspaceWindow(controller: controller)
+
+            // Match window appearance to Ghostty's theme so sidebar colors align
+            syncWorkspaceAppearance(window)
+            agentWorkspaceWindow = window
         }
 
         agentWorkspaceWindow?.makeKeyAndOrderFront(nil)
@@ -1185,6 +1189,18 @@ extension AppDelegate {
             agentBridge.markSurfaceActive(key)
         }
         agentWorkspaceWindow?.title = "\(project.name) — \(displayName)"
+    }
+
+    private func syncWorkspaceAppearance(_ window: NSWindow) {
+        // Use the same logic Ghostty uses for terminal windows:
+        // derive appearance from config's window-theme and background color.
+        if let appearance = NSAppearance(ghosttyConfig: ghostty.config) {
+            window.appearance = appearance
+        } else {
+            // No explicit theme — match the terminal's background color luminance
+            let bg = NSColor(ghostty.config.backgroundColor)
+            window.appearance = NSAppearance(named: bg.isLightColor ? .aqua : .darkAqua)
+        }
     }
 
     private func toggleAgentSearch() {
