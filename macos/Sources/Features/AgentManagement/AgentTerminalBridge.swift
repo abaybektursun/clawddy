@@ -89,10 +89,20 @@ class AgentTerminalBridge: ObservableObject {
 
     init() {
         logger.info("init — starting poll timer (5s) and status watcher")
+        // Clean stale agent scripts from previous builds
+        Self.cleanStaleScripts()
         timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.schedulePoll()
         }
         watchStatusDirectory()
+    }
+
+    private static func cleanStaleScripts() {
+        let tmp = FileManager.default.temporaryDirectory
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: tmp.path) else { return }
+        for file in files where file.hasPrefix("ghostty-agent-") && file.hasSuffix(".sh") {
+            try? FileManager.default.removeItem(at: tmp.appendingPathComponent(file))
+        }
     }
 
     func state(for key: String) -> AgentState {
