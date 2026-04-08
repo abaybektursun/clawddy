@@ -240,13 +240,11 @@ struct AgentSidebarView: View {
 
             Spacer(minLength: 4)
 
-            HStack(spacing: 6) {
-                if let pct = state.contextPercent {
-                    Text("\(pct)%")
+            HStack(spacing: 4) {
+                if !state.label.isEmpty {
+                    Text(state.label)
                         .font(.system(.caption2, design: .monospaced))
-                        .foregroundStyle(.quaternary)
-                        .monospacedDigit()
-                        .frame(minWidth: 28, alignment: .trailing)
+                        .foregroundStyle(state.color)
                 }
 
                 stateIndicator(state)

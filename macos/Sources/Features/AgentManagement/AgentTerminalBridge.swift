@@ -7,43 +7,63 @@ import os
 private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "AgentBridge")
 
 enum AgentState: Equatable {
-    case notStarted
-    case terminalOnly
-    case claudeActive(Int?)
-    case claudeIdle(Int?)
+    case notStarted        // no terminal surface
+    case terminalOnly      // terminal running, claude not active
+    case idle              // claude waiting for user input
+    case thinking          // user submitted prompt, claude processing
+    case working           // claude using tools
+    case needsPermission   // claude waiting for permission approval
+    case error             // tool failure or API error
 
     var color: Color {
         switch self {
-        case .notStarted:   return .secondary.opacity(0.4)
-        case .terminalOnly: return .secondary
-        case .claudeActive: return .green
-        case .claudeIdle:   return .yellow
+        case .notStarted:       return .secondary.opacity(0.3)
+        case .terminalOnly:     return .secondary.opacity(0.5)
+        case .idle:             return .secondary
+        case .thinking:         return .blue
+        case .working:          return .green
+        case .needsPermission:  return .orange
+        case .error:            return .red
         }
     }
 
     var label: String {
         switch self {
-        case .notStarted:   return "idle"
-        case .terminalOnly: return "terminal"
-        case .claudeActive: return "active"
-        case .claudeIdle:   return "idle"
+        case .notStarted:       return ""
+        case .terminalOnly:     return "shell"
+        case .idle:             return "idle"
+        case .thinking:         return "thinking"
+        case .working:          return "working"
+        case .needsPermission:  return "permission"
+        case .error:            return "error"
         }
     }
 
     var iconName: String? {
         switch self {
-        case .claudeActive: return "bolt.fill"
-        case .claudeIdle:   return "moon.fill"
-        case .terminalOnly: return "terminal"
-        case .notStarted:   return nil
+        case .thinking:         return "brain"
+        case .working:          return "bolt.fill"
+        case .needsPermission:  return "exclamationmark.circle.fill"
+        case .error:            return "xmark.circle.fill"
+        case .idle:             return "moon.fill"
+        case .terminalOnly:     return "terminal"
+        case .notStarted:       return nil
         }
     }
 
-    var contextPercent: Int? {
+    /// Whether this state counts as "active" for aggregate purposes.
+    var isActive: Bool {
         switch self {
-        case .claudeActive(let pct): return pct
-        case .claudeIdle(let pct):   return pct
-        default: return nil
+        case .thinking, .working: return true
+        default: return false
+        }
+    }
+
+    /// Whether this state needs user attention.
+    var needsAttention: Bool {
+        switch self {
+        case .needsPermission, .error: return true
+        default: return false
         }
     }
 }
@@ -66,15 +86,8 @@ class AgentTerminalBridge: ObservableObject {
 
     var aggregateState: AggregateState {
         let states = agentStates.values
-        let activeCount = states.filter {
-            if case .claudeActive = $0 { return true }
-            return false
-        }.count
-        let needsAttention = states.contains { state in
-            if case .claudeActive(let pct) = state, let p = pct, p >= 80 { return true }
-            if case .claudeIdle(let pct) = state, let p = pct, p >= 80 { return true }
-            return false
-        }
+        let activeCount = states.filter(\.isActive).count
+        let needsAttention = states.contains(where: \.needsAttention)
         if needsAttention { return .attention }
         if activeCount > 0 { return .running(activeCount) }
         return .idle
@@ -82,7 +95,6 @@ class AgentTerminalBridge: ObservableObject {
 
     private var timer: Timer?
     private var statusWatcher: DispatchSourceFileSystemObject?
-    private var notifiedHighContext: Set<String> = []
     private var lastAggregateState: AggregateState?
     private var watcherThrottled = false
     private let pollQueue = DispatchQueue(label: "com.mitchellh.ghostty.agentpoll", qos: .utility)
@@ -121,14 +133,14 @@ class AgentTerminalBridge: ObservableObject {
         logger.info("markSurfaceRemoved: \(key)")
         activeSurfaceKeys.remove(key)
         agentStates.removeValue(forKey: key)
-        removeFile("\(key).heartbeat")
+        removeFile("\(key).state")
     }
 
     func stopTracking(agent key: String) {
         logger.info("stopTracking: \(key) (activeKeys=\(self.activeSurfaceKeys.count))")
         activeSurfaceKeys.remove(key)
         agentStates.removeValue(forKey: key)
-        removeFile("\(key).heartbeat")
+        removeFile("\(key).state")
         removeFile("\(key).session")
     }
 
@@ -179,20 +191,13 @@ class AgentTerminalBridge: ObservableObject {
         let keys = activeSurfaceKeys
         if keys.isEmpty { return }
 
-        // File I/O on background queue
         pollQueue.async { [weak self] in
             guard let self else { return }
             var newStates: [String: AgentState] = [:]
             for key in keys {
-                if let heartbeatAge = self.readHeartbeatAge(for: key) {
-                    let pct = self.readContextPercent(for: key)
-                    newStates[key] = heartbeatAge < 10 ? .claudeActive(pct) : .claudeIdle(pct)
-                } else {
-                    newStates[key] = .terminalOnly
-                }
+                newStates[key] = self.readAgentState(for: key)
             }
 
-            // Publish on main queue
             DispatchQueue.main.async { [weak self] in
                 self?.applyStates(newStates)
             }
@@ -207,25 +212,21 @@ class AgentTerminalBridge: ObservableObject {
         }
 
         for (key, newState) in newStates {
-            let oldState = oldStates[key]
+            let oldState = oldStates[key] ?? .notStarted
 
-            if case .claudeActive = oldState, case .claudeIdle = newState {
+            // Agent finished working → idle
+            if oldState.isActive && newState == .idle {
                 postNotification(title: "Agent finished", body: "\(key) is now idle")
             }
 
-            let pct: Int? = {
-                switch newState {
-                case .claudeActive(let p): return p
-                case .claudeIdle(let p): return p
-                default: return nil
-                }
-            }()
-            if let p = pct, p >= 80, !notifiedHighContext.contains(key) {
-                notifiedHighContext.insert(key)
-                postNotification(title: "High context usage", body: "\(key) is at \(p)% context")
+            // Agent needs permission
+            if newState == .needsPermission && oldState != .needsPermission {
+                postNotification(title: "Permission needed", body: "\(key) is waiting for approval", sound: .defaultCritical)
             }
-            if let p = pct, p < 80 {
-                notifiedHighContext.remove(key)
+
+            // Agent hit an error
+            if newState == .error && oldState != .error {
+                postNotification(title: "Agent error", body: "\(key) encountered an error")
             }
         }
 
@@ -246,11 +247,11 @@ class AgentTerminalBridge: ObservableObject {
         }
     }
 
-    private func postNotification(title: String, body: String) {
+    private func postNotification(title: String, body: String, sound: UNNotificationSound = .default) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = .default
+        content.sound = sound
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
@@ -259,22 +260,21 @@ class AgentTerminalBridge: ObservableObject {
 
     private var statusDir: URL { AgentConfig.statusDir }
 
-    private func readHeartbeatAge(for name: String) -> TimeInterval? {
-        let url = statusDir.appendingPathComponent("\(name).heartbeat")
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let modDate = attrs[.modificationDate] as? Date
-        else { return nil }
-        return Date().timeIntervalSince(modDate)
-    }
-
-    private func readContextPercent(for name: String) -> Int? {
-        let url = statusDir.appendingPathComponent("\(name).json")
-        guard let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let ctx = json["context_window"] as? [String: Any],
-              let pct = ctx["used_percentage"] as? Double
-        else { return nil }
-        return Int(pct)
+    /// Read the agent state from the `.state` file written by hooks.
+    /// File contains a single keyword: thinking, working, permission, idle, error
+    private func readAgentState(for name: String) -> AgentState {
+        let url = statusDir.appendingPathComponent("\(name).state")
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else {
+            return .terminalOnly
+        }
+        switch raw.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "thinking":    return .thinking
+        case "working":     return .working
+        case "permission":  return .needsPermission
+        case "idle":        return .idle
+        case "error":       return .error
+        default:            return .terminalOnly
+        }
     }
 
     private func removeFile(_ name: String) {

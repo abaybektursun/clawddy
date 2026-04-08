@@ -165,30 +165,60 @@ class AgentConfig: ObservableObject {
             .appendingPathComponent(".claude/settings.json")
     }
 
+    // Each hook writes a state keyword to ~/.config/ghostty-agents/status/{AGENT}.state
+    // States: idle, thinking, working, permission, error
+
+    private static let stateWriter = """
+        #!/bin/sh
+        # Clawddy — writes agent state
+        [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
+        cat > /dev/null
+        echo "$1" > "$HOME/.config/ghostty-agents/status/$GHOSTTY_AGENT_NAME.state"
+        """
+
     private static let onSessionStartScript = """
         #!/bin/sh
-        # Clawddy — SessionStart hook (captures session ID for resume)
         [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
         INPUT=$(cat)
+        DIR="$HOME/.config/ghostty-agents/status"
         SID=$(echo "$INPUT" | /usr/bin/jq -r '.session_id // empty')
-        [ -n "$SID" ] && echo "$SID" > "$HOME/.config/ghostty-agents/status/$GHOSTTY_AGENT_NAME.session"
+        [ -n "$SID" ] && echo "$SID" > "$DIR/$GHOSTTY_AGENT_NAME.session"
+        echo "idle" > "$DIR/$GHOSTTY_AGENT_NAME.state"
+        """
+
+    private static let onPromptScript = """
+        #!/bin/sh
+        [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
+        cat > /dev/null
+        echo "thinking" > "$HOME/.config/ghostty-agents/status/$GHOSTTY_AGENT_NAME.state"
         """
 
     private static let onToolScript = """
         #!/bin/sh
-        # Clawddy — PostToolUse heartbeat
         [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
         cat > /dev/null
-        DIR="$HOME/.config/ghostty-agents/status"
-        date +%s > "$DIR/$GHOSTTY_AGENT_NAME.heartbeat"
+        echo "working" > "$HOME/.config/ghostty-agents/status/$GHOSTTY_AGENT_NAME.state"
+        """
+
+    private static let onPermissionScript = """
+        #!/bin/sh
+        [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
+        cat > /dev/null
+        echo "permission" > "$HOME/.config/ghostty-agents/status/$GHOSTTY_AGENT_NAME.state"
         """
 
     private static let onStopScript = """
         #!/bin/sh
-        # Clawddy — Stop hook (Claude finished responding)
         [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
         cat > /dev/null
-        rm -f "$HOME/.config/ghostty-agents/status/$GHOSTTY_AGENT_NAME.heartbeat"
+        echo "idle" > "$HOME/.config/ghostty-agents/status/$GHOSTTY_AGENT_NAME.state"
+        """
+
+    private static let onErrorScript = """
+        #!/bin/sh
+        [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
+        cat > /dev/null
+        echo "error" > "$HOME/.config/ghostty-agents/status/$GHOSTTY_AGENT_NAME.state"
         """
 
     private func ensureHookScripts() {
@@ -197,8 +227,11 @@ class AgentConfig: ObservableObject {
 
         let scripts: [(String, String)] = [
             ("on-session-start.sh", Self.onSessionStartScript),
+            ("on-prompt.sh", Self.onPromptScript),
             ("on-tool.sh", Self.onToolScript),
+            ("on-permission.sh", Self.onPermissionScript),
             ("on-stop.sh", Self.onStopScript),
+            ("on-error.sh", Self.onErrorScript),
         ]
 
         for (name, content) in scripts {
@@ -214,9 +247,9 @@ class AgentConfig: ObservableObject {
         guard let data = try? Data(contentsOf: claudeSettingsURL),
               let str = String(data: data, encoding: .utf8)
         else { return false }
-        return str.contains("ghostty-agents/hooks/on-session-start.sh")
-            && str.contains("ghostty-agents/hooks/on-tool.sh")
-            && str.contains("ghostty-agents/hooks/on-stop.sh")
+        // Check for the new hook set (on-prompt.sh is new)
+        return str.contains("ghostty-agents/hooks/on-prompt.sh")
+            && str.contains("ghostty-agents/hooks/on-permission.sh")
     }
 
     private func installHooks() {
@@ -230,7 +263,7 @@ class AgentConfig: ObservableObject {
             settings = json
         }
 
-        let backupURL = url.deletingLastPathComponent().appendingPathComponent("settings.json.ghostty-backup")
+        let backupURL = url.deletingLastPathComponent().appendingPathComponent("settings.json.clawddy-backup")
         if fm.fileExists(atPath: url.path) {
             try? fm.removeItem(at: backupURL)
             try? fm.copyItem(at: url, to: backupURL)
@@ -238,19 +271,28 @@ class AgentConfig: ObservableObject {
 
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
 
+        // Remove old Clawddy/GhosttyAgents hooks before installing new ones
+        for key in hooks.keys {
+            if var eventArray = hooks[key] as? [[String: Any]] {
+                eventArray.removeAll { group in
+                    guard let innerHooks = group["hooks"] as? [[String: Any]] else { return false }
+                    return innerHooks.contains { ($0["command"] as? String)?.contains("ghostty-agents/hooks/") == true }
+                }
+                hooks[key] = eventArray.isEmpty ? nil : eventArray
+            }
+        }
+
         let hookEntries: [(String, String)] = [
             ("SessionStart", Self.hooksDir.appendingPathComponent("on-session-start.sh").path),
+            ("UserPromptSubmit", Self.hooksDir.appendingPathComponent("on-prompt.sh").path),
             ("PostToolUse", Self.hooksDir.appendingPathComponent("on-tool.sh").path),
+            ("PermissionRequest", Self.hooksDir.appendingPathComponent("on-permission.sh").path),
             ("Stop", Self.hooksDir.appendingPathComponent("on-stop.sh").path),
+            ("StopFailure", Self.hooksDir.appendingPathComponent("on-error.sh").path),
         ]
 
         for (event, scriptPath) in hookEntries {
             var eventArray = hooks[event] as? [[String: Any]] ?? []
-            let alreadyExists = eventArray.contains { group in
-                guard let innerHooks = group["hooks"] as? [[String: Any]] else { return false }
-                return innerHooks.contains { ($0["command"] as? String)?.contains("ghostty-agents/hooks/") == true }
-            }
-            if alreadyExists { continue }
             eventArray.append(["hooks": [["type": "command", "command": scriptPath, "timeout": 5]]])
             hooks[event] = eventArray
         }

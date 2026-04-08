@@ -126,15 +126,6 @@ struct AgentSearchView: View {
 
             Spacer()
 
-            if let pct = bridge.state(for: result.key).contextPercent {
-                Text("\(pct)%")
-                    .font(.system(.caption2, design: .monospaced))
-                    .foregroundStyle(.quaternary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Color.primary.opacity(0.04), in: Capsule())
-            }
-
             stateLabel(for: result.key)
         }
         .padding(.horizontal, 16)
