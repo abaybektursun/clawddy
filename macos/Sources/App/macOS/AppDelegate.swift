@@ -688,6 +688,22 @@ class AppDelegate: NSObject,
         syncDockBadge()
     }
 
+    private func requestBadgeAuthorizationAndSet(_ center: UNUserNotificationCenter) {
+        center.requestAuthorization(options: [.badge]) { granted, error in
+            if let error = error {
+                Self.logger.warning("Error requesting badge authorization: \(error)")
+                return
+            }
+
+            // Permission granted, set the badge
+            if granted {
+                DispatchQueue.main.async {
+                    self.setDockBadge()
+                }
+            }
+        }
+    }
+
     private func syncDockBadge() {
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
@@ -698,23 +714,16 @@ class AppDelegate: NSObject,
                     DispatchQueue.main.async {
                         self.setDockBadge()
                     }
+                } else if settings.badgeSetting == .notSupported {
+                    // If badge setting is not supported, we may be in a sandbox that doesn't allow it.
+                    // We can still attempt to set the badge and hope for the best, but we should also
+                    // request authorization just in case it is a permissions issue.
+                    self.requestBadgeAuthorizationAndSet(center)
                 }
 
             case .notDetermined:
                 // Not determined yet, request authorization for badge
-                center.requestAuthorization(options: [.badge]) { granted, error in
-                    if let error = error {
-                        Self.logger.warning("Error requesting badge authorization: \(error)")
-                        return
-                    }
-
-                    if granted {
-                        // Permission granted, set the badge
-                        DispatchQueue.main.async {
-                            self.setDockBadge()
-                        }
-                    }
-                }
+                self.requestBadgeAuthorizationAndSet(center)
 
             case .denied, .provisional, .ephemeral:
                 // In these known non-authorized states, do not attempt to set the badge.
@@ -1339,8 +1348,8 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "start_search", menuItem: self.menuFind)
         syncMenuShortcut(config, action: "search_selection", menuItem: self.menuSelectionForFind)
         syncMenuShortcut(config, action: "scroll_to_selection", menuItem: self.menuScrollToSelection)
-        syncMenuShortcut(config, action: "search:next", menuItem: self.menuFindNext)
-        syncMenuShortcut(config, action: "search:previous", menuItem: self.menuFindPrevious)
+        syncMenuShortcut(config, action: "navigate_search:next", menuItem: self.menuFindNext)
+        syncMenuShortcut(config, action: "navigate_search:previous", menuItem: self.menuFindPrevious)
 
         syncMenuShortcut(config, action: "toggle_split_zoom", menuItem: self.menuZoomSplit)
         syncMenuShortcut(config, action: "goto_split:previous", menuItem: self.menuPreviousSplit)
