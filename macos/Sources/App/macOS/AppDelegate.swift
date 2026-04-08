@@ -322,6 +322,7 @@ class AppDelegate: NSObject,
 
         // Agent management menu bar icon
         setupAgentStatusItem()
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
         switch Ghostty.launchSource {
         case .app:
@@ -1111,17 +1112,46 @@ extension AppDelegate {
     }
 
     /// Setup all the images for our menu items.
-    // MARK: - Agent Management
+    // MARK: - Clawddy
 
     private func setupAgentStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "person.3.fill", accessibilityDescription: "Agents")
+            button.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Clawddy")
             button.action = #selector(agentStatusItemClicked)
             button.target = self
         }
         agentStatusItem = item
+        agentBridge.onAggregateStateChanged = { [weak self] state in
+            self?.updateAgentStatusIcon(state)
+        }
         registerAgentSearchHotKey()
+    }
+
+    private func updateAgentStatusIcon(_ state: AggregateState) {
+        guard let button = agentStatusItem?.button else { return }
+        switch state {
+        case .idle:
+            button.image = NSImage(
+                systemSymbolName: "terminal",
+                accessibilityDescription: "Clawddy"
+            )
+            button.contentTintColor = nil
+        case .running(let count):
+            let config = NSImage.SymbolConfiguration(paletteColors: [.controlAccentColor])
+            button.image = NSImage(
+                systemSymbolName: "terminal.fill",
+                accessibilityDescription: "Agents — \(count) active"
+            )?.withSymbolConfiguration(config)
+            button.contentTintColor = nil
+        case .attention:
+            let config = NSImage.SymbolConfiguration(paletteColors: [.systemOrange])
+            button.image = NSImage(
+                systemSymbolName: "terminal.fill",
+                accessibilityDescription: "Agents — needs attention"
+            )?.withSymbolConfiguration(config)
+            button.contentTintColor = nil
+        }
     }
 
     private func registerAgentSearchHotKey() {
@@ -1157,14 +1187,18 @@ extension AppDelegate {
                 bridge: agentBridge,
                 onSelectAgent: { [weak self] key, displayName, project in
                     self?.activateAgent(key: key, displayName: displayName, project: project)
+                },
+                onRekeyAgent: { [weak self] oldKey, newKey in
+                    self?.agentDetailVC?.rekeySurface(old: oldKey, new: newKey)
                 }
             ))
 
             let controller = AgentWorkspaceController(sidebarView: sidebarView, detailViewController: detailVC)
             let window = makeAgentWorkspaceWindow(controller: controller)
 
-            // Match window appearance to Ghostty's theme so sidebar colors align
+            // Match window appearance + background to Ghostty's theme
             syncWorkspaceAppearance(window)
+            detailVC.setBackgroundColor(NSColor(ghostty.config.backgroundColor))
             agentWorkspaceWindow = window
         }
 
@@ -1192,15 +1226,17 @@ extension AppDelegate {
     }
 
     private func syncWorkspaceAppearance(_ window: NSWindow) {
-        // Use the same logic Ghostty uses for terminal windows:
-        // derive appearance from config's window-theme and background color.
+        let bg = NSColor(ghostty.config.backgroundColor)
+
+        // Match NSAppearance (light/dark) to Ghostty's theme
         if let appearance = NSAppearance(ghosttyConfig: ghostty.config) {
             window.appearance = appearance
         } else {
-            // No explicit theme — match the terminal's background color luminance
-            let bg = NSColor(ghostty.config.backgroundColor)
             window.appearance = NSAppearance(named: bg.isLightColor ? .aqua : .darkAqua)
         }
+
+        // Set actual window background to match the terminal
+        window.backgroundColor = bg
     }
 
     private func toggleAgentSearch() {

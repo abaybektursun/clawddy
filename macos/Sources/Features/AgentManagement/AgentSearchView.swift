@@ -110,7 +110,7 @@ struct AgentSearchView: View {
     private func resultRow(_ result: AgentSearchResult, selected: Bool) -> some View {
         HStack(spacing: 10) {
             Circle()
-                .fill(dotColor(for: result.key))
+                .fill(bridge.state(for: result.key).color)
                 .frame(width: 8, height: 8)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -126,7 +126,7 @@ struct AgentSearchView: View {
 
             Spacer()
 
-            if let pct = contextPercent(for: result.key) {
+            if let pct = bridge.state(for: result.key).contextPercent {
                 Text("\(pct)%")
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(.quaternary)
@@ -151,33 +151,10 @@ struct AgentSearchView: View {
         onDismiss()
     }
 
-    private func dotColor(for key: String) -> Color {
-        switch bridge.state(for: key) {
-        case .notStarted:   return .gray
-        case .terminalOnly: return .indigo
-        case .claudeActive: return .cyan
-        case .claudeIdle:   return .orange
-        }
-    }
-
-    private func contextPercent(for key: String) -> Int? {
-        switch bridge.state(for: key) {
-        case .claudeActive(let pct): return pct
-        case .claudeIdle(let pct):   return pct
-        default: return nil
-        }
-    }
-
     private func stateLabel(for key: String) -> some View {
         let state = bridge.state(for: key)
-        let (text, color): (String, Color) = switch state {
-        case .notStarted:   ("idle", .gray)
-        case .terminalOnly: ("terminal", .indigo)
-        case .claudeActive: ("active", .cyan)
-        case .claudeIdle:   ("idle", .orange)
-        }
-        return Text(text)
+        return Text(state.label)
             .font(.system(.caption2, design: .monospaced, weight: .medium))
-            .foregroundStyle(color)
+            .foregroundStyle(state.color)
     }
 }

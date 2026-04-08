@@ -1,24 +1,44 @@
 import SwiftUI
 import GhosttyKit
 
+private enum EditTarget: Equatable {
+    case project(String)
+    case task(project: String, task: String)
+}
+
 struct AgentSidebarView: View {
     @ObservedObject var config: AgentConfig
-    @ObservedObject var bridge: AgentTerminalBridge
+    var bridge: AgentTerminalBridge
     let onSelectAgent: (String, String, AgentProject) -> Void
+    var onRekeyAgent: ((String, String) -> Void)?
 
     @State private var selectedKey: String?
     @State private var editText = ""
     @State private var addingAgentTo: (project: String, task: String)?
+    @State private var editing: EditTarget?
+    @State private var pendingDirectory: (project: String, path: String)?
+
+    // Snapshot of states — updated by timer, avoids @ObservedObject on bridge
+    @State private var stateSnapshot: [String: AgentState] = [:]
 
     var body: some View {
-        VStack(spacing: 0) {
+        Group {
             if config.projects.isEmpty {
                 emptyState
             } else {
                 agentList
             }
-            Divider()
-            bottomBar
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 0) {
+                Divider()
+                bottomBar
+            }
+        }
+        .onAppear { stateSnapshot = bridge.agentStates }
+        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
+            let current = bridge.agentStates
+            if current != stateSnapshot { stateSnapshot = current }
         }
     }
 
@@ -62,23 +82,47 @@ struct AgentSidebarView: View {
 
     private func projectHeader(_ project: AgentProject) -> some View {
         HStack(spacing: 0) {
-            // Name — takes priority, never truncated
-            Text(project.name.uppercased())
-                .font(.system(.caption, design: .monospaced, weight: .bold))
-                .tracking(1.0)
+            if editing == .project(project.name) {
+                TextField("Project name", text: $editText)
+                    .textFieldStyle(.plain)
+                    .font(.system(.caption, design: .monospaced, weight: .bold))
+                    .onSubmit { confirmRenameProject(old: project.name) }
+                    .onExitCommand { editing = nil }
+            } else {
+                Text(project.name.uppercased())
+                    .font(.system(.caption, design: .monospaced, weight: .bold))
+                    .tracking(1.0)
+                    .onTapGesture(count: 2) {
+                        addingAgentTo = nil
+                        editText = project.name
+                        editing = .project(project.name)
+                    }
+            }
 
             Spacer(minLength: 8)
 
-            // Menu — fixed size, always accessible
             Menu {
                 Button("Add Task") {
                     let name = "Task \(project.tasks.count + 1)"
                     config.addTask(project: project.name, name: name)
                 }
+                Button("Rename Project") {
+                    addingAgentTo = nil
+                    editText = project.name
+                    editing = .project(project.name)
+                }
                 Button("Set Directory\u{2026}") { pickDirectory(project: project.name) }
                 Divider()
                 Button("Delete Project", role: .destructive) {
-                    config.removeProject(name: project.name)
+                    DispatchQueue.main.async {
+                        for task in project.tasks {
+                            for agent in task.agents {
+                                let key = AgentConfig.agentKey(project: project.name, task: task.name, agent: agent)
+                                bridge.stopTracking(agent: key)
+                            }
+                        }
+                        config.removeProject(name: project.name)
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -94,14 +138,17 @@ struct AgentSidebarView: View {
 
     @ViewBuilder
     private func projectContent(_ project: AgentProject) -> some View {
-        // Working directory subtitle (under the section header)
         if let dir = project.workingDirectory {
             Text(compactPath(dir))
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.quaternary)
                 .lineLimit(1)
                 .listRowSeparator(.hidden)
-                .padding(.bottom, 2)
+                .padding(.bottom, 6)
+        }
+
+        if pendingDirectory?.project == project.name {
+            directoryWarning(project: project)
         }
 
         if project.tasks.isEmpty {
@@ -112,11 +159,9 @@ struct AgentSidebarView: View {
         }
 
         ForEach(project.tasks) { task in
-            // Task label — not selectable (no .tag), visually distinct
             taskLabel(task, project: project)
                 .listRowSeparator(.hidden)
 
-            // Agents under this task
             ForEach(task.agents, id: \.self) { agent in
                 let key = AgentConfig.agentKey(project: project.name, task: task.name, agent: agent)
                 agentRow(agent: agent, key: key, projectName: project.name, taskName: task.name)
@@ -127,7 +172,6 @@ struct AgentSidebarView: View {
                     }
             }
 
-            // Inline "add agent" field
             if let adding = addingAgentTo,
                adding.project == project.name,
                adding.task == task.name {
@@ -140,18 +184,31 @@ struct AgentSidebarView: View {
 
     private func taskLabel(_ task: AgentTask, project: AgentProject) -> some View {
         HStack(spacing: 6) {
-            // Subtle line to indicate hierarchy
             RoundedRectangle(cornerRadius: 1)
                 .fill(Color.secondary.opacity(0.15))
                 .frame(width: 2, height: 12)
 
-            Text(task.name)
-                .font(.system(.caption, design: .monospaced, weight: .medium))
-                .foregroundStyle(.secondary)
+            if editing == .task(project: project.name, task: task.name) {
+                TextField("Task name", text: $editText)
+                    .textFieldStyle(.plain)
+                    .font(.system(.caption, design: .monospaced, weight: .medium))
+                    .onSubmit { confirmRenameTask(project: project.name, old: task.name) }
+                    .onExitCommand { editing = nil }
+            } else {
+                Text(task.name)
+                    .font(.system(.caption, design: .monospaced, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .onTapGesture(count: 2) {
+                        addingAgentTo = nil
+                        editText = task.name
+                        editing = .task(project: project.name, task: task.name)
+                    }
+            }
 
             Spacer(minLength: 4)
 
             Button {
+                editing = nil
                 addingAgentTo = (project.name, task.name)
                 editText = ""
             } label: {
@@ -163,20 +220,17 @@ struct AgentSidebarView: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.top, 6)
+        .padding(.top, 8)
         .padding(.bottom, 2)
     }
 
     // MARK: - Agent Row
-    //
-    // Layout budget (sidebar min 220pt, list insets ~16pt each side = 188pt usable):
-    //   dot(8) + gap(10) + name(flex) + gap(8) + pct(28) + gap(6) + icon(14) = 74pt fixed + name
-    //   Name gets at least 114pt — enough for ~12 monospaced chars at 13pt.
 
     private func agentRow(agent: String, key: String, projectName: String, taskName: String) -> some View {
         let isSelected = selectedKey == key
+        let state = stateSnapshot[key] ?? .notStarted
         return HStack(spacing: 10) {
-            statusDot(for: key)
+            statusDot(state)
                 .frame(width: 8, height: 8)
 
             Text(agent)
@@ -187,7 +241,7 @@ struct AgentSidebarView: View {
             Spacer(minLength: 4)
 
             HStack(spacing: 6) {
-                if let pct = contextPercent(for: key) {
+                if let pct = state.contextPercent {
                     Text("\(pct)%")
                         .font(.system(.caption2, design: .monospaced))
                         .foregroundStyle(.quaternary)
@@ -195,7 +249,7 @@ struct AgentSidebarView: View {
                         .frame(minWidth: 28, alignment: .trailing)
                 }
 
-                stateIndicator(for: key)
+                stateIndicator(state)
                     .frame(width: 14, alignment: .center)
             }
         }
@@ -207,8 +261,10 @@ struct AgentSidebarView: View {
         )
         .contextMenu {
             Button("Delete Agent", role: .destructive) {
-                bridge.stopTracking(agent: key)
-                config.removeAgent(project: projectName, task: taskName, name: agent)
+                DispatchQueue.main.async {
+                    bridge.stopTracking(agent: key)
+                    config.removeAgent(project: projectName, task: taskName, name: agent)
+                }
             }
         }
     }
@@ -233,6 +289,7 @@ struct AgentSidebarView: View {
                 .onExitCommand { addingAgentTo = nil }
         }
         .padding(.vertical, 4)
+        .padding(.horizontal, 6)
     }
 
     // MARK: - Bottom Bar
@@ -264,56 +321,23 @@ struct AgentSidebarView: View {
         .padding(.vertical, 10)
     }
 
-    // MARK: - Status Dot
+    // MARK: - Status Visuals
 
     @ViewBuilder
-    private func statusDot(for key: String) -> some View {
-        let state = bridge.state(for: key)
+    private func statusDot(_ state: AgentState) -> some View {
         if state == .notStarted {
             Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 1)
         } else {
-            Circle().foregroundColor(dotColor(for: state))
+            Circle().foregroundColor(state.color)
         }
     }
-
-    private func dotColor(for state: AgentState) -> Color {
-        switch state {
-        case .notStarted:   return .gray
-        case .terminalOnly: return .indigo
-        case .claudeActive: return .cyan
-        case .claudeIdle:   return .orange
-        }
-    }
-
-    // MARK: - State Indicator
 
     @ViewBuilder
-    private func stateIndicator(for key: String) -> some View {
-        switch bridge.state(for: key) {
-        case .claudeActive:
-            Image(systemName: "bolt.fill")
+    private func stateIndicator(_ state: AgentState) -> some View {
+        if let icon = state.iconName {
+            Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.cyan)
-        case .claudeIdle:
-            Image(systemName: "moon.fill")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.orange)
-        case .terminalOnly:
-            Image(systemName: "terminal")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.indigo)
-        case .notStarted:
-            EmptyView()
-        }
-    }
-
-    // MARK: - Context Percent
-
-    private func contextPercent(for key: String) -> Int? {
-        switch bridge.state(for: key) {
-        case .claudeActive(let pct): return pct
-        case .claudeIdle(let pct):   return pct
-        default: return nil
+                .foregroundStyle(state.color)
         }
     }
 
@@ -331,9 +355,117 @@ struct AgentSidebarView: View {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Select"
+        panel.message = "Working directory for all agents in this project"
         guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let project = config.projects.first(where: { $0.name == name })
+        let hasExistingDir = project?.workingDirectory != nil
+        let hasAgents = !(project?.tasks.flatMap(\.agents).isEmpty ?? true)
+
+        if hasExistingDir && hasAgents {
+            pendingDirectory = (name, url.path)
+        } else {
+            applyWorkingDirectory(project: name, path: url.path)
+        }
+    }
+
+    private func applyWorkingDirectory(project name: String, path: String) {
         guard let i = config.projects.firstIndex(where: { $0.name == name }) else { return }
-        config.projects[i].workingDirectory = url.path
+        for task in config.projects[i].tasks {
+            for agent in task.agents {
+                bridge.clearSession(
+                    agent: AgentConfig.agentKey(project: name, task: task.name, agent: agent)
+                )
+            }
+        }
+        config.projects[i].workingDirectory = path
         config.save()
+    }
+
+    // MARK: - Rename
+
+    private func confirmRenameProject(old: String) {
+        let new = editText.trimmingCharacters(in: .whitespaces)
+        if !new.isEmpty && new != old {
+            if let project = config.projects.first(where: { $0.name == old }) {
+                for task in project.tasks {
+                    for agent in task.agents {
+                        let oldKey = AgentConfig.agentKey(project: old, task: task.name, agent: agent)
+                        let newKey = AgentConfig.agentKey(project: new, task: task.name, agent: agent)
+                        bridge.rekey(old: oldKey, new: newKey)
+                        onRekeyAgent?(oldKey, newKey)
+                    }
+                }
+            }
+            config.renameProject(old: old, new: new)
+        }
+        editing = nil
+    }
+
+    private func confirmRenameTask(project: String, old: String) {
+        let new = editText.trimmingCharacters(in: .whitespaces)
+        if !new.isEmpty && new != old {
+            if let proj = config.projects.first(where: { $0.name == project }),
+               let task = proj.tasks.first(where: { $0.name == old }) {
+                for agent in task.agents {
+                    let oldKey = AgentConfig.agentKey(project: project, task: old, agent: agent)
+                    let newKey = AgentConfig.agentKey(project: project, task: new, agent: agent)
+                    bridge.rekey(old: oldKey, new: newKey)
+                    onRekeyAgent?(oldKey, newKey)
+                }
+            }
+            config.renameTask(project: project, old: old, new: new)
+        }
+        editing = nil
+    }
+
+    // MARK: - Directory Warning
+
+    private func directoryWarning(project: AgentProject) -> some View {
+        let agentCount = project.tasks.flatMap(\.agents).count
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .font(.system(.caption))
+                Text("AGENT SESSIONS WILL BE LOST")
+                    .font(.system(.caption2, design: .monospaced, weight: .bold))
+                    .foregroundStyle(.red)
+            }
+
+            Text("\(agentCount) agent\(agentCount == 1 ? "" : "s") will lose conversation history.")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.red.opacity(0.8))
+
+            HStack(spacing: 12) {
+                Button {
+                    guard let pending = pendingDirectory else { return }
+                    pendingDirectory = nil
+                    applyWorkingDirectory(project: pending.project, path: pending.path)
+                } label: {
+                    Text("Reset Sessions")
+                        .font(.system(.caption2, design: .monospaced, weight: .bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(.red, in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    pendingDirectory = nil
+                } label: {
+                    Text("Cancel")
+                        .font(.system(.caption2, design: .monospaced, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(10)
+        .background(.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.red.opacity(0.25), lineWidth: 0.5))
+        .listRowSeparator(.hidden)
+        .padding(.bottom, 6)
     }
 }

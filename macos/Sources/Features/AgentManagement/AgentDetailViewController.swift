@@ -1,6 +1,9 @@
 import AppKit
 import SwiftUI
 import GhosttyKit
+import os
+
+private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "AgentDetail")
 
 /// Hosts the active agent's terminal surface in the detail pane.
 /// Surfaces are created on first activation and hidden (not destroyed) when switching.
@@ -17,6 +20,12 @@ final class AgentDetailViewController: NSViewController {
     private var headerModel = AgentDetailHeaderModel()
 
     private let headerHeight: CGFloat = 36
+
+    /// Set the background color to match Ghostty's terminal theme.
+    func setBackgroundColor(_ color: NSColor) {
+        headerModel.backgroundColor = Color(nsColor: color)
+        view.layer?.backgroundColor = color.cgColor
+    }
 
     override func loadView() {
         view = NSView()
@@ -72,6 +81,7 @@ final class AgentDetailViewController: NSViewController {
 
         // Create surface + scroll wrapper if first time
         if surfaceWrappers[key] == nil {
+            logger.info("creating new surface for key=\(key)")
             let (app, config) = createConfig()
             let surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
             let scrollWrapper = SurfaceScrollView(
@@ -107,6 +117,7 @@ final class AgentDetailViewController: NSViewController {
 
     /// Destroy a specific agent's surface.
     func removeSurface(key: String) {
+        logger.info("removeSurface key=\(key) (total=\(self.surfaceWrappers.count))")
         if let wrapper = surfaceWrappers.removeValue(forKey: key) {
             wrapper.removeFromSuperview()
         }
@@ -122,6 +133,19 @@ final class AgentDetailViewController: NSViewController {
     func hasSurface(key: String) -> Bool {
         surfaceWrappers[key] != nil
     }
+
+    /// Re-map a surface from one key to another (e.g. after rename).
+    func rekeySurface(old: String, new: String) {
+        if let wrapper = surfaceWrappers.removeValue(forKey: old) {
+            surfaceWrappers[new] = wrapper
+        }
+        if let surface = surfaceViews.removeValue(forKey: old) {
+            surfaceViews[new] = surface
+        }
+        if activeKey == old {
+            activeKey = new
+        }
+    }
 }
 
 // MARK: - Header
@@ -130,6 +154,7 @@ class AgentDetailHeaderModel: ObservableObject {
     @Published var agentName: String = ""
     @Published var projectName: String = ""
     @Published var isActive: Bool = false
+    @Published var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
 }
 
 private struct AgentDetailHeaderView: View {
@@ -156,7 +181,7 @@ private struct AgentDetailHeaderView: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.bar)
+        .background(model.backgroundColor.opacity(0.9))
     }
 }
 
@@ -176,6 +201,11 @@ private struct AgentPlaceholderView: View {
             Text("Click an agent in the sidebar to open its terminal")
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.quaternary)
+
+            Text("Clawddy")
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.quaternary.opacity(0.5))
+                .padding(.top, 8)
         }
     }
 }

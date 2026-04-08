@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "AgentConfig")
 
 struct AgentProject: Codable, Identifiable {
     var name: String
@@ -20,6 +23,7 @@ struct AgentConfigFile: Codable {
 class AgentConfig: ObservableObject {
     @Published var projects: [AgentProject] = []
     private var fileWatcher: DispatchSourceFileSystemObject?
+    private var suppressWatch = false
 
     static var configURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -61,15 +65,21 @@ class AgentConfig: ObservableObject {
               let data = try? Data(contentsOf: Self.configURL),
               let config = try? JSONDecoder().decode(AgentConfigFile.self, from: data)
         else { return }
+        logger.info("load — \(config.projects.count) projects")
         projects = config.projects
     }
 
     func save() {
+        logger.info("save — \(self.projects.count) projects")
+        suppressWatch = true
         let config = AgentConfigFile(projects: projects)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try! encoder.encode(config)
         try! data.write(to: Self.configURL)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.suppressWatch = false
+        }
     }
 
     // MARK: - Projects
@@ -157,7 +167,7 @@ class AgentConfig: ObservableObject {
 
     private static let onSessionStartScript = """
         #!/bin/sh
-        # GhosttyAgents — SessionStart hook (captures session ID for resume)
+        # Clawddy — SessionStart hook (captures session ID for resume)
         [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
         INPUT=$(cat)
         SID=$(echo "$INPUT" | /usr/bin/jq -r '.session_id // empty')
@@ -166,7 +176,7 @@ class AgentConfig: ObservableObject {
 
     private static let onToolScript = """
         #!/bin/sh
-        # GhosttyAgents — PostToolUse heartbeat
+        # Clawddy — PostToolUse heartbeat
         [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
         cat > /dev/null
         DIR="$HOME/.config/ghostty-agents/status"
@@ -175,7 +185,7 @@ class AgentConfig: ObservableObject {
 
     private static let onStopScript = """
         #!/bin/sh
-        # GhosttyAgents — Stop hook (Claude finished responding)
+        # Clawddy — Stop hook (Claude finished responding)
         [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
         cat > /dev/null
         rm -f "$HOME/.config/ghostty-agents/status/$GHOSTTY_AGENT_NAME.heartbeat"
@@ -266,7 +276,9 @@ class AgentConfig: ObservableObject {
             fileDescriptor: fd, eventMask: .write, queue: .main
         )
         source.setEventHandler { [weak self] in
-            self?.load()
+            guard let self, !self.suppressWatch else { return }
+            logger.info("file watcher triggered — reloading")
+            self.load()
         }
         source.setCancelHandler { close(fd) }
         source.resume()
