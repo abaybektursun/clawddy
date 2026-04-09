@@ -13,7 +13,6 @@ struct AgentSidebarView: View {
     let onSelectAgent: (String, String, AgentProject) -> Void
     var onRekeyAgent: ((String, String) -> Void)?
     var onForkAgent: ((String, String, String, AgentProject) -> Void)?  // sourceKey, newKey, newName, project
-    var onSendTextToAgent: ((String, String) -> Void)?  // key, text
 
     @State private var selectedKey: String?
     @State private var editText = ""
@@ -519,9 +518,9 @@ struct AgentSidebarView: View {
         bridge.rekey(old: oldKey, new: newKey)
         onRekeyAgent?(oldKey, newKey)
 
-        // Send /rename to the running Claude session so its display name updates too.
-        // We use the new key (since the surface was just rekeyed).
-        onSendTextToAgent?(newKey, "/rename \(new)\n")
+        // Request /rename — sent immediately if Claude is in a safe state,
+        // otherwise deferred until it transitions to one (no input is ever lost).
+        bridge.requestRename(agent: newKey, newName: new)
     }
 
     // MARK: - Directory Warning

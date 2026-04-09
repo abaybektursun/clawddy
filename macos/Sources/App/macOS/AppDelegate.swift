@@ -1150,6 +1150,10 @@ extension AppDelegate {
             self?.updateAgentStatusIcon(state)
             self?.syncDockBadge()
         }
+        // Allow the bridge to inject text into agent terminals (e.g., deferred renames)
+        agentBridge.onSendText = { [weak self] key, text in
+            self?.agentDetailVC?.sendText(text, toAgent: key)
+        }
         registerAgentSearchHotKey()
     }
 
@@ -1221,9 +1225,6 @@ extension AppDelegate {
                 },
                 onForkAgent: { [weak self] sourceKey, newKey, newName, project in
                     self?.forkAgent(sourceKey: sourceKey, newKey: newKey, newName: newName, project: project)
-                },
-                onSendTextToAgent: { [weak self] key, text in
-                    self?.agentDetailVC?.sendText(text, toAgent: key)
                 }
             ))
 

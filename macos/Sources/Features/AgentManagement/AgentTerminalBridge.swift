@@ -120,6 +120,15 @@ class AgentTerminalBridge: ObservableObject {
     /// When an agent in this set has state .idle, it's surfaced as .finished instead.
     private var unreadAgents: Set<String> = []
 
+    /// Renames waiting to be sent to Claude. Held when the agent is in an
+    /// unsafe state (e.g., permission dialog) and flushed when it returns
+    /// to a safe state. Only the latest rename per agent is kept.
+    private var pendingRenames: [String: String] = [:]
+
+    /// Callback to send text to a specific agent's terminal pty.
+    /// Set by AppDelegate so the bridge can inject deferred /rename commands.
+    var onSendText: ((String, String) -> Void)?
+
     init() {
         logger.info("init — starting poll timer (3s) and status watcher")
         // Clean stale agent scripts from previous builds
@@ -142,6 +151,30 @@ class AgentTerminalBridge: ObservableObject {
 
     func state(for key: String) -> AgentState {
         agentStates[key] ?? .notStarted
+    }
+
+    /// Whether it's safe to inject text into an agent's pty given its current state.
+    /// Safe states are when Claude's REPL is showing (idle/finished/thinking/working).
+    /// Unsafe states have a modal dialog or aren't running Claude at all.
+    private func isSafeForInput(_ state: AgentState) -> Bool {
+        switch state {
+        case .idle, .finished, .thinking, .working: return true
+        case .notStarted, .terminalOnly, .needsPermission, .error: return false
+        }
+    }
+
+    /// Request a rename for an agent. If Claude is in a safe state, sends
+    /// `/rename <name>` immediately. Otherwise stores it as a pending rename
+    /// that will be flushed when the agent returns to a safe state.
+    func requestRename(agent key: String, newName: String) {
+        let state = self.state(for: key)
+        if isSafeForInput(state) {
+            logger.info("requestRename: sending /rename for \(key) immediately")
+            onSendText?(key, "/rename \(newName)\n")
+        } else {
+            logger.info("requestRename: deferring /rename for \(key) (state=\(state.label))")
+            pendingRenames[key] = newName
+        }
     }
 
     /// Mark an agent's finished work as seen by the user.
@@ -181,6 +214,7 @@ class AgentTerminalBridge: ObservableObject {
         activeSurfaceKeys.remove(key)
         agentStates.removeValue(forKey: key)
         unreadAgents.remove(key)
+        pendingRenames.removeValue(forKey: key)
         removeFile("\(key).state")
         removeFile("\(key).session")
         removeFile("\(key).forkFrom")
@@ -199,6 +233,9 @@ class AgentTerminalBridge: ObservableObject {
         }
         if unreadAgents.remove(old) != nil {
             unreadAgents.insert(new)
+        }
+        if let pending = pendingRenames.removeValue(forKey: old) {
+            pendingRenames[new] = pending
         }
     }
 
@@ -333,6 +370,14 @@ class AgentTerminalBridge: ObservableObject {
                     title: "Agent error",
                     body: "\(key) encountered an error"
                 )
+            }
+
+            // Flush pending rename if this agent just entered a safe state
+            if isSafeForInput(newState),
+               !isSafeForInput(oldState),
+               let pendingName = pendingRenames.removeValue(forKey: key) {
+                logger.info("flushing deferred /rename for \(key)")
+                onSendText?(key, "/rename \(pendingName)\n")
             }
         }
 
