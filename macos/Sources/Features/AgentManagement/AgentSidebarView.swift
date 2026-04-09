@@ -9,7 +9,7 @@ private enum EditTarget: Equatable {
 
 struct AgentSidebarView: View {
     @ObservedObject var config: AgentConfig
-    var bridge: AgentTerminalBridge
+    @ObservedObject var bridge: AgentTerminalBridge
     let onSelectAgent: (String, String, AgentProject) -> Void
     var onRekeyAgent: ((String, String) -> Void)?
     var onForkAgent: ((String, String, String, AgentProject) -> Void)?  // sourceKey, newKey, newName, project
@@ -21,9 +21,6 @@ struct AgentSidebarView: View {
     @State private var editing: EditTarget?
     @State private var pendingDirectory: (project: String, path: String)?
     @State private var hoveredKey: String?
-
-    // Snapshot of states — updated by timer, avoids @ObservedObject on bridge
-    @State private var stateSnapshot: [String: AgentState] = [:]
 
     var body: some View {
         Group {
@@ -38,11 +35,6 @@ struct AgentSidebarView: View {
                 Divider()
                 bottomBar
             }
-        }
-        .onAppear { stateSnapshot = bridge.agentStates }
-        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
-            let current = bridge.agentStates
-            if current != stateSnapshot { stateSnapshot = current }
         }
     }
 
@@ -233,7 +225,7 @@ struct AgentSidebarView: View {
     private func agentRow(agent: String, key: String, project: AgentProject, task: AgentTask) -> some View {
         let isSelected = selectedKey == key
         let isHovered = hoveredKey == key
-        let state = stateSnapshot[key] ?? .notStarted
+        let state = bridge.state(for: key)
         let isEditing = editing == .agent(project: project.name, task: task.name, agent: agent)
         return HStack(spacing: 10) {
             statusDot(state)

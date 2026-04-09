@@ -121,10 +121,12 @@ class AgentTerminalBridge: ObservableObject {
     private var unreadAgents: Set<String> = []
 
     init() {
-        logger.info("init — starting poll timer (5s) and status watcher")
+        logger.info("init — starting poll timer (3s) and status watcher")
         // Clean stale agent scripts from previous builds
         Self.cleanStaleScripts()
-        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        // Safety net poll — the file watcher should fire on every state change,
+        // but this catches anything missed (e.g., if a write happens during throttle).
+        timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.schedulePoll()
         }
         watchStatusDirectory()
@@ -431,7 +433,8 @@ class AgentTerminalBridge: ObservableObject {
         source.setEventHandler { [weak self] in
             guard let self, !self.watcherThrottled else { return }
             self.watcherThrottled = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            // Short throttle: feels instant but coalesces rapid PostToolUse bursts.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 self?.watcherThrottled = false
                 self?.schedulePoll()
             }
