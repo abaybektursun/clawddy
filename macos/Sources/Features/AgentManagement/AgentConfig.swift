@@ -153,6 +153,19 @@ class AgentConfig: ObservableObject {
         save()
     }
 
+    @discardableResult
+    func renameAgent(project: String, task: String, old: String, new: String) -> Bool {
+        guard let pi = projects.firstIndex(where: { $0.name == project }),
+              let ti = projects[pi].tasks.firstIndex(where: { $0.name == task }),
+              let ai = projects[pi].tasks[ti].agents.firstIndex(of: old),
+              !new.isEmpty, new != old,
+              !projects[pi].tasks.flatMap(\.agents).contains(new)
+        else { return false }
+        projects[pi].tasks[ti].agents[ai] = new
+        save()
+        return true
+    }
+
     // MARK: - Hooks
 
     private static var hooksDir: URL {

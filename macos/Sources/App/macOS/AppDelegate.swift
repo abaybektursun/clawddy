@@ -1221,6 +1221,9 @@ extension AppDelegate {
                 },
                 onForkAgent: { [weak self] sourceKey, newKey, newName, project in
                     self?.forkAgent(sourceKey: sourceKey, newKey: newKey, newName: newName, project: project)
+                },
+                onSendTextToAgent: { [weak self] key, text in
+                    self?.agentDetailVC?.sendText(text, toAgent: key)
                 }
             ))
 

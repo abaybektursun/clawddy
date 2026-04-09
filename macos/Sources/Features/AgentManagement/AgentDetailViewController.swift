@@ -146,6 +146,13 @@ final class AgentDetailViewController: NSViewController {
             activeKey = new
         }
     }
+
+    /// Send text to a specific agent's terminal as if it was typed.
+    /// Used to send `/rename <name>` to Claude Code on agent rename.
+    func sendText(_ text: String, toAgent key: String) {
+        guard let surface = surfaceViews[key]?.surfaceModel else { return }
+        surface.sendText(text)
+    }
 }
 
 // MARK: - Header

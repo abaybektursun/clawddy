@@ -4,6 +4,7 @@ import GhosttyKit
 private enum EditTarget: Equatable {
     case project(String)
     case task(project: String, task: String)
+    case agent(project: String, task: String, agent: String)
 }
 
 struct AgentSidebarView: View {
@@ -12,6 +13,7 @@ struct AgentSidebarView: View {
     let onSelectAgent: (String, String, AgentProject) -> Void
     var onRekeyAgent: ((String, String) -> Void)?
     var onForkAgent: ((String, String, String, AgentProject) -> Void)?  // sourceKey, newKey, newName, project
+    var onSendTextToAgent: ((String, String) -> Void)?  // key, text
 
     @State private var selectedKey: String?
     @State private var editText = ""
@@ -230,14 +232,30 @@ struct AgentSidebarView: View {
     private func agentRow(agent: String, key: String, project: AgentProject, task: AgentTask) -> some View {
         let isSelected = selectedKey == key
         let state = stateSnapshot[key] ?? .notStarted
+        let isEditing = editing == .agent(project: project.name, task: task.name, agent: agent)
         return HStack(spacing: 10) {
             statusDot(state)
                 .frame(width: 8, height: 8)
 
-            Text(agent)
-                .font(.system(.body, design: .monospaced, weight: isSelected ? .semibold : .medium))
-                .lineLimit(1)
-                .truncationMode(.tail)
+            if isEditing {
+                TextField("agent name", text: $editText)
+                    .textFieldStyle(.plain)
+                    .font(.system(.body, design: .monospaced, weight: .medium))
+                    .onSubmit {
+                        confirmRenameAgent(project: project.name, task: task.name, old: agent)
+                    }
+                    .onExitCommand { editing = nil }
+            } else {
+                Text(agent)
+                    .font(.system(.body, design: .monospaced, weight: isSelected ? .semibold : .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .onTapGesture(count: 2) {
+                        addingAgentTo = nil
+                        editText = agent
+                        editing = .agent(project: project.name, task: task.name, agent: agent)
+                    }
+            }
 
             Spacer(minLength: 4)
 
@@ -259,6 +277,11 @@ struct AgentSidebarView: View {
                 .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
         )
         .contextMenu {
+            Button("Rename Agent") {
+                addingAgentTo = nil
+                editText = agent
+                editing = .agent(project: project.name, task: task.name, agent: agent)
+            }
             Button("Fork Agent") {
                 forkAgent(sourceAgent: agent, sourceKey: key, project: project, task: task)
             }
@@ -439,6 +462,25 @@ struct AgentSidebarView: View {
             config.renameTask(project: project, old: old, new: new)
         }
         editing = nil
+    }
+
+    private func confirmRenameAgent(project: String, task: String, old: String) {
+        let new = editText.trimmingCharacters(in: .whitespaces)
+        defer { editing = nil }
+        guard !new.isEmpty, new != old else { return }
+
+        let oldKey = AgentConfig.agentKey(project: project, task: task, agent: old)
+        let newKey = AgentConfig.agentKey(project: project, task: task, agent: new)
+
+        guard config.renameAgent(project: project, task: task, old: old, new: new) else { return }
+
+        // Update bridge state and surface mapping
+        bridge.rekey(old: oldKey, new: newKey)
+        onRekeyAgent?(oldKey, newKey)
+
+        // Send /rename to the running Claude session so its display name updates too.
+        // We use the new key (since the surface was just rekeyed).
+        onSendTextToAgent?(newKey, "/rename \(new)\n")
     }
 
     // MARK: - Directory Warning

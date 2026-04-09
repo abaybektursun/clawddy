@@ -179,10 +179,10 @@ class AgentTerminalBridge: ObservableObject {
               claude --resume "$(cat "$SESSION_FILE")" --permission-mode auto
               rm -f "$SESSION_FILE"
             elif [ -f "$FORK_FILE" ]; then
-              # First launch: fork from source agent's session
+              # First launch: fork from source agent's session, with our own name
               SOURCE_ID=$(cat "$FORK_FILE")
               rm -f "$FORK_FILE"
-              claude --resume "$SOURCE_ID" --fork-session --permission-mode auto
+              claude --resume "$SOURCE_ID" --fork-session --name '\(escapedDisplay)' --permission-mode auto
             else
               # Fresh start
               claude --name '\(escapedDisplay)' --permission-mode auto
