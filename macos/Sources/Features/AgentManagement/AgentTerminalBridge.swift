@@ -142,6 +142,7 @@ class AgentTerminalBridge: ObservableObject {
         agentStates.removeValue(forKey: key)
         removeFile("\(key).state")
         removeFile("\(key).session")
+        removeFile("\(key).forkFrom")
     }
 
     func clearSession(agent key: String) {
@@ -172,10 +173,18 @@ class AgentTerminalBridge: ObservableObject {
             printf '\\033]2;%s\\007' '\(escapedDisplay)'
             clear
             SESSION_FILE="\(statusDir)/$GHOSTTY_AGENT_NAME.session"
+            FORK_FILE="\(statusDir)/$GHOSTTY_AGENT_NAME.forkFrom"
             if [ -f "$SESSION_FILE" ]; then
+              # Normal resume of existing session
               claude --resume "$(cat "$SESSION_FILE")" --permission-mode auto
               rm -f "$SESSION_FILE"
+            elif [ -f "$FORK_FILE" ]; then
+              # First launch: fork from source agent's session
+              SOURCE_ID=$(cat "$FORK_FILE")
+              rm -f "$FORK_FILE"
+              claude --resume "$SOURCE_ID" --fork-session --permission-mode auto
             else
+              # Fresh start
               claude --name '\(escapedDisplay)' --permission-mode auto
             fi
             exec zsh -l
@@ -183,6 +192,21 @@ class AgentTerminalBridge: ObservableObject {
         FileManager.default.createFile(atPath: scriptPath, contents: content.data(using: .utf8))
         try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
         return scriptPath
+    }
+
+    /// Read a source agent's session ID so a new agent can fork from it.
+    func sessionID(for key: String) -> String? {
+        let url = statusDir.appendingPathComponent("\(key).session")
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Mark a new agent to fork from a source session on first launch.
+    func markForkSource(key: String, sourceSessionID: String) {
+        let url = statusDir.appendingPathComponent("\(key).forkFrom")
+        try? sourceSessionID.write(to: url, atomically: true, encoding: .utf8)
+        logger.info("markForkSource: \(key) will fork from \(sourceSessionID)")
     }
 
     // MARK: - State Polling

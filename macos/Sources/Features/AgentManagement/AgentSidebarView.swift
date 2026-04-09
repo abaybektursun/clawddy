@@ -11,6 +11,7 @@ struct AgentSidebarView: View {
     var bridge: AgentTerminalBridge
     let onSelectAgent: (String, String, AgentProject) -> Void
     var onRekeyAgent: ((String, String) -> Void)?
+    var onForkAgent: ((String, String, String, AgentProject) -> Void)?  // sourceKey, newKey, newName, project
 
     @State private var selectedKey: String?
     @State private var editText = ""
@@ -164,7 +165,7 @@ struct AgentSidebarView: View {
 
             ForEach(task.agents, id: \.self) { agent in
                 let key = AgentConfig.agentKey(project: project.name, task: task.name, agent: agent)
-                agentRow(agent: agent, key: key, projectName: project.name, taskName: task.name)
+                agentRow(agent: agent, key: key, project: project, task: task)
                     .contentShape(Rectangle())
                     .onTapGesture {
                         selectedKey = key
@@ -226,7 +227,7 @@ struct AgentSidebarView: View {
 
     // MARK: - Agent Row
 
-    private func agentRow(agent: String, key: String, projectName: String, taskName: String) -> some View {
+    private func agentRow(agent: String, key: String, project: AgentProject, task: AgentTask) -> some View {
         let isSelected = selectedKey == key
         let state = stateSnapshot[key] ?? .notStarted
         return HStack(spacing: 10) {
@@ -258,13 +259,36 @@ struct AgentSidebarView: View {
                 .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
         )
         .contextMenu {
+            Button("Fork Agent") {
+                forkAgent(sourceAgent: agent, sourceKey: key, project: project, task: task)
+            }
+            Divider()
             Button("Delete Agent", role: .destructive) {
                 DispatchQueue.main.async {
                     bridge.stopTracking(agent: key)
-                    config.removeAgent(project: projectName, task: taskName, name: agent)
+                    config.removeAgent(project: project.name, task: task.name, name: agent)
                 }
             }
         }
+    }
+
+    // MARK: - Fork
+
+    private func forkAgent(sourceAgent: String, sourceKey: String, project: AgentProject, task: AgentTask) {
+        // Generate a unique name: {name}-fork, {name}-fork-2, etc.
+        let existingAgents = Set(task.agents)
+        var newName = "\(sourceAgent)-fork"
+        var suffix = 2
+        while existingAgents.contains(newName) {
+            newName = "\(sourceAgent)-fork-\(suffix)"
+            suffix += 1
+        }
+
+        // Add new agent to config
+        guard config.addAgent(project: project.name, task: task.name, name: newName) else { return }
+
+        let newKey = AgentConfig.agentKey(project: project.name, task: task.name, agent: newName)
+        onForkAgent?(sourceKey, newKey, newName, project)
     }
 
     // MARK: - New Agent Field

@@ -1199,6 +1199,9 @@ extension AppDelegate {
                 },
                 onRekeyAgent: { [weak self] oldKey, newKey in
                     self?.agentDetailVC?.rekeySurface(old: oldKey, new: newKey)
+                },
+                onForkAgent: { [weak self] sourceKey, newKey, newName, project in
+                    self?.forkAgent(sourceKey: sourceKey, newKey: newKey, newName: newName, project: project)
                 }
             ))
 
@@ -1213,6 +1216,15 @@ extension AppDelegate {
 
         agentWorkspaceWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func forkAgent(sourceKey: String, newKey: String, newName: String, project: AgentProject) {
+        // Read the source agent's session ID; if not available, fall back to fresh start.
+        if let sourceSessionID = agentBridge.sessionID(for: sourceKey) {
+            agentBridge.markForkSource(key: newKey, sourceSessionID: sourceSessionID)
+        }
+        // Activate the new agent (will use the .forkFrom marker to fork on first launch)
+        activateAgent(key: newKey, displayName: newName, project: project)
     }
 
     private func activateAgent(key: String, displayName: String, project: AgentProject) {
