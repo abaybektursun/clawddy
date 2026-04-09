@@ -9,7 +9,8 @@ private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "Agent
 enum AgentState: Equatable {
     case notStarted        // no terminal surface
     case terminalOnly      // terminal running, claude not active
-    case idle              // claude waiting for user input
+    case idle              // claude waiting for user input (acknowledged)
+    case finished          // claude just finished, user hasn't seen it yet
     case thinking          // user submitted prompt, claude processing
     case working           // claude using tools
     case needsPermission   // claude waiting for permission approval
@@ -20,6 +21,7 @@ enum AgentState: Equatable {
         case .notStarted:       return .secondary.opacity(0.3)
         case .terminalOnly:     return .secondary.opacity(0.5)
         case .idle:             return .secondary
+        case .finished:         return .yellow
         case .thinking:         return .blue
         case .working:          return .green
         case .needsPermission:  return .orange
@@ -32,6 +34,7 @@ enum AgentState: Equatable {
     var selectionTint: Color {
         switch self {
         case .notStarted, .terminalOnly, .idle: return .accentColor
+        case .finished:         return .yellow
         case .thinking:         return .blue
         case .working:          return .green
         case .needsPermission:  return .orange
@@ -44,6 +47,7 @@ enum AgentState: Equatable {
         case .notStarted:       return ""
         case .terminalOnly:     return "shell"
         case .idle:             return "idle"
+        case .finished:         return "finished"
         case .thinking:         return "thinking"
         case .working:          return "working"
         case .needsPermission:  return "permission"
@@ -57,6 +61,7 @@ enum AgentState: Equatable {
         case .working:          return "bolt.fill"
         case .needsPermission:  return "exclamationmark.circle.fill"
         case .error:            return "xmark.circle.fill"
+        case .finished:         return "bell.badge.fill"
         case .idle:             return "moon.fill"
         case .terminalOnly:     return "terminal"
         case .notStarted:       return nil
@@ -71,10 +76,10 @@ enum AgentState: Equatable {
         }
     }
 
-    /// Whether this state needs user attention.
+    /// Whether this state needs user attention (drives dock badge + menu bar tint).
     var needsAttention: Bool {
         switch self {
-        case .needsPermission, .error: return true
+        case .needsPermission, .error, .finished: return true
         default: return false
         }
     }
@@ -111,6 +116,10 @@ class AgentTerminalBridge: ObservableObject {
     private var watcherThrottled = false
     private let pollQueue = DispatchQueue(label: "com.mitchellh.ghostty.agentpoll", qos: .utility)
 
+    /// Agents that have finished but the user hasn't viewed them yet.
+    /// When an agent in this set has state .idle, it's surfaced as .finished instead.
+    private var unreadAgents: Set<String> = []
+
     init() {
         logger.info("init — starting poll timer (5s) and status watcher")
         // Clean stale agent scripts from previous builds
@@ -133,6 +142,23 @@ class AgentTerminalBridge: ObservableObject {
         agentStates[key] ?? .notStarted
     }
 
+    /// Mark an agent's finished work as seen by the user.
+    /// Called when the user activates/views the agent.
+    func markRead(_ key: String) {
+        guard unreadAgents.contains(key) else { return }
+        unreadAgents.remove(key)
+        // If the agent was being shown as .finished, refresh it to .idle
+        if agentStates[key] == .finished {
+            agentStates[key] = .idle
+            // Aggregate may have changed (one fewer attention)
+            let current = aggregateState
+            if !aggregateStateEqual(lastAggregateState, current) {
+                lastAggregateState = current
+                onAggregateStateChanged?(current)
+            }
+        }
+    }
+
     // MARK: - Surface Tracking
 
     func markSurfaceActive(_ key: String) {
@@ -152,6 +178,7 @@ class AgentTerminalBridge: ObservableObject {
         logger.info("stopTracking: \(key) (activeKeys=\(self.activeSurfaceKeys.count))")
         activeSurfaceKeys.remove(key)
         agentStates.removeValue(forKey: key)
+        unreadAgents.remove(key)
         removeFile("\(key).state")
         removeFile("\(key).session")
         removeFile("\(key).forkFrom")
@@ -167,6 +194,9 @@ class AgentTerminalBridge: ObservableObject {
         }
         if let state = agentStates.removeValue(forKey: old) {
             agentStates[new] = state
+        }
+        if unreadAgents.remove(old) != nil {
+            unreadAgents.insert(new)
         }
     }
 
@@ -240,8 +270,31 @@ class AgentTerminalBridge: ObservableObject {
         }
     }
 
-    private func applyStates(_ newStates: [String: AgentState]) {
+    private func applyStates(_ rawStates: [String: AgentState]) {
         let oldStates = agentStates
+
+        // Compute display states: if an agent was previously active and is now idle,
+        // mark it as unread and surface it as .finished until the user views it.
+        // If an agent goes back to active, clear unread.
+        var newStates: [String: AgentState] = [:]
+        for (key, raw) in rawStates {
+            let oldState = oldStates[key] ?? .notStarted
+
+            if raw.isActive {
+                // Agent is active again — clear any unread
+                unreadAgents.remove(key)
+                newStates[key] = raw
+            } else if raw == .idle && oldState.isActive {
+                // Just transitioned active → idle — mark as unread/finished
+                unreadAgents.insert(key)
+                newStates[key] = .finished
+            } else if raw == .idle && unreadAgents.contains(key) {
+                // Already unread — keep showing as finished
+                newStates[key] = .finished
+            } else {
+                newStates[key] = raw
+            }
+        }
 
         if newStates != oldStates {
             agentStates = newStates
@@ -250,8 +303,8 @@ class AgentTerminalBridge: ObservableObject {
         for (key, newState) in newStates {
             let oldState = oldStates[key] ?? .notStarted
 
-            // Agent finished working → idle
-            if oldState.isActive && newState == .idle {
+            // Agent finished working → idle/finished
+            if oldState.isActive && (newState == .finished || newState == .idle) {
                 postNotification(
                     agentKey: key,
                     kind: .finished,

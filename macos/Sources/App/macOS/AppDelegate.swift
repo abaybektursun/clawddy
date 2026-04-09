@@ -1252,6 +1252,9 @@ extension AppDelegate {
     private func activateAgent(key: String, displayName: String, project: AgentProject) {
         guard let app = ghostty.app, let detailVC = agentDetailVC else { return }
 
+        // Clear unread / "finished" state — user is now viewing this agent
+        agentBridge.markRead(key)
+
         // Only write script and create config for new surfaces
         let isNew = detailVC.showOrSwitch(key: key, displayName: displayName, projectName: project.name) {
             let scriptPath = self.agentBridge.writeAgentScript(key: key, displayName: displayName)
