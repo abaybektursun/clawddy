@@ -27,6 +27,18 @@ enum AgentState: Equatable {
         }
     }
 
+    /// The tint applied to the selected row's Liquid Glass background.
+    /// Selecting an agent amplifies its current state visually.
+    var selectionTint: Color {
+        switch self {
+        case .notStarted, .terminalOnly, .idle: return .accentColor
+        case .thinking:         return .blue
+        case .working:          return .green
+        case .needsPermission:  return .orange
+        case .error:            return .red
+        }
+    }
+
     var label: String {
         switch self {
         case .notStarted:       return ""

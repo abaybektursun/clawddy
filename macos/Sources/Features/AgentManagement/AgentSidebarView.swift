@@ -20,6 +20,7 @@ struct AgentSidebarView: View {
     @State private var addingAgentTo: (project: String, task: String)?
     @State private var editing: EditTarget?
     @State private var pendingDirectory: (project: String, path: String)?
+    @State private var hoveredKey: String?
 
     // Snapshot of states — updated by timer, avoids @ObservedObject on bridge
     @State private var stateSnapshot: [String: AgentState] = [:]
@@ -231,11 +232,12 @@ struct AgentSidebarView: View {
 
     private func agentRow(agent: String, key: String, project: AgentProject, task: AgentTask) -> some View {
         let isSelected = selectedKey == key
+        let isHovered = hoveredKey == key
         let state = stateSnapshot[key] ?? .notStarted
         let isEditing = editing == .agent(project: project.name, task: task.name, agent: agent)
         return HStack(spacing: 10) {
             statusDot(state)
-                .frame(width: 8, height: 8)
+                .frame(width: 10, height: 10)
 
             if isEditing {
                 TextField("agent name", text: $editText)
@@ -259,23 +261,28 @@ struct AgentSidebarView: View {
 
             Spacer(minLength: 4)
 
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 if !state.label.isEmpty {
                     Text(state.label)
-                        .font(.system(.caption2, design: .monospaced))
+                        .font(.system(.caption2, design: .rounded, weight: .medium))
                         .foregroundStyle(state.color)
+                        .contentTransition(.opacity)
                 }
 
                 stateIndicator(state)
                     .frame(width: 14, alignment: .center)
             }
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
-        .background(
-            RoundedRectangle(cornerRadius: 6)
-                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-        )
+        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .background(rowBackground(state: state, isSelected: isSelected, isHovered: isHovered))
+        .onHover { hovering in
+            if hovering {
+                hoveredKey = key
+            } else if hoveredKey == key {
+                hoveredKey = nil
+            }
+        }
         .contextMenu {
             Button("Rename Agent") {
                 addingAgentTo = nil
@@ -292,6 +299,30 @@ struct AgentSidebarView: View {
                     config.removeAgent(project: project.name, task: task.name, name: agent)
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func rowBackground(state: AgentState, isSelected: Bool, isHovered: Bool) -> some View {
+        if #available(macOS 26.0, *) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 8)
+                    .glassEffect(
+                        .regular.tint(state.selectionTint.opacity(0.28)),
+                        in: .rect(cornerRadius: 8)
+                    )
+            } else if isHovered {
+                RoundedRectangle(cornerRadius: 8)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 8))
+            } else {
+                Color.clear
+            }
+        } else {
+            // Fallback for macOS < 26
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected
+                    ? state.selectionTint.opacity(0.18)
+                    : (isHovered ? Color.secondary.opacity(0.08) : Color.clear))
         }
     }
 
@@ -370,19 +401,37 @@ struct AgentSidebarView: View {
 
     @ViewBuilder
     private func statusDot(_ state: AgentState) -> some View {
-        if state == .notStarted {
-            Circle().stroke(Color.secondary.opacity(0.3), lineWidth: 1)
+        let base = Image(systemName: state == .notStarted ? "circle" : "circle.fill")
+            .font(.system(size: 8, weight: .medium))
+            .foregroundStyle(state.color)
+        if #available(macOS 14.0, *) {
+            base
+                .symbolEffect(.pulse, options: .repeating, isActive: state == .thinking)
+                .symbolEffect(
+                    .variableColor.iterative.reversing,
+                    options: .repeating,
+                    isActive: state == .working || state == .needsPermission
+                )
+                .contentTransition(.symbolEffect(.replace))
         } else {
-            Circle().foregroundColor(state.color)
+            base
         }
     }
 
     @ViewBuilder
     private func stateIndicator(_ state: AgentState) -> some View {
         if let icon = state.iconName {
-            Image(systemName: icon)
+            let base = Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(state.color)
+            if #available(macOS 14.0, *) {
+                base
+                    .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.bounce, value: state == .error)
+            } else {
+                base
+            }
         }
     }
 
