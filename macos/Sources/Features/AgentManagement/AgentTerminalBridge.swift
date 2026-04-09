@@ -240,17 +240,32 @@ class AgentTerminalBridge: ObservableObject {
 
             // Agent finished working → idle
             if oldState.isActive && newState == .idle {
-                postNotification(title: "Agent finished", body: "\(key) is now idle")
+                postNotification(
+                    agentKey: key,
+                    kind: .finished,
+                    title: "Agent finished",
+                    body: "\(key) is ready for next prompt"
+                )
             }
 
             // Agent needs permission
             if newState == .needsPermission && oldState != .needsPermission {
-                postNotification(title: "Permission needed", body: "\(key) is waiting for approval", sound: .defaultCritical)
+                postNotification(
+                    agentKey: key,
+                    kind: .permission,
+                    title: "Permission needed",
+                    body: "\(key) is waiting for approval"
+                )
             }
 
             // Agent hit an error
             if newState == .error && oldState != .error {
-                postNotification(title: "Agent error", body: "\(key) encountered an error")
+                postNotification(
+                    agentKey: key,
+                    kind: .error,
+                    title: "Agent error",
+                    body: "\(key) encountered an error"
+                )
             }
         }
 
@@ -271,12 +286,43 @@ class AgentTerminalBridge: ObservableObject {
         }
     }
 
-    private func postNotification(title: String, body: String, sound: UNNotificationSound = .default) {
+    private enum NotificationKind {
+        case finished      // passive — quiet, just appears in notification center
+        case permission    // timeSensitive — bypasses Focus, persistent
+        case error         // active — default banner, plays sound
+    }
+
+    private func postNotification(
+        agentKey: String,
+        kind: NotificationKind,
+        title: String,
+        body: String
+    ) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = sound
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        // Group notifications per agent in Notification Center
+        content.threadIdentifier = agentKey
+        // Pass agent key so the tap handler knows which agent to focus
+        content.userInfo = ["clawddy_agent_key": agentKey]
+
+        switch kind {
+        case .finished:
+            content.sound = nil
+            content.interruptionLevel = .passive
+        case .permission:
+            content.sound = .defaultCritical
+            content.interruptionLevel = .timeSensitive
+        case .error:
+            content.sound = .default
+            content.interruptionLevel = .active
+        }
+
+        let request = UNNotificationRequest(
+            identifier: "clawddy.\(agentKey).\(UUID().uuidString)",
+            content: content,
+            trigger: nil
+        )
         UNUserNotificationCenter.current().add(request)
     }
 

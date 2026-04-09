@@ -322,7 +322,7 @@ class AppDelegate: NSObject,
 
         // Agent management menu bar icon
         setupAgentStatusItem()
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
 
         switch Ghostty.launchSource {
         case .app:
@@ -760,8 +760,12 @@ class AppDelegate: NSObject,
         let bellCount = NSApp.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .reduce(0) { $0 + ($1.bell ? 1 : 0) }
-        let wantsBadge = ghostty.config.bellFeatures.contains(.attention) && bellCount > 0
-        let label = wantsBadge ? (bellCount > 99 ? "99+" : String(bellCount)) : nil
+        let bellWantsBadge = ghostty.config.bellFeatures.contains(.attention) && bellCount > 0
+
+        let agentAttentionCount = agentBridge.agentStates.values.filter(\.needsAttention).count
+        let totalCount = (bellWantsBadge ? bellCount : 0) + agentAttentionCount
+
+        let label = totalCount > 0 ? (totalCount > 99 ? "99+" : String(totalCount)) : nil
         NSApp.dockTile.badgeLabel = label
         NSApp.dockTile.display()
     }
@@ -915,6 +919,12 @@ class AppDelegate: NSObject,
         didReceive: UNNotificationResponse,
         withCompletionHandler: () -> Void
     ) {
+        // Clawddy: tap on an agent notification opens the workspace
+        if didReceive.notification.request.identifier.hasPrefix("clawddy.") {
+            showAgentWorkspace()
+            withCompletionHandler()
+            return
+        }
         ghostty.handleUserNotification(response: didReceive)
         withCompletionHandler()
     }
@@ -924,6 +934,11 @@ class AppDelegate: NSObject,
         willPresent: UNNotification,
         withCompletionHandler: (UNNotificationPresentationOptions) -> Void
     ) {
+        // Clawddy notifications: present as banner with badge always
+        if willPresent.request.identifier.hasPrefix("clawddy.") {
+            withCompletionHandler([.banner, .sound, .badge, .list])
+            return
+        }
         let shouldPresent = ghostty.shouldPresentNotification(notification: willPresent)
         let options: UNNotificationPresentationOptions = shouldPresent ? [.banner, .sound] : []
         withCompletionHandler(options)
@@ -1133,6 +1148,7 @@ extension AppDelegate {
         agentStatusItem = item
         agentBridge.onAggregateStateChanged = { [weak self] state in
             self?.updateAgentStatusIcon(state)
+            self?.syncDockBadge()
         }
         registerAgentSearchHotKey()
     }
@@ -1187,6 +1203,9 @@ extension AppDelegate {
     }
 
     private func showAgentWorkspace() {
+        // Clear delivered notifications when opening the workspace
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+
         if agentWorkspaceWindow == nil {
             let detailVC = AgentDetailViewController()
             self.agentDetailVC = detailVC
