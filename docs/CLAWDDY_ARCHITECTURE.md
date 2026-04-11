@@ -228,10 +228,12 @@ One script, all events. Atomic writes via tmp+mv. **Zero external dependencies**
 #!/bin/sh
 [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
 DIR="$HOME/.config/ghostty-agents/status"
+mkdir -p "$DIR" 2>/dev/null
 INPUT=$(cat)
 
 # Extract session_id with sed (no jq dependency)
-SID=$(echo "$INPUT" | sed -n 's/.*"session_id" *: *"\([^"]*\)".*/\1/p' | head -1)
+# tr -d '\n' normalizes multiline JSON — sed is line-based
+SID=$(echo "$INPUT" | tr -d '\n' | sed -n 's/.*"session_id" *: *"\([^"]*\)".*/\1/p')
 
 # Atomic write: session ID (PID-suffixed tmp to avoid concurrent hook race)
 if [ -n "$SID" ]; then
@@ -420,36 +422,33 @@ source.setEventHandler { [weak self] in
 
 ## Process Death Detection
 
-### Primary: surface destruction callback
+### Primary: poll processExited
 
-When creating a surface, register for close notification. **Store observer token for cleanup.**
+Ghostty's `close_surface_cb` is a global callback on `Ghostty.App` that doesn't identify WHICH surface closed. Routing to the correct agent requires Ghostty-internal context we don't control. Instead, use the simpler and more reliable `surfaceView.processExited` property — a direct C call (`ghostty_surface_process_exited(surface)`) that checks the PTY child.
+
+Checked every `schedulePoll` cycle (already on main thread — surface access is safe):
 
 ```swift
-var surfaceObservers: [UUID: NSObjectProtocol] = [:]
-
-// On surface creation
-let token = NotificationCenter.default.addObserver(
-    forName: .ghosttyDidCloseSurface,   // verify this exists; fall back to polling if not
-    object: surfaceView,
-    queue: .main
-) { [weak self] _ in
-    self?.handleSurfaceDeath(id: agentId)
-}
-surfaceObservers[agentId] = token
-
-// Fallback: poll processExited in schedulePoll (MUST be on main thread — surface access)
 func schedulePoll() {
     guard !isTerminating else { return }
-    // Main thread: check process exits
+
+    // Main thread: check process exits for all surfaces
     for (id, surface) in surfaceViews {
         if surface.processExited {
             handleSurfaceDeath(id: id)
         }
     }
+
+    // Also ensure status directory exists (in case deleted externally)
+    try? FileManager.default.createDirectory(at: statusDir, withIntermediateDirectories: true)
+
     // Background: file I/O
-    ...
+    let ids = Array(agents.keys)
+    ioQueue.async { ... }
 }
 ```
+
+No NotificationCenter observers. No observer lifecycle management. Simpler, no Ghostty notification dependency.
 
 ### handleSurfaceDeath
 
@@ -460,10 +459,6 @@ func handleSurfaceDeath(id: UUID) {
     agent.claudeState = .unknown
     surfaceViews.removeValue(forKey: id)
     surfaceWrappers.removeValue(forKey: id)
-    // Remove observer
-    if let token = surfaceObservers.removeValue(forKey: id) {
-        NotificationCenter.default.removeObserver(token)
-    }
     // Don't delete .session — user may want to resume later
     // If this was the active agent, show placeholder
     if detailVC?.activeKey == id {
@@ -612,6 +607,37 @@ func reconstructState() {
 
 **On activation (not startup):** reset `processState = .launching`, `claudeState = .unknown`, `launchTime = Date()`. Prevents stale state leak.
 
+### Config-bridge reconciliation
+
+After every `load()` (file watcher, startup, migration), reconcile bridge with config. Handles external config edits (manual JSON editing, other tools):
+
+```swift
+func reconcileWithConfig() {
+    let allEntries = config.allAgentEntries
+    let configIds = Set(allEntries.map(\.id))
+
+    // Create instances for entries added externally
+    for entry in allEntries where agents[entry.id] == nil {
+        let instance = AgentInstance(id: entry.id, name: entry.name)
+        instance.processState = .inactive
+        agents[entry.id] = instance
+    }
+
+    // Remove instances for entries deleted externally
+    for id in agents.keys where !configIds.contains(id) {
+        handleSurfaceDeath(id: id)
+        agents.removeValue(forKey: id)
+    }
+
+    // Sync display names (in case external edit renamed)
+    for entry in allEntries {
+        agents[entry.id]?.name = entry.name
+    }
+}
+```
+
+Called after `load()` and `reconstructState()`. Ensures bridge always mirrors config, even for external edits.
+
 ---
 
 ## Activation Flow (step by step)
@@ -739,10 +765,9 @@ Symbol effects: `.symbolEffect` gated to macOS 14+.
 2. Invalidate poll timer
 3. Cancel status directory watcher DispatchSource (closes fd)
 4. Cancel config directory watcher DispatchSource (closes fd)
-5. Remove all surface observers (surfaceObservers.values.forEach removeObserver)
-6. Unregister Carbon hotkey via UnregisterEventHotKey(ref)
-7. Remove Carbon event handler via RemoveEventHandler(ref)
-8. Persist state.json (final flush — unread + pendingRenames)
+5. Unregister Carbon hotkey via UnregisterEventHotKey(ref)
+6. Remove Carbon event handler via RemoveEventHandler(ref)
+7. Persist state.json (final flush — unread + pendingRenames)
 ```
 
 ### On app startup
