@@ -1,25 +1,22 @@
 import SwiftUI
 import GhosttyKit
 
-private enum EditTarget: Equatable {
-    case project(String)
-    case task(project: String, task: String)
-    case agent(project: String, task: String, agent: String)
-}
+// MARK: - Sidebar
 
 struct AgentSidebarView: View {
     @ObservedObject var config: AgentConfig
-    @ObservedObject var bridge: AgentTerminalBridge
-    let onSelectAgent: (String, String, AgentProject) -> Void
-    var onRekeyAgent: ((String, String) -> Void)?
-    var onForkAgent: ((String, String, String, AgentProject) -> Void)?  // sourceKey, newKey, newName, project
+    @ObservedObject var bridge: AgentBridge
+    let onSelectAgent: (UUID, AgentProject) -> Void
+    var onForkAgent: ((UUID, AgentProject, String) -> Void)?  // sourceId, project, task
 
-    @State private var selectedKey: String?
+    @State private var selectedID: UUID?
     @State private var editText = ""
     @State private var addingAgentTo: (project: String, task: String)?
-    @State private var editing: EditTarget?
+    @State private var editingProject: String?
+    @State private var editingTask: (project: String, task: String)?
+    @State private var editingAgent: UUID?
     @State private var pendingDirectory: (project: String, path: String)?
-    @State private var hoveredKey: String?
+    @State private var hoveredID: UUID?
 
     var body: some View {
         Group {
@@ -73,24 +70,23 @@ struct AgentSidebarView: View {
         .listStyle(.sidebar)
     }
 
-    // MARK: - Project
+    // MARK: - Project Header
 
     private func projectHeader(_ project: AgentProject) -> some View {
         HStack(spacing: 0) {
-            if editing == .project(project.name) {
+            if editingProject == project.name {
                 TextField("Project name", text: $editText)
                     .textFieldStyle(.plain)
                     .font(.system(.caption, design: .monospaced, weight: .bold))
                     .onSubmit { confirmRenameProject(old: project.name) }
-                    .onExitCommand { editing = nil }
+                    .onExitCommand { editingProject = nil }
             } else {
                 Text(project.name.uppercased())
                     .font(.system(.caption, design: .monospaced, weight: .bold))
                     .tracking(1.0)
                     .onTapGesture(count: 2) {
-                        addingAgentTo = nil
                         editText = project.name
-                        editing = .project(project.name)
+                        editingProject = project.name
                     }
             }
 
@@ -102,9 +98,8 @@ struct AgentSidebarView: View {
                     config.addTask(project: project.name, name: name)
                 }
                 Button("Rename Project") {
-                    addingAgentTo = nil
                     editText = project.name
-                    editing = .project(project.name)
+                    editingProject = project.name
                 }
                 Button("Set Directory\u{2026}") { pickDirectory(project: project.name) }
                 Divider()
@@ -112,8 +107,8 @@ struct AgentSidebarView: View {
                     DispatchQueue.main.async {
                         for task in project.tasks {
                             for agent in task.agents {
-                                let key = AgentConfig.agentKey(project: project.name, task: task.name, agent: agent)
-                                bridge.stopTracking(agent: key)
+                                bridge.deleteAgent(id: agent.id, config: config,
+                                    detailVC: findDetailVC())
                             }
                         }
                         config.removeProject(name: project.name)
@@ -130,6 +125,8 @@ struct AgentSidebarView: View {
             .fixedSize()
         }
     }
+
+    // MARK: - Project Content
 
     @ViewBuilder
     private func projectContent(_ project: AgentProject) -> some View {
@@ -157,14 +154,40 @@ struct AgentSidebarView: View {
             taskLabel(task, project: project)
                 .listRowSeparator(.hidden)
 
-            ForEach(task.agents, id: \.self) { agent in
-                let key = AgentConfig.agentKey(project: project.name, task: task.name, agent: agent)
-                agentRow(agent: agent, key: key, project: project, task: task)
+            ForEach(task.agents) { entry in
+                if let agent = bridge.agents[entry.id] {
+                    AgentRow(
+                        agent: agent,
+                        isSelected: selectedID == entry.id,
+                        isHovered: hoveredID == entry.id,
+                        isEditing: editingAgent == entry.id,
+                        editText: editingAgent == entry.id ? $editText : .constant(""),
+                        onCommitRename: { confirmRenameAgent(id: entry.id) },
+                        onCancelEdit: { editingAgent = nil }
+                    )
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        selectedKey = key
-                        onSelectAgent(key, agent, project)
+                        selectedID = entry.id
+                        onSelectAgent(entry.id, project)
                     }
+                    .onHover { h in hoveredID = h ? entry.id : (hoveredID == entry.id ? nil : hoveredID) }
+                    .contextMenu {
+                        Button("Rename Agent") {
+                            editText = agent.name
+                            editingAgent = entry.id
+                        }
+                        Button("Fork Agent") {
+                            onForkAgent?(entry.id, project, task.name)
+                        }
+                        Divider()
+                        Button("Delete Agent", role: .destructive) {
+                            DispatchQueue.main.async {
+                                bridge.deleteAgent(id: entry.id, config: config,
+                                    detailVC: findDetailVC())
+                            }
+                        }
+                    }
+                }
             }
 
             if let adding = addingAgentTo,
@@ -183,29 +206,27 @@ struct AgentSidebarView: View {
                 .fill(Color.secondary.opacity(0.15))
                 .frame(width: 2, height: 12)
 
-            if editing == .task(project: project.name, task: task.name) {
+            if editingTask?.project == project.name && editingTask?.task == task.name {
                 TextField("Task name", text: $editText)
                     .textFieldStyle(.plain)
                     .font(.system(.caption, design: .monospaced, weight: .medium))
                     .onSubmit { confirmRenameTask(project: project.name, old: task.name) }
-                    .onExitCommand { editing = nil }
+                    .onExitCommand { editingTask = nil }
             } else {
                 Text(task.name)
                     .font(.system(.caption, design: .monospaced, weight: .medium))
                     .foregroundStyle(.secondary)
                     .onTapGesture(count: 2) {
-                        addingAgentTo = nil
                         editText = task.name
-                        editing = .task(project: project.name, task: task.name)
+                        editingTask = (project.name, task.name)
                     }
             }
 
             Spacer(minLength: 4)
 
             Button {
-                editing = nil
-                addingAgentTo = (project.name, task.name)
                 editText = ""
+                addingAgentTo = (project.name, task.name)
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 10, weight: .medium))
@@ -217,123 +238,6 @@ struct AgentSidebarView: View {
         }
         .padding(.top, 8)
         .padding(.bottom, 2)
-    }
-
-    // MARK: - Agent Row
-
-    private func agentRow(agent: String, key: String, project: AgentProject, task: AgentTask) -> some View {
-        let isSelected = selectedKey == key
-        let isHovered = hoveredKey == key
-        let state = bridge.state(for: key)
-        let isEditing = editing == .agent(project: project.name, task: task.name, agent: agent)
-        return HStack(spacing: 10) {
-            statusDot(state)
-                .frame(width: 10, height: 10)
-
-            if isEditing {
-                TextField("agent name", text: $editText)
-                    .textFieldStyle(.plain)
-                    .font(.system(.body, design: .monospaced, weight: .medium))
-                    .onSubmit {
-                        confirmRenameAgent(project: project.name, task: task.name, old: agent)
-                    }
-                    .onExitCommand { editing = nil }
-            } else {
-                Text(agent)
-                    .font(.system(.body, design: .monospaced, weight: isSelected ? .semibold : .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .onTapGesture(count: 2) {
-                        addingAgentTo = nil
-                        editText = agent
-                        editing = .agent(project: project.name, task: task.name, agent: agent)
-                    }
-            }
-
-            Spacer(minLength: 4)
-
-            HStack(spacing: 6) {
-                if !state.label.isEmpty {
-                    Text(state.label)
-                        .font(.system(.caption2, design: .rounded, weight: .medium))
-                        .foregroundStyle(state.color)
-                        .contentTransition(.opacity)
-                }
-
-                stateIndicator(state)
-                    .frame(width: 14, alignment: .center)
-            }
-        }
-        .padding(.vertical, 5)
-        .padding(.horizontal, 8)
-        .background(rowBackground(state: state, isSelected: isSelected, isHovered: isHovered))
-        .onHover { hovering in
-            if hovering {
-                hoveredKey = key
-            } else if hoveredKey == key {
-                hoveredKey = nil
-            }
-        }
-        .contextMenu {
-            Button("Rename Agent") {
-                addingAgentTo = nil
-                editText = agent
-                editing = .agent(project: project.name, task: task.name, agent: agent)
-            }
-            Button("Fork Agent") {
-                forkAgent(sourceAgent: agent, sourceKey: key, project: project, task: task)
-            }
-            Divider()
-            Button("Delete Agent", role: .destructive) {
-                DispatchQueue.main.async {
-                    bridge.stopTracking(agent: key)
-                    config.removeAgent(project: project.name, task: task.name, name: agent)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func rowBackground(state: AgentState, isSelected: Bool, isHovered: Bool) -> some View {
-        if #available(macOS 26.0, *) {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 8)
-                    .glassEffect(
-                        .regular.tint(state.selectionTint.opacity(0.28)),
-                        in: .rect(cornerRadius: 8)
-                    )
-            } else if isHovered {
-                RoundedRectangle(cornerRadius: 8)
-                    .glassEffect(.regular, in: .rect(cornerRadius: 8))
-            } else {
-                Color.clear
-            }
-        } else {
-            // Fallback for macOS < 26
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected
-                    ? state.selectionTint.opacity(0.18)
-                    : (isHovered ? Color.secondary.opacity(0.08) : Color.clear))
-        }
-    }
-
-    // MARK: - Fork
-
-    private func forkAgent(sourceAgent: String, sourceKey: String, project: AgentProject, task: AgentTask) {
-        // Generate a unique name: {name}-fork, {name}-fork-2, etc.
-        let existingAgents = Set(task.agents)
-        var newName = "\(sourceAgent)-fork"
-        var suffix = 2
-        while existingAgents.contains(newName) {
-            newName = "\(sourceAgent)-fork-\(suffix)"
-            suffix += 1
-        }
-
-        // Add new agent to config
-        guard config.addAgent(project: project.name, task: task.name, name: newName) else { return }
-
-        let newKey = AgentConfig.agentKey(project: project.name, task: task.name, agent: newName)
-        onForkAgent?(sourceKey, newKey, newName, project)
     }
 
     // MARK: - New Agent Field
@@ -348,7 +252,8 @@ struct AgentSidebarView: View {
                 .textFieldStyle(.plain)
                 .onSubmit {
                     let name = editText.trimmingCharacters(in: .whitespaces)
-                    if config.addAgent(project: project, task: task, name: name) {
+                    if let _ = bridge.createAgent(name: name, config: config,
+                        project: project, task: task) {
                         addingAgentTo = nil
                         editText = ""
                     }
@@ -379,7 +284,7 @@ struct AgentSidebarView: View {
 
             Spacer()
 
-            let count = config.allAgentNames.count
+            let count = config.allAgentEntries.count
             Text("\(count) agent\(count == 1 ? "" : "s")")
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.quaternary)
@@ -388,51 +293,34 @@ struct AgentSidebarView: View {
         .padding(.vertical, 10)
     }
 
-    // MARK: - Status Visuals
+    // MARK: - Rename Helpers
 
-    @ViewBuilder
-    private func statusDot(_ state: AgentState) -> some View {
-        let base = Image(systemName: state == .notStarted ? "circle" : "circle.fill")
-            .font(.system(size: 8, weight: .medium))
-            .foregroundStyle(state.color)
-        if #available(macOS 14.0, *) {
-            base
-                .symbolEffect(.pulse, options: .repeating, isActive: state == .thinking)
-                .symbolEffect(
-                    .variableColor.iterative.reversing,
-                    options: .repeating,
-                    isActive: state == .working || state == .needsPermission
-                )
-                .contentTransition(.symbolEffect(.replace))
-        } else {
-            base
+    private func confirmRenameProject(old: String) {
+        let new = editText.trimmingCharacters(in: .whitespaces)
+        if !new.isEmpty && new != old {
+            config.renameProject(old: old, new: new)
         }
+        editingProject = nil
     }
 
-    @ViewBuilder
-    private func stateIndicator(_ state: AgentState) -> some View {
-        if let icon = state.iconName {
-            let base = Image(systemName: icon)
-                .font(.system(size: 11, weight: .medium))
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(state.color)
-            if #available(macOS 14.0, *) {
-                base
-                    .contentTransition(.symbolEffect(.replace))
-                    .symbolEffect(.bounce, value: state == .error)
-            } else {
-                base
-            }
+    private func confirmRenameTask(project: String, old: String) {
+        let new = editText.trimmingCharacters(in: .whitespaces)
+        if !new.isEmpty && new != old {
+            config.renameTask(project: project, old: old, new: new)
         }
+        editingTask = nil
     }
 
-    // MARK: - Utilities
+    private func confirmRenameAgent(id: UUID) {
+        let new = editText.trimmingCharacters(in: .whitespaces)
+        defer { editingAgent = nil }
+        guard !new.isEmpty else { return }
 
-    private func compactPath(_ path: String) -> String {
-        let home = NSHomeDirectory()
-        if path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
-        return path
+        config.renameAgent(id: id, newName: new)
+        bridge.requestRename(id: id, newName: new)
     }
+
+    // MARK: - Directory
 
     private func pickDirectory(project name: String) {
         let panel = NSOpenPanel()
@@ -456,74 +344,9 @@ struct AgentSidebarView: View {
 
     private func applyWorkingDirectory(project name: String, path: String) {
         guard let i = config.projects.firstIndex(where: { $0.name == name }) else { return }
-        for task in config.projects[i].tasks {
-            for agent in task.agents {
-                bridge.clearSession(
-                    agent: AgentConfig.agentKey(project: name, task: task.name, agent: agent)
-                )
-            }
-        }
         config.projects[i].workingDirectory = path
         config.save()
     }
-
-    // MARK: - Rename
-
-    private func confirmRenameProject(old: String) {
-        let new = editText.trimmingCharacters(in: .whitespaces)
-        if !new.isEmpty && new != old {
-            if let project = config.projects.first(where: { $0.name == old }) {
-                for task in project.tasks {
-                    for agent in task.agents {
-                        let oldKey = AgentConfig.agentKey(project: old, task: task.name, agent: agent)
-                        let newKey = AgentConfig.agentKey(project: new, task: task.name, agent: agent)
-                        bridge.rekey(old: oldKey, new: newKey)
-                        onRekeyAgent?(oldKey, newKey)
-                    }
-                }
-            }
-            config.renameProject(old: old, new: new)
-        }
-        editing = nil
-    }
-
-    private func confirmRenameTask(project: String, old: String) {
-        let new = editText.trimmingCharacters(in: .whitespaces)
-        if !new.isEmpty && new != old {
-            if let proj = config.projects.first(where: { $0.name == project }),
-               let task = proj.tasks.first(where: { $0.name == old }) {
-                for agent in task.agents {
-                    let oldKey = AgentConfig.agentKey(project: project, task: old, agent: agent)
-                    let newKey = AgentConfig.agentKey(project: project, task: new, agent: agent)
-                    bridge.rekey(old: oldKey, new: newKey)
-                    onRekeyAgent?(oldKey, newKey)
-                }
-            }
-            config.renameTask(project: project, old: old, new: new)
-        }
-        editing = nil
-    }
-
-    private func confirmRenameAgent(project: String, task: String, old: String) {
-        let new = editText.trimmingCharacters(in: .whitespaces)
-        defer { editing = nil }
-        guard !new.isEmpty, new != old else { return }
-
-        let oldKey = AgentConfig.agentKey(project: project, task: task, agent: old)
-        let newKey = AgentConfig.agentKey(project: project, task: task, agent: new)
-
-        guard config.renameAgent(project: project, task: task, old: old, new: new) else { return }
-
-        // Update bridge state and surface mapping
-        bridge.rekey(old: oldKey, new: newKey)
-        onRekeyAgent?(oldKey, newKey)
-
-        // Request /rename — sent immediately if Claude is in a safe state,
-        // otherwise deferred until it transitions to one (no input is ever lost).
-        bridge.requestRename(agent: newKey, newName: new)
-    }
-
-    // MARK: - Directory Warning
 
     private func directoryWarning(project: AgentProject) -> some View {
         let agentCount = project.tasks.flatMap(\.agents).count
@@ -556,9 +379,7 @@ struct AgentSidebarView: View {
                 }
                 .buttonStyle(.plain)
 
-                Button {
-                    pendingDirectory = nil
-                } label: {
+                Button { pendingDirectory = nil } label: {
                     Text("Cancel")
                         .font(.system(.caption2, design: .monospaced, weight: .medium))
                         .foregroundStyle(.secondary)
@@ -571,5 +392,140 @@ struct AgentSidebarView: View {
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.red.opacity(0.25), lineWidth: 0.5))
         .listRowSeparator(.hidden)
         .padding(.bottom, 6)
+    }
+
+    // MARK: - Utilities
+
+    private func compactPath(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) { return "~" + path.dropFirst(home.count) }
+        return path
+    }
+
+    /// Find the detail VC through the responder chain. The sidebar is in a split VC.
+    private func findDetailVC() -> AgentDetailViewController {
+        // This is set by AppDelegate when wiring the workspace. We store a reference.
+        // For now, walk the view hierarchy.
+        guard let window = NSApp.keyWindow,
+              let splitVC = window.contentViewController as? AgentWorkspaceController,
+              let detailVC = splitVC.splitViewItems.last?.viewController as? AgentDetailViewController
+        else {
+            fatalError("AgentDetailViewController not found in split view hierarchy")
+        }
+        return detailVC
+    }
+}
+
+// MARK: - Agent Row (per-row observation)
+
+struct AgentRow: View {
+    @ObservedObject var agent: AgentInstance
+    let isSelected: Bool
+    let isHovered: Bool
+    let isEditing: Bool
+    @Binding var editText: String
+    let onCommitRename: () -> Void
+    let onCancelEdit: () -> Void
+
+    var body: some View {
+        let state = agent.displayState
+        HStack(spacing: 10) {
+            statusDot(state)
+                .frame(width: 10, height: 10)
+
+            if isEditing {
+                TextField("agent name", text: $editText)
+                    .textFieldStyle(.plain)
+                    .font(.system(.body, design: .monospaced, weight: .medium))
+                    .onSubmit(onCommitRename)
+                    .onExitCommand(perform: onCancelEdit)
+            } else {
+                Text(agent.name)
+                    .font(.system(.body, design: .monospaced, weight: isSelected ? .semibold : .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer(minLength: 4)
+
+            HStack(spacing: 6) {
+                if !state.label.isEmpty {
+                    Text(state.label)
+                        .font(.system(.caption2, design: .rounded, weight: .medium))
+                        .foregroundStyle(state.color)
+                        .contentTransition(.opacity)
+                }
+
+                stateIcon(state)
+                    .frame(width: 14, alignment: .center)
+            }
+        }
+        .padding(.vertical, 5)
+        .padding(.horizontal, 8)
+        .background(rowBackground(state: state))
+    }
+
+    // MARK: - Status Dot
+
+    @ViewBuilder
+    private func statusDot(_ state: DisplayState) -> some View {
+        let isInactive = state == .inactive || state == .dead
+        let base = Image(systemName: isInactive ? "circle" : "circle.fill")
+            .font(.system(size: 8, weight: .medium))
+            .foregroundStyle(state.color)
+        if #available(macOS 14.0, *) {
+            base
+                .symbolEffect(.pulse, options: .repeating,
+                    isActive: state == .thinking || state == .launching || state == .compacting)
+                .symbolEffect(.variableColor.iterative.reversing, options: .repeating,
+                    isActive: state == .working || state == .permission || state == .finished)
+                .contentTransition(.symbolEffect(.replace))
+        } else {
+            base
+        }
+    }
+
+    // MARK: - State Icon
+
+    @ViewBuilder
+    private func stateIcon(_ state: DisplayState) -> some View {
+        if let icon = state.iconName {
+            let base = Image(systemName: icon)
+                .font(.system(size: 11, weight: .medium))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(state.color)
+            if #available(macOS 14.0, *) {
+                base
+                    .contentTransition(.symbolEffect(.replace))
+                    .symbolEffect(.bounce, value: state == .error)
+            } else {
+                base
+            }
+        }
+    }
+
+    // MARK: - Row Background
+
+    @ViewBuilder
+    private func rowBackground(state: DisplayState) -> some View {
+        if #available(macOS 26.0, *) {
+            if isSelected {
+                RoundedRectangle(cornerRadius: 8)
+                    .glassEffect(
+                        .regular.tint(state.selectionTint.opacity(0.28)),
+                        in: .rect(cornerRadius: 8)
+                    )
+            } else if isHovered {
+                RoundedRectangle(cornerRadius: 8)
+                    .glassEffect(.regular, in: .rect(cornerRadius: 8))
+            } else {
+                Color.clear
+            }
+        } else {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isSelected
+                    ? state.selectionTint.opacity(0.18)
+                    : (isHovered ? Color.secondary.opacity(0.08) : Color.clear))
+        }
     }
 }

@@ -6,26 +6,17 @@ import os
 private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "AgentDetail")
 
 /// Hosts the active agent's terminal surface in the detail pane.
-/// Surfaces are created on first activation and hidden (not destroyed) when switching.
+/// All keys are UUID-based. Zero rekey on rename.
 final class AgentDetailViewController: NSViewController {
 
-    /// Each agent gets a SurfaceScrollView (which wraps a SurfaceView).
-    /// Using SurfaceScrollView instead of raw SurfaceView because it handles
-    /// resize → sizeDidChange → ghostty_surface_set_size propagation.
-    private var surfaceWrappers: [String: SurfaceScrollView] = [:]
-    private var surfaceViews: [String: Ghostty.SurfaceView] = [:]
-    private var activeKey: String?
+    private var surfaceWrappersByID: [UUID: SurfaceScrollView] = [:]
+    private var surfaceViewsByID: [UUID: Ghostty.SurfaceView] = [:]
+    private(set) var activeID: UUID?
     private var placeholderView: NSView?
     private var headerHosting: NSHostingView<AgentDetailHeaderView>?
     private var headerModel = AgentDetailHeaderModel()
 
     private let headerHeight: CGFloat = 36
-
-    /// Set the background color to match Ghostty's terminal theme.
-    func setBackgroundColor(_ color: NSColor) {
-        headerModel.backgroundColor = Color(nsColor: color)
-        view.layer?.backgroundColor = color.cgColor
-    }
 
     override func loadView() {
         view = NSView()
@@ -56,32 +47,28 @@ final class AgentDetailViewController: NSViewController {
         headerHosting!.bottomAnchor
     }
 
-    /// Show an existing surface or create a new one.
-    /// The `createConfig` closure is only called if the surface doesn't exist yet.
-    /// Returns true if a new surface was created.
+    /// Show existing surface or create new. Returns true if new surface created.
     @discardableResult
     func showOrSwitch(
-        key: String,
+        id: UUID,
         displayName: String,
         projectName: String,
         createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)
     ) -> Bool {
-        // Update header
         headerModel.agentName = displayName
         headerModel.projectName = projectName
         headerModel.isActive = true
         placeholderView?.isHidden = true
 
         // Hide current
-        if let currentKey = activeKey, let current = surfaceWrappers[currentKey] {
+        if let currentID = activeID, let current = surfaceWrappersByID[currentID] {
             current.isHidden = true
         }
 
         var isNew = false
 
-        // Create surface + scroll wrapper if first time
-        if surfaceWrappers[key] == nil {
-            logger.info("creating new surface for key=\(key)")
+        if surfaceWrappersByID[id] == nil {
+            logger.info("creating surface for \(id)")
             let (app, config) = createConfig()
             let surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
             let scrollWrapper = SurfaceScrollView(
@@ -96,18 +83,16 @@ final class AgentDetailViewController: NSViewController {
                 scrollWrapper.trailingAnchor.constraint(equalTo: view.trailingAnchor),
                 scrollWrapper.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             ])
-            surfaceWrappers[key] = scrollWrapper
-            surfaceViews[key] = surfaceView
+            surfaceWrappersByID[id] = scrollWrapper
+            surfaceViewsByID[id] = surfaceView
             isNew = true
         }
 
-        // Show target
-        surfaceWrappers[key]!.isHidden = false
-        activeKey = key
+        surfaceWrappersByID[id]!.isHidden = false
+        activeID = id
 
-        // Make the SurfaceView first responder for keyboard input
         DispatchQueue.main.async {
-            if let surface = self.surfaceViews[key] {
+            if let surface = self.surfaceViewsByID[id] {
                 self.view.window?.makeFirstResponder(surface)
             }
         }
@@ -115,43 +100,45 @@ final class AgentDetailViewController: NSViewController {
         return isNew
     }
 
-    /// Destroy a specific agent's surface.
-    func removeSurface(key: String) {
-        logger.info("removeSurface key=\(key) (total=\(self.surfaceWrappers.count))")
-        if let wrapper = surfaceWrappers.removeValue(forKey: key) {
+    func removeSurface(id: UUID) {
+        logger.info("removeSurface \(id)")
+        if let wrapper = surfaceWrappersByID.removeValue(forKey: id) {
             wrapper.removeFromSuperview()
         }
-        surfaceViews.removeValue(forKey: key)
-        if activeKey == key {
-            activeKey = nil
-            headerModel.isActive = false
-            placeholderView?.isHidden = false
+        surfaceViewsByID.removeValue(forKey: id)
+        if activeID == id {
+            showPlaceholder()
         }
     }
 
-    /// Whether a surface exists for this key.
-    func hasSurface(key: String) -> Bool {
-        surfaceWrappers[key] != nil
+    func showPlaceholder() {
+        activeID = nil
+        headerModel.isActive = false
+        placeholderView?.isHidden = false
     }
 
-    /// Re-map a surface from one key to another (e.g. after rename).
-    func rekeySurface(old: String, new: String) {
-        if let wrapper = surfaceWrappers.removeValue(forKey: old) {
-            surfaceWrappers[new] = wrapper
-        }
-        if let surface = surfaceViews.removeValue(forKey: old) {
-            surfaceViews[new] = surface
-        }
-        if activeKey == old {
-            activeKey = new
-        }
+    func hasSurface(id: UUID) -> Bool {
+        surfaceWrappersByID[id] != nil
     }
 
-    /// Send text to a specific agent's terminal as if it was typed.
-    /// Used to send `/rename <name>` to Claude Code on agent rename.
-    func sendText(_ text: String, toAgent key: String) {
-        guard let surface = surfaceViews[key]?.surfaceModel else { return }
+    func surfaceView(for id: UUID) -> Ghostty.SurfaceView? {
+        surfaceViewsByID[id]
+    }
+
+    func surfaceWrapper(for id: UUID) -> SurfaceScrollView? {
+        surfaceWrappersByID[id]
+    }
+
+    /// Send text to a specific agent's terminal pty.
+    func sendText(_ text: String, toAgent id: UUID) {
+        guard let surface = surfaceViewsByID[id]?.surfaceModel else { return }
         surface.sendText(text)
+    }
+
+    /// Set background color to match Ghostty's terminal theme.
+    func setBackgroundColor(_ color: NSColor) {
+        headerModel.backgroundColor = Color(nsColor: color)
+        view.layer?.backgroundColor = color.cgColor
     }
 }
 

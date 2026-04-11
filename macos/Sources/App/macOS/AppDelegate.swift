@@ -99,14 +99,15 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
-    /// Agent management
+    /// Clawddy agent management
     private var agentStatusItem: NSStatusItem?
     private var agentWorkspaceWindow: NSWindow?
     private var agentDetailVC: AgentDetailViewController?
     private var agentSearchPanel: AgentSearchPanel?
     private var agentSearchHotKeyRef: EventHotKeyRef?
+    private var agentEventHandlerRef: EventHandlerRef?
     private let agentConfig = AgentConfig()
-    private let agentBridge = AgentTerminalBridge()
+    private let agentBridge = AgentBridge()
 
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
@@ -320,8 +321,8 @@ class AppDelegate: NSObject,
         // Setup signal handlers
         setupSignals()
 
-        // Agent management menu bar icon
-        setupAgentStatusItem()
+        // Clawddy agent management
+        setupClawddy()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
 
         switch Ghostty.launchSource {
@@ -437,10 +438,8 @@ class AppDelegate: NSObject,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // We have no notifications we want to persist after death,
-        // so remove them all now. In the future we may want to be
-        // more selective and only remove surface-targeted notifications.
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
+        shutdownClawddy()
     }
 
     /// This is called when the application is already open and someone double-clicks the icon
@@ -762,7 +761,7 @@ class AppDelegate: NSObject,
             .reduce(0) { $0 + ($1.bell ? 1 : 0) }
         let bellWantsBadge = ghostty.config.bellFeatures.contains(.attention) && bellCount > 0
 
-        let agentAttentionCount = agentBridge.agentStates.values.filter(\.needsAttention).count
+        let agentAttentionCount = agentBridge.agents.values.filter { $0.displayState.needsAttention }.count
         let totalCount = (bellWantsBadge ? bellCount : 0) + agentAttentionCount
 
         let label = totalCount > 0 ? (totalCount > 99 ? "99+" : String(totalCount)) : nil
@@ -1138,7 +1137,20 @@ extension AppDelegate {
     /// Setup all the images for our menu items.
     // MARK: - Clawddy
 
-    private func setupAgentStatusItem() {
+    private func setupClawddy() {
+        // Start the bridge (reconstructs state from disk)
+        agentBridge.start(config: agentConfig)
+
+        // Wire callbacks
+        agentBridge.onAggregateStateChanged = { [weak self] state in
+            self?.updateAgentStatusIcon(state)
+            self?.syncDockBadge()
+        }
+        agentBridge.onSendText = { [weak self] id, text in
+            self?.agentDetailVC?.sendText(text, toAgent: id)
+        }
+
+        // Status bar item
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             button.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Clawddy")
@@ -1146,15 +1158,19 @@ extension AppDelegate {
             button.target = self
         }
         agentStatusItem = item
-        agentBridge.onAggregateStateChanged = { [weak self] state in
-            self?.updateAgentStatusIcon(state)
-            self?.syncDockBadge()
-        }
-        // Allow the bridge to inject text into agent terminals (e.g., deferred renames)
-        agentBridge.onSendText = { [weak self] key, text in
-            self?.agentDetailVC?.sendText(text, toAgent: key)
-        }
+
+        // Global hotkey
         registerAgentSearchHotKey()
+    }
+
+    private func shutdownClawddy() {
+        agentBridge.shutdown()
+        if let ref = agentSearchHotKeyRef {
+            UnregisterEventHotKey(ref)
+        }
+        if let ref = agentEventHandlerRef {
+            RemoveEventHandler(ref)
+        }
     }
 
     private func updateAgentStatusIcon(_ state: AggregateState) {
@@ -1170,21 +1186,20 @@ extension AppDelegate {
             let config = NSImage.SymbolConfiguration(paletteColors: [.controlAccentColor])
             button.image = NSImage(
                 systemSymbolName: "terminal.fill",
-                accessibilityDescription: "Agents — \(count) active"
+                accessibilityDescription: "Clawddy — \(count) active"
             )?.withSymbolConfiguration(config)
             button.contentTintColor = nil
         case .attention:
             let config = NSImage.SymbolConfiguration(paletteColors: [.systemOrange])
             button.image = NSImage(
                 systemSymbolName: "terminal.fill",
-                accessibilityDescription: "Agents — needs attention"
+                accessibilityDescription: "Clawddy — needs attention"
             )?.withSymbolConfiguration(config)
             button.contentTintColor = nil
         }
     }
 
     private func registerAgentSearchHotKey() {
-        // Carbon hotkey: Option+Space — works globally, no permissions needed
         var hotKeyID = EventHotKeyID(signature: 0x4147_4E54, id: 1) // "AGNT"
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
 
@@ -1196,9 +1211,10 @@ extension AppDelegate {
             return noErr
         }
 
-        InstallEventHandler(GetEventDispatcherTarget(), handler, 1, &eventType, nil, nil)
+        var handlerRef: EventHandlerRef?
+        InstallEventHandler(GetEventDispatcherTarget(), handler, 1, &eventType, nil, &handlerRef)
+        agentEventHandlerRef = handlerRef
 
-        // Option = optionKey (0x0800), Space = keyCode 49
         RegisterEventHotKey(49, UInt32(optionKey), hotKeyID, GetEventDispatcherTarget(), 0, &agentSearchHotKeyRef)
     }
 
@@ -1207,7 +1223,6 @@ extension AppDelegate {
     }
 
     private func showAgentWorkspace() {
-        // Clear delivered notifications when opening the workspace
         UNUserNotificationCenter.current().removeAllDeliveredNotifications()
 
         if agentWorkspaceWindow == nil {
@@ -1217,21 +1232,22 @@ extension AppDelegate {
             let sidebarView = NSHostingView(rootView: AgentSidebarView(
                 config: agentConfig,
                 bridge: agentBridge,
-                onSelectAgent: { [weak self] key, displayName, project in
-                    self?.activateAgent(key: key, displayName: displayName, project: project)
+                onSelectAgent: { [weak self] id, project in
+                    self?.activateAgent(id: id, project: project)
                 },
-                onRekeyAgent: { [weak self] oldKey, newKey in
-                    self?.agentDetailVC?.rekeySurface(old: oldKey, new: newKey)
-                },
-                onForkAgent: { [weak self] sourceKey, newKey, newName, project in
-                    self?.forkAgent(sourceKey: sourceKey, newKey: newKey, newName: newName, project: project)
+                onForkAgent: { [weak self] sourceId, project, taskName in
+                    guard let self else { return }
+                    if let entry = self.agentBridge.forkAgent(
+                        sourceId: sourceId, config: self.agentConfig,
+                        project: project.name, task: taskName) {
+                        self.activateAgent(id: entry.id, project: project)
+                    }
                 }
             ))
 
             let controller = AgentWorkspaceController(sidebarView: sidebarView, detailViewController: detailVC)
             let window = makeAgentWorkspaceWindow(controller: controller)
 
-            // Match window appearance + background to Ghostty's theme
             syncWorkspaceAppearance(window)
             detailVC.setBackgroundColor(NSColor(ghostty.config.backgroundColor))
             agentWorkspaceWindow = window
@@ -1241,48 +1257,21 @@ extension AppDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func forkAgent(sourceKey: String, newKey: String, newName: String, project: AgentProject) {
-        // Read the source agent's session ID; if not available, fall back to fresh start.
-        if let sourceSessionID = agentBridge.sessionID(for: sourceKey) {
-            agentBridge.markForkSource(key: newKey, sourceSessionID: sourceSessionID)
-        }
-        // Activate the new agent (will use the .forkFrom marker to fork on first launch)
-        activateAgent(key: newKey, displayName: newName, project: project)
-    }
-
-    private func activateAgent(key: String, displayName: String, project: AgentProject) {
+    private func activateAgent(id: UUID, project: AgentProject) {
         guard let app = ghostty.app, let detailVC = agentDetailVC else { return }
-
-        // Clear unread / "finished" state — user is now viewing this agent
-        agentBridge.markRead(key)
-
-        // Only write script and create config for new surfaces
-        let isNew = detailVC.showOrSwitch(key: key, displayName: displayName, projectName: project.name) {
-            let scriptPath = self.agentBridge.writeAgentScript(key: key, displayName: displayName)
-            var config = Ghostty.SurfaceConfiguration()
-            config.command = scriptPath
-            config.workingDirectory = project.workingDirectory
-            config.environmentVariables = ["GHOSTTY_AGENT_NAME": key]
-            return (app, config)
+        agentBridge.activateAgent(id: id, app: app, detailVC: detailVC, project: project)
+        if let agent = agentBridge.agents[id] {
+            agentWorkspaceWindow?.title = "\(project.name) — \(agent.name)"
         }
-
-        if isNew {
-            agentBridge.markSurfaceActive(key)
-        }
-        agentWorkspaceWindow?.title = "\(project.name) — \(displayName)"
     }
 
     private func syncWorkspaceAppearance(_ window: NSWindow) {
         let bg = NSColor(ghostty.config.backgroundColor)
-
-        // Match NSAppearance (light/dark) to Ghostty's theme
         if let appearance = NSAppearance(ghosttyConfig: ghostty.config) {
             window.appearance = appearance
         } else {
             window.appearance = NSAppearance(named: bg.isLightColor ? .aqua : .darkAqua)
         }
-
-        // Set actual window background to match the terminal
         window.backgroundColor = bg
     }
 
@@ -1296,9 +1285,9 @@ extension AppDelegate {
             let view = AgentSearchView(
                 config: agentConfig,
                 bridge: agentBridge,
-                onSelectAgent: { [weak self] key, displayName, project in
+                onSelectAgent: { [weak self] id, project in
                     self?.showAgentWorkspace()
-                    self?.activateAgent(key: key, displayName: displayName, project: project)
+                    self?.activateAgent(id: id, project: project)
                 },
                 onDismiss: { [weak self] in
                     self?.agentSearchPanel?.hide()
