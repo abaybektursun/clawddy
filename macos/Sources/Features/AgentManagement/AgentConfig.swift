@@ -89,7 +89,6 @@ class AgentConfig: ObservableObject {
         else { return }
         projects = config.projects
         migrateStatusFiles()
-        save()
         logger.info("load — \(config.projects.count) projects, \(self.allAgentEntries.count) agents")
     }
 
@@ -126,7 +125,11 @@ class AgentConfig: ObservableObject {
         let config = AgentConfigFile(projects: projects)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try! encoder.encode(config)
+        guard let data = try? encoder.encode(config) else {
+            logger.error("save failed — JSON encode error")
+            suppressWatch = false
+            return
+        }
         Self.atomicWrite(data, to: Self.configURL)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.suppressWatch = false

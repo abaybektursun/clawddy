@@ -402,17 +402,16 @@ struct AgentSidebarView: View {
         return path
     }
 
-    /// Find the detail VC through the responder chain. The sidebar is in a split VC.
     private func findDetailVC() -> AgentDetailViewController {
-        // This is set by AppDelegate when wiring the workspace. We store a reference.
-        // For now, walk the view hierarchy.
-        guard let window = NSApp.keyWindow,
-              let splitVC = window.contentViewController as? AgentWorkspaceController,
-              let detailVC = splitVC.splitViewItems.last?.viewController as? AgentDetailViewController
-        else {
-            fatalError("AgentDetailViewController not found in split view hierarchy")
+        // Walk windows (not just keyWindow) to find the workspace split VC
+        for window in NSApp.windows {
+            if let splitVC = window.contentViewController as? AgentWorkspaceController,
+               let detailVC = splitVC.splitViewItems.last?.viewController as? AgentDetailViewController {
+                return detailVC
+            }
         }
-        return detailVC
+        // Should never happen — but return a dummy to avoid crash
+        return AgentDetailViewController()
     }
 }
 

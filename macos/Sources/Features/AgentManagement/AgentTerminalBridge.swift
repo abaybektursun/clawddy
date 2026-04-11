@@ -172,6 +172,7 @@ final class AgentBridge: ObservableObject {
 
     var onAggregateStateChanged: ((AggregateState) -> Void)?
     var onSendText: ((UUID, String) -> Void)?
+    var currentlyViewedAgentId: UUID?
 
     private var pendingRenames: [UUID: String] = [:]
     private var lastAggregateState: AggregateState?
@@ -303,7 +304,8 @@ final class AgentBridge: ObservableObject {
             }
         }
 
-        // Clear unread when viewing
+        // Track which agent is being viewed + clear unread
+        currentlyViewedAgentId = id
         markRead(id: id)
     }
 
@@ -429,10 +431,11 @@ final class AgentBridge: ObservableObject {
 
         // Background: read event files
         let ids = Array(agents.keys)
-        ioQueue.async { [self] in
+        ioQueue.async { [weak self] in
+            guard let self else { return }
             var events: [UUID: [String: Any]] = [:]
             for id in ids {
-                events[id] = readLastEvent(for: id)
+                events[id] = self.readLastEvent(for: id)
             }
             DispatchQueue.main.async { [weak self] in
                 self?.applyEvents(events)
@@ -472,8 +475,8 @@ final class AgentBridge: ObservableObject {
 
             // Unread tracking
             if oldClaude.isActiveState && newClaude == .idle {
-                // Agent just finished work
-                let isCurrentlyViewed = false  // TODO: check if this is the active surface
+                // Only mark unread if user isn't currently viewing this agent
+                let isCurrentlyViewed = (currentlyViewedAgentId == id)
                 if !isCurrentlyViewed {
                     agent.isUnread = true
                 }
@@ -638,8 +641,8 @@ final class AgentBridge: ObservableObject {
         var state = PersistedState()
         state.unreadAgents = Set(agents.values.filter(\.isUnread).map(\.id))
         state.pendingRenames = pendingRenames
-        let data = try! JSONEncoder().encode(state)
-        ioQueue.async { atomicWrite(data, to: AgentConfig.stateURL) }
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        ioQueue.async { AgentConfig.atomicWrite(data, to: AgentConfig.stateURL) }
     }
 
     // MARK: - File Watcher
