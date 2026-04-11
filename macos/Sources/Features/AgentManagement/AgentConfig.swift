@@ -87,22 +87,37 @@ class AgentConfig: ObservableObject {
               let data = try? Data(contentsOf: Self.configURL),
               let config = try? JSONDecoder().decode(AgentConfigFile.self, from: data)
         else { return }
-
-        let oldIds = Set(allAgentEntries.map(\.id))
         projects = config.projects
-        let newIds = Set(allAgentEntries.map(\.id))
+        migrateStatusFiles()
+        save()
+        logger.info("load — \(config.projects.count) projects, \(self.allAgentEntries.count) agents")
+    }
 
-        // If migration generated new UUIDs, save immediately to persist them
-        if !oldIds.isEmpty || newIds != oldIds {
-            let hasV1Agents = data.contains(where: { $0 == UInt8(ascii: "[") })  // heuristic
-            // More reliable: check if any entry has an id we didn't have before
-            if newIds != oldIds && !newIds.isEmpty {
-                // Could be migration or external edit — save to persist any generated UUIDs
-                save()
+    /// Migrate old v1 status files (keyed by sanitized name) to UUID-keyed names.
+    /// Safe to run every load — skips if new file already exists.
+    private func migrateStatusFiles() {
+        let fm = FileManager.default
+        for project in projects {
+            for task in project.tasks {
+                for entry in task.agents {
+                    let oldKey = Self.v1AgentKey(project: project.name, task: task.name, agent: entry.name)
+                    let newKey = entry.id.uuidString
+                    for ext in ["session", "state", "heartbeat", "forkFrom", "lastEvent", "json"] {
+                        let oldURL = Self.statusDir.appendingPathComponent("\(oldKey).\(ext)")
+                        let newURL = Self.statusDir.appendingPathComponent("\(newKey).\(ext)")
+                        if fm.fileExists(atPath: oldURL.path) && !fm.fileExists(atPath: newURL.path) {
+                            try? fm.moveItem(at: oldURL, to: newURL)
+                            logger.info("migrated \(oldKey).\(ext) → \(newKey).\(ext)")
+                        }
+                    }
+                }
             }
         }
+    }
 
-        logger.info("load — \(config.projects.count) projects, \(self.allAgentEntries.count) agents")
+    private static func v1AgentKey(project: String, task: String, agent: String) -> String {
+        "\(project)/\(task)/\(agent)"
+            .replacingOccurrences(of: "[^a-zA-Z0-9._-]", with: "_", options: .regularExpression)
     }
 
     func save() {
