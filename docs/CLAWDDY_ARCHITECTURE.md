@@ -229,11 +229,11 @@ One script, all events. Atomic writes via tmp+mv. **Zero external dependencies**
 [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
 DIR="$HOME/.config/ghostty-agents/status"
 mkdir -p "$DIR" 2>/dev/null
-INPUT=$(cat)
+INPUT_FLAT=$(cat | tr -d '\n')
 
-# Extract session_id with sed (no jq dependency)
-# tr -d '\n' normalizes multiline JSON — sed is line-based
-SID=$(echo "$INPUT" | tr -d '\n' | sed -n 's/.*"session_id" *: *"\([^"]*\)".*/\1/p')
+# Extract fields with sed (no jq dependency, no external deps)
+SID=$(echo "$INPUT_FLAT" | sed -n 's/.*"session_id" *: *"\([^"]*\)".*/\1/p')
+EVENT=$(echo "$INPUT_FLAT" | sed -n 's/.*"hook_event_name" *: *"\([^"]*\)".*/\1/p')
 
 # Atomic write: session ID (PID-suffixed tmp to avoid concurrent hook race)
 if [ -n "$SID" ]; then
@@ -241,12 +241,15 @@ if [ -n "$SID" ]; then
     mv "$DIR/$GHOSTTY_AGENT_NAME.session.$$" "$DIR/$GHOSTTY_AGENT_NAME.session"
 fi
 
-# Atomic write: full event JSON (PID-suffixed tmp)
-echo "$INPUT" > "$DIR/$GHOSTTY_AGENT_NAME.lastEvent.$$"
+# Atomic write: minimal event JSON (~80 bytes, not the full payload)
+# PostToolUse can include multi-MB tool_response — we only need event name + session ID
+echo "{\"hook_event_name\":\"$EVENT\",\"session_id\":\"$SID\"}" > "$DIR/$GHOSTTY_AGENT_NAME.lastEvent.$$"
 mv "$DIR/$GHOSTTY_AGENT_NAME.lastEvent.$$" "$DIR/$GHOSTTY_AGENT_NAME.lastEvent"
 ```
 
-**Why PID-suffixed tmp files:** Two hooks can fire concurrently for the same agent (e.g., PreToolUse immediately followed by PostToolUse). Each runs as a separate process. Without unique tmp names, both write to the same `.tmp` file — race condition. Using `$$` (shell PID) ensures each process has its own tmp. Last `mv` wins (latest event). No data corruption.
+**Why minimal JSON:** PostToolUse includes `tool_response` — full output of Bash commands, full file contents. Can be megabytes. Writing the full payload to `.lastEvent` means every poll reads multi-MB files. Our Swift parser only uses `hook_event_name` and `session_id`. Extracting just those keeps `.lastEvent` under 100 bytes regardless of tool output.
+
+**Why PID-suffixed tmp files:** Two hooks can fire concurrently for the same agent. Each runs as a separate process. Without unique tmp names, both write to the same `.tmp` file — race condition. Using `$$` (shell PID) ensures each process has its own tmp. Last `mv` wins. No data corruption.
 
 **Why sed not jq:** macOS doesn't ship jq. Users who install via Homebrew have it; others don't. sed is guaranteed POSIX. The extraction pattern is simple enough for sed.
 
@@ -513,16 +516,20 @@ exec zsh -l
 
 ```swift
 func buildCommand(agent: AgentInstance) -> String {
+    // Escape display name for shell safety (user-provided, may contain single quotes)
+    let name = agent.name.replacingOccurrences(of: "'", with: "'\\''")
+    // sessionId and sourceId are UUIDs ([a-f0-9-]) — safe without escaping
+
     // Priority 1: resume existing session
     if let sessionId = readSessionFile(agent.id) {
         return "claude --resume '\(sessionId)' --permission-mode auto"
     }
     // Priority 2: fork from source (don't delete .forkFrom here — see lifecycle below)
     if let sourceId = readForkSource(agent.id) {
-        return "claude --resume '\(sourceId)' --fork-session --name '\(agent.name)' --permission-mode auto"
+        return "claude --resume '\(sourceId)' --fork-session --name '\(name)' --permission-mode auto"
     }
     // Priority 3: fresh start
-    return "claude --name '\(agent.name)' --permission-mode auto"
+    return "claude --name '\(name)' --permission-mode auto"
 }
 ```
 
