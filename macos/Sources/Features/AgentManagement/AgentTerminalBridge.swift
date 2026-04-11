@@ -263,35 +263,36 @@ final class AgentBridge: ObservableObject {
                        project: AgentProject) {
         guard let agent = agents[id] else { return }
 
-        // Reset state for fresh launch
-        agent.processState = .launching
-        agent.claudeState = .unknown
-        agent.launchTime = Date()
-        agent.lastHookTime = nil
+        let needsNewSurface = !detailVC.hasSurface(id: id)
 
-        // Build command in Swift — script is a dumb launcher
-        let command = buildCommand(agent: agent)
-        let name = agent.name.replacingOccurrences(of: "'", with: "'\\''")
-        let script = """
-            #!/bin/zsh -l
-            export GHOSTTY_AGENT_NAME='\(id.uuidString)'
-            printf '\\033]2;%s\\007' '\(name)'
-            clear
-            \(command)
-            exec zsh -l
-            """
-
-        let scriptPath = FileManager.default.temporaryDirectory
-            .appendingPathComponent("clawddy-\(id.uuidString).sh").path
-        FileManager.default.createFile(atPath: scriptPath, contents: script.data(using: .utf8))
-        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
-
-        var surfaceConfig = Ghostty.SurfaceConfiguration()
-        surfaceConfig.command = scriptPath
-        surfaceConfig.workingDirectory = project.workingDirectory
-        surfaceConfig.environmentVariables = ["GHOSTTY_AGENT_NAME": id.uuidString]
+        if needsNewSurface {
+            agent.processState = .launching
+            agent.claudeState = .unknown
+            agent.launchTime = Date()
+            agent.lastHookTime = nil
+        }
 
         let isNew = detailVC.showOrSwitch(id: id, displayName: agent.name, projectName: project.name) {
+            let command = self.buildCommand(agent: agent)
+            let name = agent.name.replacingOccurrences(of: "'", with: "'\\''")
+            let script = """
+                #!/bin/zsh -l
+                export GHOSTTY_AGENT_NAME='\(id.uuidString)'
+                printf '\\033]2;%s\\007' '\(name)'
+                clear
+                \(command)
+                exec zsh -l
+                """
+
+            let scriptPath = FileManager.default.temporaryDirectory
+                .appendingPathComponent("clawddy-\(id.uuidString).sh").path
+            FileManager.default.createFile(atPath: scriptPath, contents: script.data(using: .utf8))
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
+
+            var surfaceConfig = Ghostty.SurfaceConfiguration()
+            surfaceConfig.command = scriptPath
+            surfaceConfig.workingDirectory = project.workingDirectory
+            surfaceConfig.environmentVariables = ["GHOSTTY_AGENT_NAME": id.uuidString]
             return (app, surfaceConfig)
         }
 
