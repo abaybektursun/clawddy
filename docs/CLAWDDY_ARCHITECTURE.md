@@ -1,4 +1,4 @@
-# Clawddy Agent State Architecture
+# Clawddy Agent State Architecture v2
 
 ## Overview
 
@@ -9,9 +9,11 @@ Clawddy manages multiple Claude Code sessions running inside Ghostty terminal su
 1. **Single source of truth per concern.** Process lifecycle owned by app. Claude state owned by hooks. Display state derived, never stored.
 2. **UUID identity.** Agent identity is a UUID generated once at creation. Never changes. Display name is a label. Rename = label change. Zero rekey.
 3. **Script is a dumb launcher.** All decisions made in Swift. Script sets env, runs one command, falls back to shell.
-4. **Thread-safe by construction.** All mutable state on main actor. Background work reads snapshots, writes results back to main.
-5. **Crash-recoverable.** Every piece of state that matters across restarts is persisted. In-memory state is reconstructible from disk.
-6. **No stuck states.** Process death is always detected. Every state has an exit path.
+4. **Thread-safe by construction.** All mutable state on @MainActor. Background work reads snapshots of immutable data, posts results back to main.
+5. **Crash-recoverable.** Every piece of state that matters across restarts is persisted to disk. In-memory state is reconstructible.
+6. **No stuck states.** Process death is detected via surface destruction. Every state has an exit path.
+7. **Atomic file operations.** All writes (hook and app) use tmp+rename. No partial reads ever.
+8. **Per-row observation.** Each sidebar row observes its own AgentInstance. State changes re-render only the affected row, not the entire sidebar.
 
 ---
 
@@ -26,7 +28,7 @@ struct AgentEntry: Codable, Identifiable {
 }
 ```
 
-Config format changes from `"agents": ["alpha", "beta"]` to:
+Config format:
 
 ```json
 {
@@ -44,21 +46,13 @@ Config format changes from `"agents": ["alpha", "beta"]` to:
 }
 ```
 
-**UUID is used for:**
-- `GHOSTTY_AGENT_NAME` environment variable (hooks identify the agent)
-- Status file names: `<uuid>.state`, `<uuid>.session`, `<uuid>.forkFrom`
-- Dict keys in bridge, detail VC, sidebar
-- Script file names: `/tmp/clawddy-<uuid>.sh`
+**UUID is used for:** env var (`GHOSTTY_AGENT_NAME`), status file names, dict keys, script file names.
 
-**Display name is used for:**
-- Sidebar label
-- Terminal title (OSC 2)
-- `claude --name` flag
-- `/rename` command
+**Display name is used for:** sidebar label, terminal title (OSC 2), `claude --name`, `/rename`.
 
-**Rename is:** change `name` field in config + send `/rename` to Claude. Zero dict updates. Zero file renames.
+**Rename is:** change `name` in config + send `/rename` to Claude. Zero rekey. Zero file renames.
 
-**Fork is:** generate new UUID. No collision possible.
+**Fork is:** generate new UUID. Collision impossible.
 
 ---
 
@@ -75,19 +69,19 @@ final class AgentInstance: ObservableObject, Identifiable {
     @Published var processState: ProcessState
     @Published var claudeState: ClaudeState
     @Published var isUnread: Bool
+    @Published var lastHookTime: Date?
 
-    var displayState: DisplayState { /* derived */ }
+    var displayState: DisplayState { /* derived, never stored */ }
 }
 
-enum ProcessState {
+enum ProcessState: Codable {
     case inactive       // no terminal surface exists
     case launching      // surface created, waiting for first hook
     case alive          // claude process confirmed running (hook received)
-    case shellFallback  // claude exited, zsh took over (detected via absence of hooks + process alive)
     case dead           // terminal surface destroyed or process killed
 }
 
-enum ClaudeState {
+enum ClaudeState: Codable, Equatable {
     case unknown        // no hook data yet
     case idle           // Stop hook fired (stop_reason: end_turn)
     case thinking       // UserPromptSubmit fired
@@ -96,31 +90,37 @@ enum ClaudeState {
     case error          // StopFailure or PostToolUseFailure fired
     case compacting     // PreCompact fired, waiting for PostCompact
 }
+```
 
+**Removed: `.shellFallback`.** Can't reliably detect Claude→shell transition:
+- `/exit` doesn't fire SessionEnd (Claude Code bug)
+- SIGINT/SIGTERM don't fire hooks
+- `exec zsh` replaces process so `processExited` never fires
+- No PTY fd access for `tcgetpgrp()`
+
+When Claude exits and shell takes over, state stays at last known ClaudeState (typically `.idle` from the Stop hook). The terminal shows a shell prompt — the user sees it directly. Attempting to detect this transition causes more bugs (false positives) than it solves.
+
+### DisplayState derivation
+
+```swift
 enum DisplayState {
     case inactive
     case launching
     case idle
-    case finished       // processState == .alive && claudeState == .idle && isUnread
+    case finished       // alive + idle + unread
     case thinking
     case working
     case permission
     case error
     case compacting
-    case shell          // process alive but claude not running
     case dead
 }
-```
 
-### Derivation logic
-
-```swift
 var displayState: DisplayState {
     switch processState {
-    case .inactive:      return .inactive
-    case .dead:          return .dead
-    case .launching:     return .launching
-    case .shellFallback: return .shell
+    case .inactive:  return .inactive
+    case .dead:      return .dead
+    case .launching: return .launching
     case .alive:
         if isUnread && claudeState == .idle { return .finished }
         switch claudeState {
@@ -145,25 +145,23 @@ Display state is NEVER stored. Always computed. Eliminates desync by constructio
 ### Process state (app-controlled)
 
 ```
-inactive ──[user activates]──► launching
+inactive ──[activateAgent]──► launching
 launching ──[first hook received]──► alive
-alive ──[claude exits, shell takes over]──► shellFallback
-alive ──[surface destroyed / process killed]──► dead
-shellFallback ──[surface destroyed]──► dead
-dead ──[user re-activates]──► launching
+alive ──[surface destroyed]──► dead
 launching ──[surface destroyed before hook]──► dead
+dead ──[activateAgent again]──► launching
 ```
 
-**How transitions are detected:**
+**Detection mechanisms:**
 
-| Transition | Detection mechanism |
+| Transition | How detected |
 |---|---|
-| inactive → launching | App calls `activateAgent()` |
-| launching → alive | First hook event received for this UUID |
-| alive → shellFallback | Heartbeat timeout (no hook in N seconds while process still alive) |
-| alive → dead | Ghostty `close_surface_cb` or `processExited` observation |
-| shellFallback → dead | Same as above |
-| dead → launching | App calls `activateAgent()` again |
+| inactive → launching | App calls `activateAgent()`. Sets processState BEFORE creating surface. |
+| launching → alive | `applyEvents` sees first hook for this agent's UUID. |
+| alive/launching → dead | Ghostty `close_surface_cb` fires, or poll detects `processExited == true`. |
+| dead → launching | App calls `activateAgent()` again. Resets `claudeState = .unknown`. |
+
+**On activation, always reset:** `processState = .launching`, `claudeState = .unknown`. This prevents stale claudeState from previous session leaking through during launch.
 
 ### Claude state (hook-controlled)
 
@@ -172,73 +170,80 @@ unknown ──[SessionStart]──► idle
 idle ──[UserPromptSubmit]──► thinking
 thinking ──[PreToolUse]──► working
 thinking ──[Stop]──► idle
-working ──[PostToolUse then PreToolUse]──► working (stays)
+working ──[PostToolUse, then more PreToolUse]──► working (stays)
 working ──[Stop]──► idle
 working ──[PostToolUseFailure]──► error
 any ──[PermissionRequest]──► permission
-permission ──[PostToolUse]──► working (permission granted, tool ran)
+permission ──[PostToolUse]──► working (granted, tool ran)
 permission ──[PermissionDenied]──► working (denied, claude continues)
 any ──[StopFailure]──► error
 error ──[UserPromptSubmit]──► thinking (user retries)
 any ──[PreCompact]──► compacting
-compacting ──[PostCompact]──► idle (or back to previous)
+compacting ──[PostCompact]──► idle
+any ──[SessionEnd]──► idle (session ended gracefully)
 ```
 
 ### Unread tracking
 
 ```
 isUnread = false (default)
-Set true: when processState == .alive AND claudeState transitions FROM .thinking/.working TO .idle
-Set false: when user activates this agent (clicks in sidebar)
-Set false: when claudeState transitions TO .thinking/.working (agent active again)
-Persisted: yes (survives app restart)
+Set true:  processState == .alive AND claudeState transitions FROM thinking/working TO idle
+           AND agent is NOT currently being viewed (not the active surface in the detail VC)
+Set false: user activates this agent (clicks in sidebar)
+Set false: claudeState transitions TO thinking/working (agent back to work)
+Persisted: YES — survives app restart (stored in state.json)
 ```
 
 ---
 
 ## File Layout
 
-All files keyed by UUID.
+All status files keyed by UUID. Atomic writes throughout.
 
 ```
 ~/.config/ghostty-agents/
-├── agents.json                          # project/task/agent config (with UUIDs)
-├── hooks/                               # hook scripts (shared, not per-agent)
-│   └── clawddy-hook.sh                  # SINGLE universal hook script
-├── status/
-│   ├── <uuid>.session                   # Claude session ID (written by hook)
-│   ├── <uuid>.forkFrom                  # Source session ID for fork (written by app)
-│   └── <uuid>.lastEvent                 # Last hook event JSON (written by hook)
-└── state.json                           # Persisted bridge state (unread set, etc.)
+├── agents.json                          # project/task/agent config (UUIDs + names)
+├── state.json                           # persisted bridge state (unread set, pending renames)
+├── hooks/
+│   └── clawddy-hook.sh                  # single universal hook script
+└── status/
+    ├── <uuid>.session                   # Claude session ID
+    ├── <uuid>.forkFrom                  # source session ID for fork (one-time)
+    └── <uuid>.lastEvent                 # last hook event (full JSON)
 ```
 
-### Key change: single universal hook script
+### Universal hook script
 
-Instead of 6 separate scripts, ONE script handles all events:
+One script, all events. Atomic writes via tmp+mv.
 
 ```bash
 #!/bin/sh
 [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
 DIR="$HOME/.config/ghostty-agents/status"
 INPUT=$(cat)
-EVENT=$(echo "$INPUT" | /usr/bin/jq -r '.hook_event_name // empty')
 SID=$(echo "$INPUT" | /usr/bin/jq -r '.session_id // empty')
 
-# Always capture session ID
-[ -n "$SID" ] && echo "$SID" > "$DIR/$GHOSTTY_AGENT_NAME.session"
+# Atomic write: session ID
+if [ -n "$SID" ]; then
+    echo "$SID" > "$DIR/$GHOSTTY_AGENT_NAME.session.tmp"
+    mv "$DIR/$GHOSTTY_AGENT_NAME.session.tmp" "$DIR/$GHOSTTY_AGENT_NAME.session"
+fi
 
-# Write full event JSON for the app to parse
-echo "$INPUT" > "$DIR/$GHOSTTY_AGENT_NAME.lastEvent"
+# Atomic write: full event JSON
+echo "$INPUT" > "$DIR/$GHOSTTY_AGENT_NAME.lastEvent.tmp"
+mv "$DIR/$GHOSTTY_AGENT_NAME.lastEvent.tmp" "$DIR/$GHOSTTY_AGENT_NAME.lastEvent"
 ```
 
-**Why:** The app reads the full event JSON and decides what state means. No state keywords in files. No mapping logic in bash. The hook just records what happened. The app interprets.
+**Why atomic (tmp+mv):** POSIX rename is atomic. Reader either sees old file or new file, never partial content. Eliminates the flickering-state bug from partial reads.
 
-The `.lastEvent` file contains the raw JSON from the most recent hook. The app reads `hook_event_name` and derives ClaudeState:
+**Why one script:** All logic lives in Swift. Hook just records what happened. App interprets.
+
+### Claude state parsing (Swift)
 
 ```swift
-func parseClaudeState(from event: [String: Any]) -> ClaudeState {
-    guard let name = event["hook_event_name"] as? String else { return .unknown }
-    switch name {
+func parseClaudeState(from json: [String: Any]) -> ClaudeState {
+    guard let event = json["hook_event_name"] as? String else { return .unknown }
+    switch event {
     case "SessionStart":          return .idle
     case "UserPromptSubmit":      return .thinking
     case "PreToolUse":            return .working
@@ -249,119 +254,147 @@ func parseClaudeState(from event: [String: Any]) -> ClaudeState {
     case "StopFailure":           return .error
     case "PreCompact":            return .compacting
     case "PostCompact":           return .idle
-    default:                      return .unknown // SubagentStart, etc. — don't change state
+    case "SessionEnd":            return .idle
+    default:                      return .unknown
     }
 }
 ```
 
-### Hook registration (all events, one script)
+### Hook registration
+
+13 events, one script:
 
 ```json
 {
-  "hooks": {
-    "SessionStart": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "PreToolUse": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "PostToolUse": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "PermissionRequest": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "StopFailure": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "PreCompact": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "PostCompact": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "SubagentStart": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "~/.config/ghostty-agents/hooks/clawddy-hook.sh", "timeout": 5}]}]
-  }
+  "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+  "PostToolUseFailure", "PermissionRequest", "Stop", "StopFailure",
+  "PreCompact", "PostCompact", "SubagentStart", "SubagentStop", "SessionEnd"
 }
 ```
+
+### Known limitation: `.lastEvent` is a register, not a queue
+
+Rapid events overwrite each other. If PostToolUseFailure fires and PreToolUse immediately overwrites it, we miss the error.
+
+**Why this is acceptable:**
+- PermissionRequest blocks Claude — can't be overwritten
+- Error → next event usually has a human-noticeable gap (Claude generates a response)
+- SubagentStart/SubagentStop don't change our state (mapped to .unknown)
+
+**Future upgrade path:** Change hook to append to an event log. App tracks read offset. Proper queue semantics. Not needed for v2.
 
 ---
 
 ## Thread Safety
 
-**Rule: all mutable agent state lives on `@MainActor`.**
+**Rule: all mutable agent state on @MainActor. No exceptions.**
 
 ```swift
 @MainActor
 final class AgentBridge: ObservableObject {
+    // Structural changes (add/remove agents) publish here
     @Published private(set) var agents: [UUID: AgentInstance] = [:]
 
-    // File I/O on background queue
+    // Per-agent state changes publish on each AgentInstance (per-row observation)
+
     private let ioQueue = DispatchQueue(label: "clawddy.io", qos: .utility)
 
     func schedulePoll() {
         let ids = Array(agents.keys)  // snapshot on main
-        ioQueue.async {
+        ioQueue.async { [self] in
+            // Pure file reads — no mutable state touched
             var events: [UUID: [String: Any]] = [:]
             for id in ids {
-                events[id] = self.readLastEvent(for: id)  // pure file read, no mutable state
+                events[id] = self.readLastEvent(for: id)
             }
             DispatchQueue.main.async {
-                self.applyEvents(events)  // mutate on main only
+                self.applyEvents(events)
             }
         }
     }
 }
 ```
 
-**No mutable state on the I/O queue.** Background reads pure files, returns pure data. Main thread applies mutations. Thread safety by construction, not by locks.
+`readLastEvent` is a pure function: reads a file, returns data. No mutable state.
+`applyEvents` runs on main. Mutates agents. Thread safe by construction.
+
+### Sidebar observation pattern
+
+The bridge's `@Published agents` dict publishes ONLY on structural changes (agent added/removed). Individual state changes publish on each `AgentInstance`.
+
+Each sidebar row receives its `AgentInstance` directly:
+
+```swift
+struct AgentRow: View {
+    @ObservedObject var agent: AgentInstance
+    // ...
+}
+
+// In sidebar ForEach
+ForEach(task.agents, id: \.id) { entry in
+    if let agent = bridge.agents[entry.id] {
+        AgentRow(agent: agent, ...)
+    }
+}
+```
+
+When one agent's state changes, only THAT row re-renders. Other rows untouched. No full-sidebar re-render on every state poll.
 
 ---
 
 ## Process Death Detection
 
-### Mechanism: observe Ghostty's surface lifecycle
+### Primary: surface destruction callback
 
-When creating a surface for an agent, register for the surface's close notification:
+When creating a surface, register for close notification:
 
 ```swift
-func activateAgent(id: UUID, ...) {
-    let surfaceView = Ghostty.SurfaceView(app, baseConfig: config)
-
-    // Observe process exit
-    NotificationCenter.default.addObserver(
-        forName: Ghostty.Notification.didCloseSurface,
-        object: surfaceView,
-        queue: .main
-    ) { [weak self] _ in
-        self?.handleSurfaceDeath(id: id)
-    }
+// Option A: NotificationCenter if Ghostty posts surface close notifications
+NotificationCenter.default.addObserver(
+    forName: .ghosttyDidCloseSurface,  // need to verify this exists
+    object: surfaceView,
+    queue: .main
+) { [weak self] _ in
+    self?.handleSurfaceDeath(id: agentId)
 }
 
+// Option B: poll processExited on timer (fallback)
+// Checked every poll cycle for all .alive/.launching agents
+if surfaceView.processExited {
+    handleSurfaceDeath(id: agentId)
+}
+```
+
+### handleSurfaceDeath
+
+```swift
 func handleSurfaceDeath(id: UUID) {
     guard let agent = agents[id] else { return }
     agent.processState = .dead
     agent.claudeState = .unknown
     surfaceViews.removeValue(forKey: id)
     surfaceWrappers.removeValue(forKey: id)
+    // Don't delete .session — user may want to resume later
 }
 ```
 
-If Ghostty doesn't provide a close notification for embedded surfaces, fall back to polling `surfaceView.processExited` on the timer.
+### What we CAN'T detect
 
-### Shell fallback detection
+| Scenario | Detectable? | State shown |
+|---|---|---|
+| User closes workspace window | Surface stays alive (isReleasedWhenClosed=false). No death. | Last known state (correct) |
+| App force-quit | Everything dies. Reconstructed on restart as .inactive. | .inactive (correct) |
+| Claude exits, `exec zsh` runs | No hooks, processExited=false. | Last known claudeState (typically .idle). User sees shell prompt in terminal. |
+| Terminal tab/surface closed | Surface destroyed → handleSurfaceDeath. | .dead (correct) |
+| `kill -9 <claude-pid>` | No hooks. Script continues to `exec zsh`. Same as Claude exit. | Last known claudeState |
 
-When `processState == .alive` and no hook fires for 30 seconds while the PTY is still open:
-- Claude probably exited and `exec zsh -l` took over
-- Transition to `.shellFallback`
-- Track via `lastHookTime` per agent
-
-```swift
-// In poll cycle
-if agent.processState == .alive,
-   let lastHook = agent.lastHookTime,
-   Date().timeIntervalSince(lastHook) > 30,
-   surfaceViews[id] != nil {
-    agent.processState = .shellFallback
-}
-```
+**Accepted limitation:** Claude → shell transition is undetectable without PTY fd access. The terminal prompt is the user's signal. State stays at last known value.
 
 ---
 
 ## Agent Script
 
-Minimal. One command. No logic.
+Zero logic. One command. App builds everything.
 
 ```bash
 #!/bin/zsh -l
@@ -372,7 +405,7 @@ clear
 exec zsh -l
 ```
 
-`<COMMAND>` is built by Swift at activation time:
+### Command building (Swift)
 
 ```swift
 func buildCommand(agent: AgentInstance) -> String {
@@ -382,7 +415,7 @@ func buildCommand(agent: AgentInstance) -> String {
     }
     // Priority 2: fork from source
     if let sourceId = readForkSource(agent.id) {
-        deleteForkSource(agent.id)
+        // Don't delete .forkFrom here — delete when first hook confirms fork succeeded
         return "claude --resume '\(sourceId)' --fork-session --name '\(agent.name)' --permission-mode auto"
     }
     // Priority 3: fresh start
@@ -390,25 +423,38 @@ func buildCommand(agent: AgentInstance) -> String {
 }
 ```
 
-**Script never reads, writes, or deletes any state file.** App does all file management in Swift.
+**Script never reads, writes, or deletes any state file.**
+
+### .forkFrom lifecycle
+
+1. App writes `<new-uuid>.forkFrom` on fork request
+2. `buildCommand` reads it, builds fork command (does NOT delete)
+3. When first hook arrives (processState .launching → .alive), app deletes `.forkFrom`
+4. If app crashes before deletion: on restart, `.session` file now exists (SessionStart hook wrote it), so buildCommand uses Priority 1 (resume). `.forkFrom` is ignored. Harmless.
+5. If fork fails (no hook arrives, surface destroyed): `.forkFrom` persists. Next activation retries the fork. Correct.
 
 ---
 
 ## File Watcher
 
-### Remove throttle entirely
-
-The `DispatchSource` fires synchronously on kqueue event. Cost per event: 1 file read (~1ms). Even 50 rapid PostToolUse events = 50ms. The `agents[id].claudeState` comparison prevents unnecessary SwiftUI re-renders.
+### No throttle
 
 ```swift
+let source = DispatchSource.makeFileSystemObjectSource(
+    fileDescriptor: fd, eventMask: .write, queue: .main
+)
 source.setEventHandler { [weak self] in
-    self?.schedulePoll()  // no throttle
+    self?.schedulePoll()
 }
 ```
 
-### Watch `.lastEvent` files, not `.state` files
+Cost per event: 1 file read per agent (~1ms each). During 50-tool burst: 50 reads = 50ms. The `claudeState` comparison prevents re-renders when state unchanged (most reads during a burst return the same `.working` state).
 
-The watcher monitors the status directory. When any file changes, it polls all agents. Since we read `.lastEvent` (full JSON), we get richer data per poll.
+### File watcher limitations
+
+kqueue watches an inode. If an external process atomically replaces a file (write tmp + rename), the old inode is replaced. The watcher stops seeing changes.
+
+**Our hook uses atomic write (tmp + mv).** So the watcher is watching the STATUS DIRECTORY, not individual files. Directory-level kqueue fires on any file creation/rename/delete in the directory. This catches atomic writes correctly.
 
 ---
 
@@ -418,63 +464,108 @@ The watcher monitors the status directory. When any file changes, it polls all a
 
 | Data | Location | Survives crash | Written by |
 |---|---|---|---|
-| Agent config (UUIDs, names) | `agents.json` | Yes | App (atomic write) |
-| Session IDs | `<uuid>.session` | Yes | Hook script |
-| Fork sources | `<uuid>.forkFrom` | Yes | App |
-| Last hook event | `<uuid>.lastEvent` | Yes | Hook script |
-| Unread set | `state.json` | Yes | App (periodic flush) |
-| Process state | Memory only | No (reconstructed) | App |
-| Claude state | Reconstructed from `.lastEvent` | Yes | Hook script |
+| Agent config (UUIDs, names) | `agents.json` | Yes | App (atomic) |
+| Session IDs | `<uuid>.session` | Yes | Hook (atomic) |
+| Fork sources | `<uuid>.forkFrom` | Yes | App (atomic) |
+| Last hook event | `<uuid>.lastEvent` | Yes | Hook (atomic) |
+| Unread set + pending renames | `state.json` | Yes | App (periodic atomic flush) |
+| Process state | Memory only | No — reconstructed as `.inactive` | App |
+| Claude state | Reconstructed from `.lastEvent` | Yes | Hook |
+
+### state.json format
+
+```json
+{
+    "unreadAgents": ["uuid-1", "uuid-2"],
+    "pendingRenames": {
+        "uuid-3": "new-display-name"
+    }
+}
+```
+
+Flushed every 5 seconds and on app termination. Atomic write.
 
 ### On app startup (reconstruction)
 
 ```swift
 func reconstructState() {
+    let persisted = loadStateJson()  // unread set + pending renames
+
     for project in config.projects {
         for task in project.tasks {
             for entry in task.agents {
                 let agent = AgentInstance(id: entry.id, name: entry.name)
-                agent.processState = .inactive
-                // Restore claude state from last event file
-                if let event = readLastEvent(for: entry.id) {
-                    agent.claudeState = parseClaudeState(from: event)
-                    agent.sessionId = event["session_id"] as? String
-                }
-                // Restore unread from persisted state
-                agent.isUnread = persistedUnreadSet.contains(entry.id)
+                agent.processState = .inactive  // no surface exists yet
+                agent.claudeState = .unknown    // will be set when activated
+                agent.isUnread = persisted.unreadAgents.contains(entry.id)
                 agents[entry.id] = agent
             }
         }
     }
+
+    self.pendingRenames = persisted.pendingRenames
 }
 ```
 
-### Atomic writes
+**On activation (not startup):** when user clicks an agent:
+1. `processState = .launching`
+2. `claudeState = .unknown` (reset — prevents stale state from previous session leaking)
+3. Surface created, script runs
+4. First hook arrives → `processState = .alive`, `claudeState` updated from event
+5. If pending rename exists → flush when safe state reached
 
-All file writes use atomic rename pattern:
+### Atomic writes (Swift)
 
 ```swift
 func atomicWrite(_ data: Data, to url: URL) throws {
-    let tmp = url.appendingPathExtension("tmp")
+    let tmp = url.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".tmp")
     try data.write(to: tmp)
-    try FileManager.default.replaceItem(at: url, withItemAt: tmp, backupItemName: nil, resultingItemURL: nil)
+    _ = try FileManager.default.replaceItem(at: url, withItemAt: tmp, backupItemName: nil, resultingItemURL: nil)
 }
 ```
+
+---
+
+## Activation Flow (step by step)
+
+```
+1.  User clicks agent in sidebar
+2.  activateAgent(id: UUID) called on main thread
+3.  agent.processState = .launching
+4.  agent.claudeState = .unknown        ← prevents stale state leak
+5.  command = buildCommand(agent)       ← reads .session / .forkFrom on main
+6.  script = writeScript(uuid, name, command)
+7.  config = SurfaceConfiguration(command: script, ...)
+8.  surface = Ghostty.SurfaceView(app, baseConfig: config)
+9.  Register surface close observer (for process death detection)
+10. Add surface to detail VC
+11. markRead(agent.id)                  ← clear unread if viewing this agent
+12. [process starts on background thread]
+13. [claude starts → SessionStart hook fires → writes .lastEvent + .session]
+14. [file watcher fires → schedulePoll → ioQueue reads → main applyEvents]
+15. applyEvents: claudeState = .idle, processState = .alive
+16. If .forkFrom exists → delete it (fork confirmed)
+17. If pendingRename exists for this agent → flush /rename
+18. SwiftUI: AgentInstance publishes → only this agent's row re-renders
+```
+
+Steps 2-11 are synchronous on main thread. Steps 12-18 are asynchronous.
 
 ---
 
 ## Rename Flow
 
 ```
-1. User double-taps agent name in sidebar
-2. User types new name, presses Enter
-3. App updates config: agents[uuid].name = newName
-4. App saves config (atomic write)
-5. App checks claude state:
-   a. Safe (idle/finished/thinking/working) → send /rename immediately
-   b. Unsafe (permission/error) → store in pendingRenames[uuid]
-6. On next state transition to safe → flush pending rename
-7. No rekey. No file renames. No dict updates. UUID unchanged.
+1.  User double-taps agent name
+2.  User types new name, presses Enter
+3.  agent.name = newName                        ← @Published, row re-renders
+4.  config.save()                               ← atomic write
+5.  Check claudeState:
+    a. Safe (idle/thinking/working) → send "/rename newName\n" to pty
+    b. Unsafe (permission/error/unknown) → pendingRenames[uuid] = newName
+6.  persistState()                              ← flush pendingRenames to state.json
+7.  On next transition to safe state → flush pending rename automatically
+8.  ZERO rekey. ZERO file renames. UUID unchanged.
 ```
 
 ---
@@ -482,19 +573,18 @@ func atomicWrite(_ data: Data, to url: URL) throws {
 ## Fork Flow
 
 ```
-1. User right-clicks agent → "Fork"
-2. App generates new UUID
-3. App reads source agent's session ID from <source-uuid>.session
-   - If no session → show error, abort
-4. App writes <new-uuid>.forkFrom with source session ID
-5. App adds new AgentEntry to config (new UUID, name = "{source}-fork")
-6. App saves config (atomic write)
-7. User clicks new agent → activateAgent
-8. buildCommand sees .forkFrom → generates: claude --resume <sourceId> --fork-session --name <name>
-9. App deletes .forkFrom (consumed)
-10. Surface starts → claude forks → SessionStart hook fires with NEW session ID
-11. Hook writes new session ID to <new-uuid>.session
-12. Agent is now independent
+1.  User right-clicks agent → "Fork"
+2.  sourceSessionId = readSessionFile(source.id)
+    - If nil → show error to user, abort
+3.  newId = UUID()
+4.  Write <newId>.forkFrom = sourceSessionId        ← atomic
+5.  Add AgentEntry(id: newId, name: "\(source.name)-fork") to config
+6.  config.save()                                   ← atomic
+7.  [User clicks new agent → activateAgent]
+8.  buildCommand: sees .forkFrom → "claude --resume <sourceId> --fork-session --name <name>"
+9.  Surface starts → claude forks → SessionStart hook writes NEW session ID to <newId>.session
+10. applyEvents: processState .launching → .alive, delete .forkFrom (fork confirmed)
+11. Agent is independent. No collision possible (UUID identity).
 ```
 
 ---
@@ -503,31 +593,37 @@ func atomicWrite(_ data: Data, to url: URL) throws {
 
 | Event | Level | Sound | Badge | When |
 |---|---|---|---|---|
-| Agent finished (unread) | `.passive` | none | +1 | `claudeState: .thinking/.working → .idle` AND agent not currently viewed |
-| Permission needed | `.timeSensitive` | `.defaultCritical` | +1 | `claudeState → .permission` |
-| Error | `.active` | `.default` | +1 | `claudeState → .error` |
-| Context compacting | none | none | none | Informational only, shown in sidebar |
+| Finished (unread) | `.passive` | none | +1 | claudeState: thinking/working → idle, agent not being viewed |
+| Permission needed | `.timeSensitive` | `.defaultCritical` | +1 | claudeState → permission |
+| Error | `.active` | `.default` | +1 | claudeState → error |
+| Compacting | none | none | none | Sidebar-only indicator |
 
-Badge count = number of agents where `displayState ∈ {.finished, .permission, .error}`.
-Badge clears per-agent when user views the agent (clicks in sidebar).
+Badge count = agents where `displayState ∈ {.finished, .permission, .error}`.
+Badge clears per-agent when user views the agent.
+
+Notification grouping: `threadIdentifier = uuid.uuidString` (per-agent stacking).
+Notification tap: opens workspace window.
+Notification ID prefix: `clawddy.` (for routing in UNUserNotificationCenterDelegate).
 
 ---
 
 ## Display Properties
 
-| DisplayState | Color | Icon | Label | Selection tint | Animated |
+| DisplayState | Color | Icon | Label | Selection tint | Animation |
 |---|---|---|---|---|---|
-| `.inactive` | `.secondary.opacity(0.3)` | none | "" | `.accentColor` | no |
+| `.inactive` | `.secondary.opacity(0.3)` | `circle` | "" | `.accentColor` | none |
 | `.launching` | `.secondary` | `circle.dotted` | "launching" | `.accentColor` | `.pulse` |
-| `.idle` | `.secondary` | `moon.fill` | "idle" | `.accentColor` | no |
+| `.idle` | `.secondary` | `moon.fill` | "idle" | `.accentColor` | none |
 | `.finished` | `.yellow` | `bell.badge.fill` | "finished" | `.yellow` | `.variableColor` |
 | `.thinking` | `.blue` | `brain` | "thinking" | `.blue` | `.pulse` |
 | `.working` | `.green` | `bolt.fill` | "working" | `.green` | `.variableColor` |
 | `.permission` | `.orange` | `exclamationmark.circle.fill` | "permission" | `.orange` | `.variableColor` |
 | `.error` | `.red` | `xmark.circle.fill` | "error" | `.red` | `.bounce` (once) |
 | `.compacting` | `.purple` | `arrow.triangle.2.circlepath` | "compacting" | `.purple` | `.pulse` |
-| `.shell` | `.secondary.opacity(0.5)` | `terminal` | "shell" | `.accentColor` | no |
-| `.dead` | `.secondary.opacity(0.3)` | `xmark` | "exited" | `.accentColor` | no |
+| `.dead` | `.secondary.opacity(0.3)` | `xmark` | "exited" | `.accentColor` | none |
+
+Liquid Glass: selected row uses `.glassEffect(.regular.tint(selectionTint.opacity(0.28)))` on macOS 26+.
+Symbol effects: `.symbolEffect` gated to macOS 14+.
 
 ---
 
@@ -535,74 +631,81 @@ Badge clears per-agent when user views the agent (clicks in sidebar).
 
 ### On agent delete
 ```
-1. Remove surface from detail VC
-2. Remove agent from bridge.agents dict
-3. Delete: <uuid>.session, <uuid>.forkFrom, <uuid>.lastEvent
-4. Remove from config
-5. Save config (atomic)
-6. Remove from persisted unread set
+1. Destroy surface (remove from detail VC, remove close observer)
+2. Remove AgentInstance from bridge.agents dict
+3. Delete: <uuid>.session, <uuid>.forkFrom, <uuid>.lastEvent (on ioQueue)
+4. Remove from config, save (atomic)
+5. Remove from unreadAgents, remove from pendingRenames
+6. Persist state.json
 ```
 
 ### On app termination
 ```
 1. Invalidate poll timer
-2. Cancel file watcher DispatchSource
-3. Unregister Carbon hotkey
-4. Persist unread set to state.json
-5. Surfaces are owned by Ghostty — they clean up with the window
+2. Cancel file watcher DispatchSource (closes fd via cancelHandler)
+3. Unregister Carbon hotkey via UnregisterEventHotKey(ref)
+4. Remove Carbon event handler via RemoveEventHandler(ref)
+5. Persist state.json (final flush — unread + pendingRenames)
 ```
 
 ### On app startup
 ```
-1. Clean stale script files from /tmp
-2. Reconstruct agent state from disk (see Persistence section)
-3. Start poll timer
-4. Start file watcher
-5. Register hotkey
-6. Install/update hooks if needed
+1. Clean stale script files from /tmp/clawddy-*.sh
+2. Load config (migrate if old format detected)
+3. Load state.json (unread set, pending renames)
+4. Reconstruct agents from config (all processState = .inactive)
+5. Start poll timer (3s safety net)
+6. Start file watcher on status directory (no throttle)
+7. Register Carbon hotkey + event handler (store refs for cleanup)
+8. Install/update hooks if needed
 ```
 
 ---
 
-## Migration from current architecture
+## Migration from v1
 
-### Config migration
+### Config format
 
-On first load with new format, detect old format (`"agents": ["name", ...]`) and migrate:
+Old: `"agents": ["alpha", "beta"]`
+New: `"agents": [{"id": "...", "name": "alpha"}, ...]`
 
-```swift
-func migrateIfNeeded() {
-    // If agents array contains strings instead of objects, migrate
-    for i in projects.indices {
-        for j in projects[i].tasks.indices {
-            // Old format: agents is [String]
-            // New format: agents is [AgentEntry]
-            // Detect and convert, generating UUIDs
-        }
-    }
-}
-```
+Detection: try to decode as `[AgentEntry]`. If that fails, decode as `[String]`, generate UUIDs, save new format.
 
-### Status file migration
-
-Old files keyed by sanitized name string. New files keyed by UUID. On migration:
-1. For each agent with old-style files, rename files to UUID-keyed names
-2. Delete old files
+**Sessions from v1 are not migrated.** Old status files (keyed by sanitized name strings) are orphaned. Agents start fresh after migration. This is a clean break — documented in release notes.
 
 ### Hook migration
 
-Old: 6 separate scripts. New: 1 universal script. On migration:
-1. Write new universal script
-2. Remove old Clawddy hooks from Claude settings
+Old: 6 separate scripts (on-session-start.sh, on-tool.sh, etc.)
+New: 1 universal script (clawddy-hook.sh)
+
+On startup:
+1. Remove all old Clawddy hooks from `~/.claude/settings.json` (entries containing `ghostty-agents/hooks/`)
+2. Write new `clawddy-hook.sh`
 3. Install new hooks for all 13 events
-4. Delete old script files
+4. Delete old script files from hooks directory
 
 ---
 
-## Open Questions
+## Accepted Limitations
 
-1. **Ghostty surface close callback**: Need to verify if `Ghostty.Notification.didCloseSurface` is available for embedded surfaces, or if we need to observe via `close_surface_cb` in the runtime config. If neither works, fall back to polling `processExited`.
+### 1. Claude → shell transition undetectable
+When Claude exits and `exec zsh -l` takes over, no hooks fire and `processExited` never triggers (process replaced, not exited). State stays at last known ClaudeState. The user sees the shell prompt in the terminal directly.
 
-2. **Shell fallback detection**: The 30-second timeout for detecting "claude exited, shell took over" is heuristic. If Claude is genuinely idle for 30 seconds (user not typing), we'd incorrectly transition to `.shellFallback`. Consider: only transition if the PTY's foreground process group changed (from claude to zsh). This requires checking the process group via `tcgetpgrp()`.
+**Impact:** Low. The terminal itself communicates state. The sidebar label is a secondary indicator.
 
-3. **Concurrent Claude sessions**: If two agents share the same working directory, their sessions could interfere in Claude's session storage. Each agent should get `--name` to distinguish them, but `--continue` (without `--resume`) would pick up the wrong session. Solution: always use `--resume <id>`, never `--continue`.
+### 2. `.lastEvent` is a register, not a queue
+Rapid events overwrite each other. A transient error state (PostToolUseFailure) could be overwritten by the next event before we read it.
+
+**Impact:** Low. PermissionRequest (the most critical) blocks Claude and can't be overwritten. Errors are typically followed by Claude's response text, creating a readable gap.
+
+**Future upgrade:** Append-only event log with read offset tracking.
+
+### 3. SessionEnd doesn't fire on /exit
+Claude Code bug (github.com/anthropics/claude-code/issues/17885). `/exit` terminates the session without firing SessionEnd. Only Ctrl+D fires it.
+
+**Impact:** Low. Same as limitation #1 — Claude exits, shell takes over, undetectable.
+
+### 4. No hooks on SIGTERM/SIGKILL/SIGHUP
+Process termination via signals bypasses hooks entirely. State stays at last known value until surface destruction is detected.
+
+**Impact:** Medium for SIGKILL (state stuck until surface destroyed). Low for SIGTERM/SIGHUP (surface destruction usually follows quickly).
