@@ -233,16 +233,18 @@ INPUT=$(cat)
 # Extract session_id with sed (no jq dependency)
 SID=$(echo "$INPUT" | sed -n 's/.*"session_id" *: *"\([^"]*\)".*/\1/p' | head -1)
 
-# Atomic write: session ID
+# Atomic write: session ID (PID-suffixed tmp to avoid concurrent hook race)
 if [ -n "$SID" ]; then
-    echo "$SID" > "$DIR/$GHOSTTY_AGENT_NAME.session.tmp"
-    mv "$DIR/$GHOSTTY_AGENT_NAME.session.tmp" "$DIR/$GHOSTTY_AGENT_NAME.session"
+    echo "$SID" > "$DIR/$GHOSTTY_AGENT_NAME.session.$$"
+    mv "$DIR/$GHOSTTY_AGENT_NAME.session.$$" "$DIR/$GHOSTTY_AGENT_NAME.session"
 fi
 
-# Atomic write: full event JSON
-echo "$INPUT" > "$DIR/$GHOSTTY_AGENT_NAME.lastEvent.tmp"
-mv "$DIR/$GHOSTTY_AGENT_NAME.lastEvent.tmp" "$DIR/$GHOSTTY_AGENT_NAME.lastEvent"
+# Atomic write: full event JSON (PID-suffixed tmp)
+echo "$INPUT" > "$DIR/$GHOSTTY_AGENT_NAME.lastEvent.$$"
+mv "$DIR/$GHOSTTY_AGENT_NAME.lastEvent.$$" "$DIR/$GHOSTTY_AGENT_NAME.lastEvent"
 ```
+
+**Why PID-suffixed tmp files:** Two hooks can fire concurrently for the same agent (e.g., PreToolUse immediately followed by PostToolUse). Each runs as a separate process. Without unique tmp names, both write to the same `.tmp` file — race condition. Using `$$` (shell PID) ensures each process has its own tmp. Last `mv` wins (latest event). No data corruption.
 
 **Why sed not jq:** macOS doesn't ship jq. Users who install via Homebrew have it; others don't. sed is guaranteed POSIX. The extraction pattern is simple enough for sed.
 
@@ -420,22 +422,32 @@ source.setEventHandler { [weak self] in
 
 ### Primary: surface destruction callback
 
-When creating a surface, register for close notification:
+When creating a surface, register for close notification. **Store observer token for cleanup.**
 
 ```swift
-// Option A: NotificationCenter (if Ghostty posts surface close notifications)
-NotificationCenter.default.addObserver(
-    forName: .ghosttyDidCloseSurface,
+var surfaceObservers: [UUID: NSObjectProtocol] = [:]
+
+// On surface creation
+let token = NotificationCenter.default.addObserver(
+    forName: .ghosttyDidCloseSurface,   // verify this exists; fall back to polling if not
     object: surfaceView,
     queue: .main
 ) { [weak self] _ in
     self?.handleSurfaceDeath(id: agentId)
 }
+surfaceObservers[agentId] = token
 
-// Option B: poll processExited on timer (fallback)
-// Checked every poll cycle for agents in .alive or .launching state
-if surfaceView.processExited {
-    handleSurfaceDeath(id: agentId)
+// Fallback: poll processExited in schedulePoll (MUST be on main thread — surface access)
+func schedulePoll() {
+    guard !isTerminating else { return }
+    // Main thread: check process exits
+    for (id, surface) in surfaceViews {
+        if surface.processExited {
+            handleSurfaceDeath(id: id)
+        }
+    }
+    // Background: file I/O
+    ...
 }
 ```
 
@@ -448,7 +460,15 @@ func handleSurfaceDeath(id: UUID) {
     agent.claudeState = .unknown
     surfaceViews.removeValue(forKey: id)
     surfaceWrappers.removeValue(forKey: id)
+    // Remove observer
+    if let token = surfaceObservers.removeValue(forKey: id) {
+        NotificationCenter.default.removeObserver(token)
+    }
     // Don't delete .session — user may want to resume later
+    // If this was the active agent, show placeholder
+    if detailVC?.activeKey == id {
+        detailVC?.showPlaceholder()
+    }
 }
 ```
 
@@ -715,12 +735,14 @@ Symbol effects: `.symbolEffect` gated to macOS 14+.
 
 ### On app termination
 ```
-1. Invalidate poll timer
-2. Cancel status directory watcher DispatchSource (closes fd)
-3. Cancel config directory watcher DispatchSource (closes fd)
-4. Unregister Carbon hotkey via UnregisterEventHotKey(ref)
-5. Remove Carbon event handler via RemoveEventHandler(ref)
-6. Persist state.json (final flush — unread + pendingRenames)
+1. Set isTerminating = true (prevents schedulePoll re-entry)
+2. Invalidate poll timer
+3. Cancel status directory watcher DispatchSource (closes fd)
+4. Cancel config directory watcher DispatchSource (closes fd)
+5. Remove all surface observers (surfaceObservers.values.forEach removeObserver)
+6. Unregister Carbon hotkey via UnregisterEventHotKey(ref)
+7. Remove Carbon event handler via RemoveEventHandler(ref)
+8. Persist state.json (final flush — unread + pendingRenames)
 ```
 
 ### On app startup
@@ -748,7 +770,7 @@ Symbol effects: `.symbolEffect` gated to macOS 14+.
 Old: `"agents": ["alpha", "beta"]`
 New: `"agents": [{"id": "...", "name": "alpha"}, ...]`
 
-Detection: attempt decode as `[AgentEntry]`. If fails, decode as `[String]`, generate UUIDs, save.
+Detection: attempt decode as `[AgentEntry]`. If fails, decode as `[String]`, generate UUIDs, **save immediately** (persist UUIDs before anything else reads them — otherwise re-decode generates different UUIDs).
 
 **Sessions from v1 are NOT migrated.** Old status files (keyed by sanitized name strings) are orphaned. Agents start fresh. Clean break — documented in release notes.
 
