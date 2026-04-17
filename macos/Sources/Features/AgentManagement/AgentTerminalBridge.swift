@@ -172,6 +172,7 @@ final class AgentBridge: ObservableObject {
 
     var onAggregateStateChanged: ((AggregateState) -> Void)?
     var onSendText: ((UUID, String) -> Void)?
+    var onSurfaceDeath: ((UUID) -> Void)?
     var currentlyViewedAgentId: UUID?
 
     private var pendingRenames: [UUID: String] = [:]
@@ -316,14 +317,14 @@ final class AgentBridge: ObservableObject {
 
         // Priority 1: resume existing session
         if let sessionId = readSessionFile(agent.id) {
-            return "claude --resume '\(sessionId)' --permission-mode auto"
+            return "claude --resume '\(sessionId)' --dangerously-skip-permissions"
         }
         // Priority 2: fork from source
         if let sourceId = readForkSource(agent.id) {
-            return "claude --resume '\(sourceId)' --fork-session --name '\(name)' --permission-mode auto"
+            return "claude --resume '\(sourceId)' --fork-session --name '\(name)' --dangerously-skip-permissions"
         }
         // Priority 3: fresh start
-        return "claude --name '\(name)' --permission-mode auto"
+        return "claude --name '\(name)' --dangerously-skip-permissions"
     }
 
     // MARK: - Fork
@@ -383,9 +384,8 @@ final class AgentBridge: ObservableObject {
 
     // MARK: - Deletion
 
-    func deleteAgent(id: UUID, config: AgentConfig, detailVC: AgentDetailViewController) {
+    func deleteAgent(id: UUID, config: AgentConfig) {
         destroySurface(id: id)
-        detailVC.removeSurface(id: id)
         agents.removeValue(forKey: id)
         pendingRenames.removeValue(forKey: id)
         config.removeAgent(id: id)
@@ -566,6 +566,7 @@ final class AgentBridge: ObservableObject {
             agent.processState = .dead
             agent.claudeState = .unknown
         }
+        onSurfaceDeath?(id)
     }
 
     private func handleSurfaceDeath(id: UUID) {
@@ -583,18 +584,28 @@ final class AgentBridge: ObservableObject {
         return json
     }
 
+    /// Characters allowed in session IDs: alphanumeric, hyphen, underscore.
+    /// Rejects anything that could be a shell metacharacter.
+    private static let safeIdCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+
     private func readSessionFile(_ id: UUID) -> String? {
         let url = statusDir.appendingPathComponent("\(id.uuidString).session")
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty,
+              trimmed.unicodeScalars.allSatisfy(Self.safeIdCharacters.contains)
+        else { return nil }
+        return trimmed
     }
 
     private func readForkSource(_ id: UUID) -> String? {
         let url = statusDir.appendingPathComponent("\(id.uuidString).forkFrom")
         guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        guard !trimmed.isEmpty,
+              trimmed.unicodeScalars.allSatisfy(Self.safeIdCharacters.contains)
+        else { return nil }
+        return trimmed
     }
 
     // MARK: - Notifications

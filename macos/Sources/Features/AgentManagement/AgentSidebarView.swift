@@ -8,6 +8,7 @@ struct AgentSidebarView: View {
     @ObservedObject var bridge: AgentBridge
     let onSelectAgent: (UUID, AgentProject) -> Void
     var onForkAgent: ((UUID, AgentProject, String) -> Void)?  // sourceId, project, task
+    var onDeleteAgent: ((UUID) -> Void)?
 
     @State private var selectedID: UUID?
     @State private var editText = ""
@@ -107,8 +108,7 @@ struct AgentSidebarView: View {
                     DispatchQueue.main.async {
                         for task in project.tasks {
                             for agent in task.agents {
-                                bridge.deleteAgent(id: agent.id, config: config,
-                                    detailVC: findDetailVC())
+                                onDeleteAgent?(agent.id)
                             }
                         }
                         config.removeProject(name: project.name)
@@ -182,8 +182,7 @@ struct AgentSidebarView: View {
                         Divider()
                         Button("Delete Agent", role: .destructive) {
                             DispatchQueue.main.async {
-                                bridge.deleteAgent(id: entry.id, config: config,
-                                    detailVC: findDetailVC())
+                                onDeleteAgent?(entry.id)
                             }
                         }
                     }
@@ -402,17 +401,6 @@ struct AgentSidebarView: View {
         return path
     }
 
-    private func findDetailVC() -> AgentDetailViewController {
-        // Walk windows (not just keyWindow) to find the workspace split VC
-        for window in NSApp.windows {
-            if let splitVC = window.contentViewController as? AgentWorkspaceController,
-               let detailVC = splitVC.splitViewItems.last?.viewController as? AgentDetailViewController {
-                return detailVC
-            }
-        }
-        // Should never happen — but return a dummy to avoid crash
-        return AgentDetailViewController()
-    }
 }
 
 // MARK: - Agent Row (per-row observation)

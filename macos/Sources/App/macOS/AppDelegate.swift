@@ -1149,6 +1149,13 @@ extension AppDelegate {
         agentBridge.onSendText = { [weak self] id, text in
             self?.agentDetailVC?.sendText(text, toAgent: id)
         }
+        agentBridge.onSurfaceDeath = { [weak self] id in
+            self?.agentDetailVC?.removeSurface(id: id)
+        }
+        agentConfig.onReloaded = { [weak self] in
+            guard let self else { return }
+            self.agentBridge.reconcileWithConfig(self.agentConfig)
+        }
 
         // Status bar item
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -1242,6 +1249,10 @@ extension AppDelegate {
                         project: project.name, task: taskName) {
                         self.activateAgent(id: entry.id, project: project)
                     }
+                },
+                onDeleteAgent: { [weak self] id in
+                    guard let self else { return }
+                    self.agentBridge.deleteAgent(id: id, config: self.agentConfig)
                 }
             ))
 

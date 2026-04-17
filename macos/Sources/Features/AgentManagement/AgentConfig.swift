@@ -51,6 +51,7 @@ private struct AgentConfigFile: Codable {
 
 class AgentConfig: ObservableObject {
     @Published var projects: [AgentProject] = []
+    var onReloaded: (() -> Void)?
     private var configDirWatcher: DispatchSourceFileSystemObject?
     private var suppressWatch = false
 
@@ -90,6 +91,7 @@ class AgentConfig: ObservableObject {
         projects = config.projects
         migrateStatusFiles()
         logger.info("load — \(config.projects.count) projects, \(self.allAgentEntries.count) agents")
+        onReloaded?()
     }
 
     /// Migrate old v1 status files (keyed by sanitized name) to UUID-keyed names.

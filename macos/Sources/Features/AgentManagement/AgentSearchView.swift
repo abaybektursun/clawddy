@@ -58,6 +58,7 @@ struct AgentSearchView: View {
         .onAppear {
             withAnimation(.spring(duration: 0.3, bounce: 0.1)) { appeared = true }
             Task { isSearchFocused = true }
+            if let existing = keyMonitor { NSEvent.removeMonitor(existing); keyMonitor = nil }
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
                 switch event.keyCode {
                 case 126:
@@ -72,7 +73,7 @@ struct AgentSearchView: View {
             }
         }
         .onDisappear {
-            if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
+            if let monitor = keyMonitor { NSEvent.removeMonitor(monitor); keyMonitor = nil }
         }
         .onChange(of: query) { _ in selectedIndex = 0 }
     }
