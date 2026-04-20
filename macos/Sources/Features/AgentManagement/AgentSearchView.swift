@@ -10,8 +10,8 @@ struct AgentSearchResult: Identifiable {
 }
 
 struct AgentSearchView: View {
-    @ObservedObject var config: AgentConfig
-    @ObservedObject var bridge: AgentBridge
+    var config: AgentConfig
+    var bridge: AgentBridge
     let onSelectAgent: (UUID, AgentProject) -> Void
     let onDismiss: () -> Void
 

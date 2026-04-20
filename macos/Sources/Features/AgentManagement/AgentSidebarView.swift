@@ -4,8 +4,8 @@ import GhosttyKit
 // MARK: - Sidebar
 
 struct AgentSidebarView: View {
-    @ObservedObject var config: AgentConfig
-    @ObservedObject var bridge: AgentBridge
+    var config: AgentConfig
+    var bridge: AgentBridge
     let onSelectAgent: (UUID, AgentProject) -> Void
     var onForkAgent: ((UUID, AgentProject, String) -> Void)?  // sourceId, project, task
     var onDeleteAgent: ((UUID) -> Void)?
@@ -59,16 +59,18 @@ struct AgentSidebarView: View {
     // MARK: - Agent List
 
     private var agentList: some View {
-        List {
-            ForEach(config.projects) { project in
-                Section {
-                    projectContent(project)
-                } header: {
-                    projectHeader(project)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                ForEach(config.projects) { project in
+                    Section {
+                        projectContent(project)
+                    } header: {
+                        projectHeader(project)
+                    }
                 }
             }
+            .padding(.horizontal, 8)
         }
-        .listStyle(.sidebar)
     }
 
     // MARK: - Project Header
@@ -135,7 +137,6 @@ struct AgentSidebarView: View {
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.quaternary)
                 .lineLimit(1)
-                .listRowSeparator(.hidden)
                 .padding(.bottom, 6)
         }
 
@@ -152,7 +153,6 @@ struct AgentSidebarView: View {
 
         ForEach(project.tasks) { task in
             taskLabel(task, project: project)
-                .listRowSeparator(.hidden)
 
             ForEach(task.agents) { entry in
                 if let agent = bridge.agents[entry.id] {
@@ -389,7 +389,6 @@ struct AgentSidebarView: View {
         .padding(10)
         .background(.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.red.opacity(0.25), lineWidth: 0.5))
-        .listRowSeparator(.hidden)
         .padding(.bottom, 6)
     }
 
@@ -406,7 +405,7 @@ struct AgentSidebarView: View {
 // MARK: - Agent Row (per-row observation)
 
 struct AgentRow: View {
-    @ObservedObject var agent: AgentInstance
+    var agent: AgentInstance
     let isSelected: Bool
     let isHovered: Bool
     let isEditing: Bool

@@ -149,15 +149,16 @@ final class AgentDetailViewController: NSViewController {
 
 // MARK: - Header
 
-class AgentDetailHeaderModel: ObservableObject {
-    @Published var agentName: String = ""
-    @Published var projectName: String = ""
-    @Published var isActive: Bool = false
-    @Published var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
+@Observable
+class AgentDetailHeaderModel {
+    var agentName: String = ""
+    var projectName: String = ""
+    var isActive: Bool = false
+    var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
 }
 
 private struct AgentDetailHeaderView: View {
-    @ObservedObject var model: AgentDetailHeaderModel
+    var model: AgentDetailHeaderModel
 
     var body: some View {
         HStack(spacing: 8) {

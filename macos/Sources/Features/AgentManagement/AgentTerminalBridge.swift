@@ -115,15 +115,16 @@ enum DisplayState: Equatable {
 
 // MARK: - Agent Instance (per-agent observable)
 
-final class AgentInstance: ObservableObject, Identifiable {
+@Observable
+final class AgentInstance: Identifiable {
     let id: UUID
-    @Published var name: String
-    @Published var sessionId: String?
-    @Published var processState: ProcessState = .inactive
-    @Published var claudeState: ClaudeState = .unknown
-    @Published var isUnread: Bool = false
-    @Published var lastHookTime: Date?
-    var launchTime: Date?
+    var name: String
+    var sessionId: String?
+    var processState: ProcessState = .inactive
+    var claudeState: ClaudeState = .unknown
+    var isUnread: Bool = false
+    @ObservationIgnored var lastHookTime: Date?
+    @ObservationIgnored var launchTime: Date?
 
     var displayState: DisplayState {
         switch processState {
@@ -167,8 +168,9 @@ private struct PersistedState: Codable {
 
 // MARK: - Agent Bridge
 
-final class AgentBridge: ObservableObject {
-    @Published private(set) var agents: [UUID: AgentInstance] = [:]
+@Observable
+final class AgentBridge {
+    private(set) var agents: [UUID: AgentInstance] = [:]
 
     var onAggregateStateChanged: ((AggregateState) -> Void)?
     var onSendText: ((UUID, String) -> Void)?

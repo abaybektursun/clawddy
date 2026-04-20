@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import os
 
 private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "AgentConfig")
@@ -49,8 +50,9 @@ private struct AgentConfigFile: Codable {
 
 // MARK: - Config Manager
 
-class AgentConfig: ObservableObject {
-    @Published var projects: [AgentProject] = []
+@Observable
+class AgentConfig {
+    var projects: [AgentProject] = []
     var onReloaded: (() -> Void)?
     private var configDirWatcher: DispatchSourceFileSystemObject?
     private var suppressWatch = false
