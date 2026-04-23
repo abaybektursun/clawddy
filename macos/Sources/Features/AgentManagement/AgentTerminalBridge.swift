@@ -185,6 +185,11 @@ final class AgentBridge {
     private var statusDirWatcher: DispatchSourceFileSystemObject?
     private var pollScheduled = false
     private let ioQueue = DispatchQueue(label: "clawddy.io", qos: .utility)
+    private var lastEventContent: [UUID: Data] = [:]
+
+    /// Compacting is provably bounded (~5-15s). If no PostCompact arrives
+    /// within this window, the state is stale (e.g., user cancelled).
+    private static let compactingTimeout: TimeInterval = 30
 
     private var surfaceViews: [UUID: Ghostty.SurfaceView] = [:]
     private var surfaceWrappers: [UUID: SurfaceScrollView] = [:]
@@ -243,6 +248,7 @@ final class AgentBridge {
             destroySurface(id: id)
             agents.removeValue(forKey: id)
             pendingRenames.removeValue(forKey: id)
+            lastEventContent.removeValue(forKey: id)
         }
 
         // Sync display names
@@ -285,7 +291,6 @@ final class AgentBridge {
                 printf '\\033]2;%s\\007' '\(name)'
                 clear
                 \(command)
-                exec zsh -l
                 """
 
             let scriptPath = FileManager.default.temporaryDirectory
@@ -390,6 +395,7 @@ final class AgentBridge {
         destroySurface(id: id)
         agents.removeValue(forKey: id)
         pendingRenames.removeValue(forKey: id)
+        lastEventContent.removeValue(forKey: id)
         config.removeAgent(id: id)
 
         // Clean status files
@@ -431,30 +437,38 @@ final class AgentBridge {
         // Ensure status dir exists
         try? FileManager.default.createDirectory(at: statusDir, withIntermediateDirectories: true)
 
-        // Background: read event files
+        // Background: read raw event file data
         let ids = Array(agents.keys)
         ioQueue.async { [weak self] in
             guard let self else { return }
-            var events: [UUID: [String: Any]] = [:]
+            var rawEvents: [UUID: Data] = [:]
             for id in ids {
-                events[id] = self.readLastEvent(for: id)
+                let url = self.statusDir.appendingPathComponent("\(id.uuidString).lastEvent")
+                if let data = try? Data(contentsOf: url) {
+                    rawEvents[id] = data
+                }
             }
             DispatchQueue.main.async { [weak self] in
-                self?.applyEvents(events)
+                self?.applyRawEvents(rawEvents)
             }
         }
     }
 
-    private func applyEvents(_ events: [UUID: [String: Any]]) {
-        for (id, json) in events {
+    private func applyRawEvents(_ rawEvents: [UUID: Data]) {
+        for (id, data) in rawEvents {
             guard let agent = agents[id] else { continue }
+
+            // Dedup: skip if file content hasn't changed since last read
+            if data == lastEventContent[id] { continue }
+            lastEventContent[id] = data
+
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             let newClaude = parseClaudeState(from: json)
-            if newClaude == .unknown { continue }  // no valid event, skip
+            if newClaude == .unknown { continue }
 
             let oldDisplay = agent.displayState
             let oldClaude = agent.claudeState
 
-            // Update session ID from every event (they all carry it)
             if let sid = json["session_id"] as? String, !sid.isEmpty {
                 agent.sessionId = sid
             }
@@ -462,14 +476,12 @@ final class AgentBridge {
             // Process state transition: launching → alive on first valid hook
             if agent.processState == .launching {
                 agent.processState = .alive
-                // Delete .forkFrom on first hook (fork confirmed)
                 let forkUrl = statusDir.appendingPathComponent("\(id.uuidString).forkFrom")
                 if FileManager.default.fileExists(atPath: forkUrl.path) {
                     ioQueue.async { try? FileManager.default.removeItem(at: forkUrl) }
                 }
             }
 
-            // Claude state update
             agent.claudeState = newClaude
             agent.lastHookTime = Date()
 
@@ -477,9 +489,7 @@ final class AgentBridge {
 
             // Unread tracking
             if oldClaude.isActiveState && newClaude == .idle {
-                // Only mark unread if user isn't currently viewing this agent
-                let isCurrentlyViewed = (currentlyViewedAgentId == id)
-                if !isCurrentlyViewed {
+                if currentlyViewedAgentId != id {
                     agent.isUnread = true
                 }
             }
@@ -506,6 +516,15 @@ final class AgentBridge {
                let pendingName = pendingRenames.removeValue(forKey: id) {
                 onSendText?(id, "/rename \(pendingName)\n")
             }
+        }
+
+        // Staleness: expire compacting state when no new event arrives within bound
+        for (_, agent) in agents {
+            guard agent.claudeState == .compacting,
+                  let hookTime = agent.lastHookTime,
+                  Date().timeIntervalSince(hookTime) > Self.compactingTimeout
+            else { continue }
+            agent.claudeState = .idle
         }
 
         updateAggregate()
@@ -577,14 +596,6 @@ final class AgentBridge {
     }
 
     // MARK: - File I/O (called from ioQueue)
-
-    private func readLastEvent(for id: UUID) -> [String: Any]? {
-        let url = statusDir.appendingPathComponent("\(id.uuidString).lastEvent")
-        guard let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        return json
-    }
 
     /// Characters allowed in session IDs: alphanumeric, hyphen, underscore.
     /// Rejects anything that could be a shell metacharacter.
