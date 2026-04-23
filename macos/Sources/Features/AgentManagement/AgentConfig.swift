@@ -56,6 +56,7 @@ class AgentConfig {
     var onReloaded: (() -> Void)?
     private var configDirWatcher: DispatchSourceFileSystemObject?
     private var suppressWatch = false
+    private var lastConfigHash: Int = 0
 
     static var baseDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -90,6 +91,7 @@ class AgentConfig {
               let data = try? Data(contentsOf: Self.configURL),
               let config = try? JSONDecoder().decode(AgentConfigFile.self, from: data)
         else { return }
+        lastConfigHash = data.hashValue
         projects = config.projects
         migrateStatusFiles()
         logger.info("load — \(config.projects.count) projects, \(self.allAgentEntries.count) agents")
@@ -369,6 +371,10 @@ class AgentConfig {
         )
         source.setEventHandler { [weak self] in
             guard let self, !self.suppressWatch else { return }
+            // Content-based dedup: only reload if agents.json actually changed
+            guard let data = try? Data(contentsOf: Self.configURL) else { return }
+            let hash = data.hashValue
+            guard hash != self.lastConfigHash else { return }
             self.load()
         }
         source.setCancelHandler { close(fd) }

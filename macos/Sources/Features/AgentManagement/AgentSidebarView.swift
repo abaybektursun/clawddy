@@ -453,22 +453,11 @@ struct AgentRow: View {
 
     // MARK: - Status Dot
 
-    @ViewBuilder
     private func statusDot(_ state: DisplayState) -> some View {
         let isInactive = state == .inactive || state == .dead
-        let base = Image(systemName: isInactive ? "circle" : "circle.fill")
+        return Image(systemName: isInactive ? "circle" : "circle.fill")
             .font(.system(size: 8, weight: .medium))
             .foregroundStyle(state.color)
-        if #available(macOS 14.0, *) {
-            base
-                .symbolEffect(.pulse, options: .repeating,
-                    isActive: state == .thinking || state == .launching || state == .compacting)
-                .symbolEffect(.variableColor.iterative.reversing, options: .repeating,
-                    isActive: state == .working || state == .permission || state == .finished)
-                .contentTransition(.symbolEffect(.replace))
-        } else {
-            base
-        }
     }
 
     // MARK: - State Icon
@@ -476,42 +465,19 @@ struct AgentRow: View {
     @ViewBuilder
     private func stateIcon(_ state: DisplayState) -> some View {
         if let icon = state.iconName {
-            let base = Image(systemName: icon)
+            Image(systemName: icon)
                 .font(.system(size: 11, weight: .medium))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(state.color)
-            if #available(macOS 14.0, *) {
-                base
-                    .contentTransition(.symbolEffect(.replace))
-                    .symbolEffect(.bounce, value: state == .error)
-            } else {
-                base
-            }
         }
     }
 
     // MARK: - Row Background
 
-    @ViewBuilder
     private func rowBackground(state: DisplayState) -> some View {
-        if #available(macOS 26.0, *) {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 8)
-                    .glassEffect(
-                        .regular.tint(state.selectionTint.opacity(0.28)),
-                        in: .rect(cornerRadius: 8)
-                    )
-            } else if isHovered {
-                RoundedRectangle(cornerRadius: 8)
-                    .glassEffect(.regular, in: .rect(cornerRadius: 8))
-            } else {
-                Color.clear
-            }
-        } else {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected
-                    ? state.selectionTint.opacity(0.18)
-                    : (isHovered ? Color.secondary.opacity(0.08) : Color.clear))
-        }
+        RoundedRectangle(cornerRadius: 8)
+            .fill(isSelected
+                ? state.selectionTint.opacity(0.18)
+                : (isHovered ? Color.secondary.opacity(0.08) : Color.clear))
     }
 }

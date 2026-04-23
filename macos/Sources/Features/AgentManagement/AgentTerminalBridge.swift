@@ -181,9 +181,12 @@ final class AgentBridge {
     private var lastAggregateState: AggregateState?
     private var isTerminating = false
 
-    private var timer: Timer?
+    // Surface lifecycle: LRU eviction
+    private static let maxSurfaces = 5
+    private var activationOrder: [UUID] = []  // most recent last
+
+    private var heartbeatTimer: Timer?
     private var statusDirWatcher: DispatchSourceFileSystemObject?
-    private var pollScheduled = false
     private let ioQueue = DispatchQueue(label: "clawddy.io", qos: .utility)
     private var lastEventContent: [UUID: Data] = [:]
 
@@ -193,6 +196,8 @@ final class AgentBridge {
 
     private var surfaceViews: [UUID: Ghostty.SurfaceView] = [:]
     private var surfaceWrappers: [UUID: SurfaceScrollView] = [:]
+    private var surfaceObservers: [UUID: NSObjectProtocol] = [:]
+    private var launchTimers: [UUID: Timer] = [:]
 
     private var statusDir: URL { AgentConfig.statusDir }
 
@@ -212,10 +217,12 @@ final class AgentBridge {
             agents[entry.id] = agent
         }
 
-        // Start watchers
+        // File watcher for real-time state updates
         startStatusDirWatcher()
-        timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.schedulePoll()
+
+        // Heartbeat timer: infrequent fallback for edge cases (crashes without notification)
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+            self?.heartbeat()
         }
 
         logger.info("started — \(self.agents.count) agents")
@@ -223,10 +230,16 @@ final class AgentBridge {
 
     func shutdown() {
         isTerminating = true
-        timer?.invalidate()
-        timer = nil
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
         statusDirWatcher?.cancel()
         statusDirWatcher = nil
+        for timer in launchTimers.values { timer.invalidate() }
+        launchTimers.removeAll()
+        for observer in surfaceObservers.values {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        surfaceObservers.removeAll()
         persistState()
     }
 
@@ -251,9 +264,11 @@ final class AgentBridge {
             lastEventContent.removeValue(forKey: id)
         }
 
-        // Sync display names
+        // Sync display names — only mutate if actually different
         for entry in allEntries {
-            agents[entry.id]?.name = entry.name
+            if let agent = agents[entry.id], agent.name != entry.name {
+                agent.name = entry.name
+            }
         }
     }
 
@@ -273,6 +288,9 @@ final class AgentBridge {
                        project: AgentProject) {
         guard let agent = agents[id] else { return }
 
+        // LRU eviction: destroy oldest surface if at capacity
+        evictIfNeeded(excluding: id, detailVC: detailVC)
+
         let needsNewSurface = !detailVC.hasSurface(id: id)
 
         if needsNewSurface {
@@ -280,6 +298,18 @@ final class AgentBridge {
             agent.claudeState = .unknown
             agent.launchTime = Date()
             agent.lastHookTime = nil
+
+            // One-shot launch timeout instead of polling
+            launchTimers[id]?.invalidate()
+            launchTimers[id] = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) {
+                [weak self] _ in
+                guard let self, let agent = self.agents[id],
+                      agent.processState == .launching, agent.lastHookTime == nil
+                else { return }
+                agent.processState = .alive
+                agent.claudeState = .idle
+                self.launchTimers.removeValue(forKey: id)
+            }
         }
 
         let isNew = detailVC.showOrSwitch(id: id, displayName: agent.name, projectName: project.name) {
@@ -310,11 +340,45 @@ final class AgentBridge {
             if let wrapper = detailVC.surfaceWrapper(for: id) {
                 surfaceWrappers[id] = wrapper
             }
+
+            // Observe process exit notification from Zig backend — immediate detection
+            let observer = NotificationCenter.default.addObserver(
+                forName: Ghostty.Notification.ghosttyCloseSurface, object: surface,
+                queue: .main
+            ) { [weak self] _ in
+                self?.handleSurfaceDeath(id: id)
+            }
+            surfaceObservers[id] = observer
         }
+
+        // Track LRU order
+        activationOrder.removeAll { $0 == id }
+        activationOrder.append(id)
 
         // Track which agent is being viewed + clear unread
         currentlyViewedAgentId = id
         markRead(id: id)
+    }
+
+    // MARK: - Surface LRU Eviction
+
+    private func evictIfNeeded(excluding keepId: UUID, detailVC: AgentDetailViewController) {
+        // Count live surfaces (excluding the one about to be activated)
+        let liveSurfaces = surfaceViews.keys.filter { $0 != keepId }
+        guard liveSurfaces.count >= Self.maxSurfaces else { return }
+
+        // Find the least-recently-used surface (first in activationOrder that isn't keepId)
+        guard let evictId = activationOrder.first(where: { $0 != keepId && surfaceViews[$0] != nil })
+        else { return }
+
+        logger.info("evicting surface \(evictId) (LRU, \(liveSurfaces.count) surfaces alive)")
+        destroySurface(id: evictId)
+
+        // Reset to inactive so it can be re-launched later (session file allows resume)
+        if let agent = agents[evictId] {
+            agent.processState = .inactive
+            agent.claudeState = .unknown
+        }
     }
 
     // MARK: - Command Building
@@ -396,6 +460,7 @@ final class AgentBridge {
         agents.removeValue(forKey: id)
         pendingRenames.removeValue(forKey: id)
         lastEventContent.removeValue(forKey: id)
+        activationOrder.removeAll { $0 == id }
         config.removeAgent(id: id)
 
         // Clean status files
@@ -411,28 +476,23 @@ final class AgentBridge {
         persistState()
     }
 
-    // MARK: - Polling
+    // MARK: - Heartbeat (infrequent fallback)
 
-    func schedulePoll() {
+    private func heartbeat() {
         guard !isTerminating else { return }
 
-        // Main thread: check process exits
+        // Check for process exits that the notification might have missed (e.g., crashes)
         for (id, surface) in surfaceViews {
             if surface.processExited {
                 handleSurfaceDeath(id: id)
             }
         }
+    }
 
-        // Launch timeout: 10s with no hook
-        for (_, agent) in agents {
-            if agent.processState == .launching,
-               agent.lastHookTime == nil,
-               let t = agent.launchTime,
-               Date().timeIntervalSince(t) > 10 {
-                agent.processState = .alive
-                agent.claudeState = .idle
-            }
-        }
+    // MARK: - Event-Driven Polling (triggered by file watcher only)
+
+    private func pollStatusFiles() {
+        guard !isTerminating else { return }
 
         // Ensure status dir exists
         try? FileManager.default.createDirectory(at: statusDir, withIntermediateDirectories: true)
@@ -455,6 +515,8 @@ final class AgentBridge {
     }
 
     private func applyRawEvents(_ rawEvents: [UUID: Data]) {
+        var anyChanged = false
+
         for (id, data) in rawEvents {
             guard let agent = agents[id] else { continue }
 
@@ -476,13 +538,19 @@ final class AgentBridge {
             // Process state transition: launching → alive on first valid hook
             if agent.processState == .launching {
                 agent.processState = .alive
+                launchTimers[id]?.invalidate()
+                launchTimers.removeValue(forKey: id)
                 let forkUrl = statusDir.appendingPathComponent("\(id.uuidString).forkFrom")
                 if FileManager.default.fileExists(atPath: forkUrl.path) {
                     ioQueue.async { try? FileManager.default.removeItem(at: forkUrl) }
                 }
             }
 
-            agent.claudeState = newClaude
+            // Only mutate if actually different
+            if agent.claudeState != newClaude {
+                agent.claudeState = newClaude
+                anyChanged = true
+            }
             agent.lastHookTime = Date()
 
             let newDisplay = agent.displayState
@@ -493,7 +561,7 @@ final class AgentBridge {
                     agent.isUnread = true
                 }
             }
-            if newClaude.isActiveState {
+            if newClaude.isActiveState && agent.isUnread {
                 agent.isUnread = false
             }
 
@@ -525,9 +593,12 @@ final class AgentBridge {
                   Date().timeIntervalSince(hookTime) > Self.compactingTimeout
             else { continue }
             agent.claudeState = .idle
+            anyChanged = true
         }
 
-        updateAggregate()
+        if anyChanged {
+            updateAggregate()
+        }
     }
 
     // MARK: - State Parsing
@@ -583,6 +654,14 @@ final class AgentBridge {
     private func destroySurface(id: UUID) {
         surfaceViews.removeValue(forKey: id)
         surfaceWrappers.removeValue(forKey: id)
+        launchTimers[id]?.invalidate()
+        launchTimers.removeValue(forKey: id)
+
+        // Remove process exit observer
+        if let observer = surfaceObservers.removeValue(forKey: id) {
+            NotificationCenter.default.removeObserver(observer)
+        }
+
         if let agent = agents[id] {
             agent.processState = .dead
             agent.claudeState = .unknown
@@ -593,6 +672,7 @@ final class AgentBridge {
     private func handleSurfaceDeath(id: UUID) {
         logger.info("surface death: \(id)")
         destroySurface(id: id)
+        activationOrder.removeAll { $0 == id }
     }
 
     // MARK: - File I/O (called from ioQueue)
@@ -681,12 +761,7 @@ final class AgentBridge {
             fileDescriptor: fd, eventMask: .write, queue: .main
         )
         source.setEventHandler { [weak self] in
-            guard let self, !self.pollScheduled else { return }
-            self.pollScheduled = true
-            DispatchQueue.main.async {
-                self.pollScheduled = false
-                self.schedulePoll()
-            }
+            self?.pollStatusFiles()
         }
         source.setCancelHandler { close(fd) }
         source.resume()
