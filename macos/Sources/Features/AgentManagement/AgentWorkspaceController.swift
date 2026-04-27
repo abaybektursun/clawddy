@@ -1,6 +1,13 @@
 import AppKit
 import SwiftUI
 
+/// Container that refuses first responder so the sidebar never steals
+/// focus from the terminal surface. Mouse events still pass through normally.
+private final class NonFocusableContainer: NSView {
+    override var acceptsFirstResponder: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// The main workspace window — NSSplitViewController with sidebar + detail.
 /// Sidebar shows project/task/agent tree, detail shows the active terminal.
 final class AgentWorkspaceController: NSSplitViewController {
@@ -13,7 +20,19 @@ final class AgentWorkspaceController: NSSplitViewController {
 
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: {
             let vc = NSViewController()
-            vc.view = sidebarView
+            // Wrap in a non-focusable container so the sidebar VC never becomes
+            // first responder. Arrow keys flow through to the terminal surface.
+            let wrapper = NonFocusableContainer()
+            wrapper.translatesAutoresizingMaskIntoConstraints = false
+            sidebarView.translatesAutoresizingMaskIntoConstraints = false
+            wrapper.addSubview(sidebarView)
+            NSLayoutConstraint.activate([
+                sidebarView.topAnchor.constraint(equalTo: wrapper.topAnchor),
+                sidebarView.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+                sidebarView.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
+                sidebarView.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
+            ])
+            vc.view = wrapper
             return vc
         }())
         sidebarItem.canCollapse = true
@@ -73,6 +92,7 @@ func makeAgentWorkspaceWindow(controller: AgentWorkspaceController) -> NSWindow 
     window.contentViewController = controller
     window.setFrameAutosaveName("AgentWorkspace")
     window.title = "Clawddy"
+    window.titleVisibility = .hidden
     window.titlebarAppearsTransparent = true
     window.contentMinSize = NSSize(width: 620, height: 400)
     window.isReleasedWhenClosed = false

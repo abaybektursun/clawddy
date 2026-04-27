@@ -756,6 +756,7 @@ class AppDelegate: NSObject,
     }
 
     private func setDockBadge() {
+        BridgeMetrics.shared.recordDockBadgeUpdate()
         let bellCount = NSApp.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .reduce(0) { $0 + ($1.bell ? 1 : 0) }

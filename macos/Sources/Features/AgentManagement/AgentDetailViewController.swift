@@ -91,15 +91,10 @@ final class AgentDetailViewController: NSViewController {
         surfaceWrappersByID[id]!.isHidden = false
         activeID = id
 
-        // Make surface first responder immediately + after SwiftUI settles.
-        // The sidebar's NSOutlineView grabs focus on row selection. We must
-        // reclaim it for the terminal surface. A single async isn't enough —
-        // SwiftUI's layout pass can re-assert focus after our first attempt.
+        // The sidebar wrapper (NonFocusableContainer in AgentWorkspaceController)
+        // refuses first responder, so this single call sticks.
         if let surface = surfaceViewsByID[id] {
             view.window?.makeFirstResponder(surface)
-            DispatchQueue.main.async {
-                self.view.window?.makeFirstResponder(surface)
-            }
         }
 
         return isNew

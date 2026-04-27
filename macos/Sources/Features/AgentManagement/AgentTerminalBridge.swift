@@ -119,7 +119,6 @@ enum DisplayState: Equatable {
 final class AgentInstance: Identifiable {
     let id: UUID
     var name: String
-    var sessionId: String?
     var processState: ProcessState = .inactive
     var claudeState: ClaudeState = .unknown
     var isUnread: Bool = false
@@ -181,14 +180,15 @@ final class AgentBridge {
     private var lastAggregateState: AggregateState?
     private var isTerminating = false
 
-    // Surface lifecycle: LRU eviction
-    private static let maxSurfaces = 5
-    private var activationOrder: [UUID] = []  // most recent last
-
     private var heartbeatTimer: Timer?
     private var statusDirWatcher: DispatchSourceFileSystemObject?
     private let ioQueue = DispatchQueue(label: "clawddy.io", qos: .utility)
     private var lastEventContent: [UUID: Data] = [:]
+
+    /// Throttle file watcher: hooks fire bursts (4 fs events per claude event,
+    /// ×N agents = 100+/sec). Coalesce into one poll per window.
+    private static let pollThrottle: TimeInterval = 0.2
+    private var pollPending = false
 
     /// Compacting is provably bounded (~5-15s). If no PostCompact arrives
     /// within this window, the state is stale (e.g., user cancelled).
@@ -225,6 +225,12 @@ final class AgentBridge {
             self?.heartbeat()
         }
 
+        // Surgical metrics for diagnosing freezes
+        BridgeMetrics.shared.start(
+            agentCount: { [weak self] in self?.agents.count ?? 0 },
+            surfaceCount: { [weak self] in self?.surfaceViews.count ?? 0 }
+        )
+
         logger.info("started — \(self.agents.count) agents")
     }
 
@@ -254,12 +260,14 @@ final class AgentBridge {
             let agent = AgentInstance(id: entry.id, name: entry.name)
             agent.processState = .inactive
             agents[entry.id] = agent
+            BridgeMetrics.shared.recordMutAgentsDict()
         }
 
         // Remove instances for deleted entries
         for id in agents.keys where !configIds.contains(id) {
             destroySurface(id: id)
             agents.removeValue(forKey: id)
+            BridgeMetrics.shared.recordMutAgentsDict()
             pendingRenames.removeValue(forKey: id)
             lastEventContent.removeValue(forKey: id)
         }
@@ -268,6 +276,7 @@ final class AgentBridge {
         for entry in allEntries {
             if let agent = agents[entry.id], agent.name != entry.name {
                 agent.name = entry.name
+                BridgeMetrics.shared.recordMutAgentName()
             }
         }
     }
@@ -279,6 +288,7 @@ final class AgentBridge {
         let instance = AgentInstance(id: entry.id, name: entry.name)
         instance.processState = .inactive
         agents[entry.id] = instance
+        BridgeMetrics.shared.recordMutAgentsDict()
         return entry
     }
 
@@ -288,14 +298,13 @@ final class AgentBridge {
                        project: AgentProject) {
         guard let agent = agents[id] else { return }
 
-        // LRU eviction: destroy oldest surface if at capacity
-        evictIfNeeded(excluding: id, detailVC: detailVC)
-
         let needsNewSurface = !detailVC.hasSurface(id: id)
 
         if needsNewSurface {
             agent.processState = .launching
             agent.claudeState = .unknown
+            BridgeMetrics.shared.recordMutProcessState()
+            BridgeMetrics.shared.recordMutClaudeState()
             agent.launchTime = Date()
             agent.lastHookTime = nil
 
@@ -308,6 +317,8 @@ final class AgentBridge {
                 else { return }
                 agent.processState = .alive
                 agent.claudeState = .idle
+                BridgeMetrics.shared.recordMutProcessState()
+                BridgeMetrics.shared.recordMutClaudeState()
                 self.launchTimers.removeValue(forKey: id)
             }
         }
@@ -340,45 +351,22 @@ final class AgentBridge {
             if let wrapper = detailVC.surfaceWrapper(for: id) {
                 surfaceWrappers[id] = wrapper
             }
+            BridgeMetrics.shared.recordSurfaceCreated()
 
             // Observe process exit notification from Zig backend — immediate detection
             let observer = NotificationCenter.default.addObserver(
                 forName: Ghostty.Notification.ghosttyCloseSurface, object: surface,
                 queue: .main
             ) { [weak self] _ in
+                BridgeMetrics.shared.recordProcessExitNotif()
                 self?.handleSurfaceDeath(id: id)
             }
             surfaceObservers[id] = observer
         }
 
-        // Track LRU order
-        activationOrder.removeAll { $0 == id }
-        activationOrder.append(id)
-
         // Track which agent is being viewed + clear unread
         currentlyViewedAgentId = id
         markRead(id: id)
-    }
-
-    // MARK: - Surface LRU Eviction
-
-    private func evictIfNeeded(excluding keepId: UUID, detailVC: AgentDetailViewController) {
-        // Count live surfaces (excluding the one about to be activated)
-        let liveSurfaces = surfaceViews.keys.filter { $0 != keepId }
-        guard liveSurfaces.count >= Self.maxSurfaces else { return }
-
-        // Find the least-recently-used surface (first in activationOrder that isn't keepId)
-        guard let evictId = activationOrder.first(where: { $0 != keepId && surfaceViews[$0] != nil })
-        else { return }
-
-        logger.info("evicting surface \(evictId) (LRU, \(liveSurfaces.count) surfaces alive)")
-        destroySurface(id: evictId)
-
-        // Reset to inactive so it can be re-launched later (session file allows resume)
-        if let agent = agents[evictId] {
-            agent.processState = .inactive
-            agent.claudeState = .unknown
-        }
     }
 
     // MARK: - Command Building
@@ -433,8 +421,9 @@ final class AgentBridge {
     // MARK: - Rename
 
     func requestRename(id: UUID, newName: String) {
-        guard let agent = agents[id] else { return }
+        guard let agent = agents[id], agent.name != newName else { return }
         agent.name = newName
+        BridgeMetrics.shared.recordMutAgentName()
 
         if isSafeForInput(agent.displayState) {
             logger.info("rename: sending /rename for \(id) immediately")
@@ -449,6 +438,7 @@ final class AgentBridge {
     func markRead(id: UUID) {
         guard let agent = agents[id], agent.isUnread else { return }
         agent.isUnread = false
+        BridgeMetrics.shared.recordMutIsUnread()
         updateAggregate()
         persistState()
     }
@@ -456,11 +446,12 @@ final class AgentBridge {
     // MARK: - Deletion
 
     func deleteAgent(id: UUID, config: AgentConfig) {
+        BridgeMetrics.shared.recordSurfaceDestroyedDelete()
         destroySurface(id: id)
         agents.removeValue(forKey: id)
+        BridgeMetrics.shared.recordMutAgentsDict()
         pendingRenames.removeValue(forKey: id)
         lastEventContent.removeValue(forKey: id)
-        activationOrder.removeAll { $0 == id }
         config.removeAgent(id: id)
 
         // Clean status files
@@ -480,6 +471,7 @@ final class AgentBridge {
 
     private func heartbeat() {
         guard !isTerminating else { return }
+        BridgeMetrics.shared.recordHeartbeat()
 
         // Check for process exits that the notification might have missed (e.g., crashes)
         for (id, surface) in surfaceViews {
@@ -493,9 +485,6 @@ final class AgentBridge {
 
     private func pollStatusFiles() {
         guard !isTerminating else { return }
-
-        // Ensure status dir exists
-        try? FileManager.default.createDirectory(at: statusDir, withIntermediateDirectories: true)
 
         // Background: read raw event file data
         let ids = Array(agents.keys)
@@ -515,6 +504,7 @@ final class AgentBridge {
     }
 
     private func applyRawEvents(_ rawEvents: [UUID: Data]) {
+        let startTime = CFAbsoluteTimeGetCurrent()
         var anyChanged = false
 
         for (id, data) in rawEvents {
@@ -523,6 +513,7 @@ final class AgentBridge {
             // Dedup: skip if file content hasn't changed since last read
             if data == lastEventContent[id] { continue }
             lastEventContent[id] = data
+            BridgeMetrics.shared.recordMutLastEventContent()
 
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             let newClaude = parseClaudeState(from: json)
@@ -531,13 +522,10 @@ final class AgentBridge {
             let oldDisplay = agent.displayState
             let oldClaude = agent.claudeState
 
-            if let sid = json["session_id"] as? String, !sid.isEmpty {
-                agent.sessionId = sid
-            }
-
             // Process state transition: launching → alive on first valid hook
             if agent.processState == .launching {
                 agent.processState = .alive
+                BridgeMetrics.shared.recordMutProcessState()
                 launchTimers[id]?.invalidate()
                 launchTimers.removeValue(forKey: id)
                 let forkUrl = statusDir.appendingPathComponent("\(id.uuidString).forkFrom")
@@ -549,6 +537,7 @@ final class AgentBridge {
             // Only mutate if actually different
             if agent.claudeState != newClaude {
                 agent.claudeState = newClaude
+                BridgeMetrics.shared.recordMutClaudeState()
                 anyChanged = true
             }
             agent.lastHookTime = Date()
@@ -557,12 +546,14 @@ final class AgentBridge {
 
             // Unread tracking
             if oldClaude.isActiveState && newClaude == .idle {
-                if currentlyViewedAgentId != id {
+                if currentlyViewedAgentId != id && !agent.isUnread {
                     agent.isUnread = true
+                    BridgeMetrics.shared.recordMutIsUnread()
                 }
             }
             if newClaude.isActiveState && agent.isUnread {
                 agent.isUnread = false
+                BridgeMetrics.shared.recordMutIsUnread()
             }
 
             // Notifications
@@ -593,12 +584,16 @@ final class AgentBridge {
                   Date().timeIntervalSince(hookTime) > Self.compactingTimeout
             else { continue }
             agent.claudeState = .idle
+            BridgeMetrics.shared.recordMutClaudeState()
             anyChanged = true
         }
 
         if anyChanged {
             updateAggregate()
         }
+
+        let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
+        BridgeMetrics.shared.recordApplyRawEvents(durationMs: durationMs)
     }
 
     // MARK: - State Parsing
@@ -643,6 +638,8 @@ final class AgentBridge {
         let current = aggregateState
         if lastAggregateState != current {
             lastAggregateState = current
+            BridgeMetrics.shared.recordMutLastAggregateState()
+            BridgeMetrics.shared.recordAggregateChange()
             onAggregateStateChanged?(current)
         }
     }
@@ -663,16 +660,22 @@ final class AgentBridge {
         }
 
         if let agent = agents[id] {
-            agent.processState = .dead
-            agent.claudeState = .unknown
+            if agent.processState != .dead {
+                agent.processState = .dead
+                BridgeMetrics.shared.recordMutProcessState()
+            }
+            if agent.claudeState != .unknown {
+                agent.claudeState = .unknown
+                BridgeMetrics.shared.recordMutClaudeState()
+            }
         }
         onSurfaceDeath?(id)
     }
 
     private func handleSurfaceDeath(id: UUID) {
         logger.info("surface death: \(id)")
+        BridgeMetrics.shared.recordSurfaceDestroyedExit()
         destroySurface(id: id)
-        activationOrder.removeAll { $0 == id }
     }
 
     // MARK: - File I/O (called from ioQueue)
@@ -761,7 +764,18 @@ final class AgentBridge {
             fileDescriptor: fd, eventMask: .write, queue: .main
         )
         source.setEventHandler { [weak self] in
-            self?.pollStatusFiles()
+            BridgeMetrics.shared.recordWatcherFire()
+            guard let self, !self.pollPending else {
+                BridgeMetrics.shared.recordPollThrottled()
+                return
+            }
+            self.pollPending = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.pollThrottle) { [weak self] in
+                guard let self else { return }
+                self.pollPending = false
+                BridgeMetrics.shared.recordPollFired()
+                self.pollStatusFiles()
+            }
         }
         source.setCancelHandler { close(fd) }
         source.resume()

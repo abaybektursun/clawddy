@@ -55,8 +55,9 @@ class AgentConfig {
     var projects: [AgentProject] = []
     var onReloaded: (() -> Void)?
     private var configDirWatcher: DispatchSourceFileSystemObject?
-    private var suppressWatch = false
-    private var lastConfigHash: Int = 0
+    /// Snapshot of last-loaded agents.json bytes. Used by the directory watcher
+    /// to dedup spurious fires (including those caused by our own writes).
+    private var lastConfigData: Data?
 
     static var baseDir: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -91,7 +92,7 @@ class AgentConfig {
               let data = try? Data(contentsOf: Self.configURL),
               let config = try? JSONDecoder().decode(AgentConfigFile.self, from: data)
         else { return }
-        lastConfigHash = data.hashValue
+        lastConfigData = data
         projects = config.projects
         migrateStatusFiles()
         logger.info("load — \(config.projects.count) projects, \(self.allAgentEntries.count) agents")
@@ -127,19 +128,17 @@ class AgentConfig {
 
     func save() {
         logger.info("save — \(self.projects.count) projects")
-        suppressWatch = true
         let config = AgentConfigFile(projects: projects)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(config) else {
             logger.error("save failed — JSON encode error")
-            suppressWatch = false
             return
         }
+        // Update content cache BEFORE the write fires the watcher, so the
+        // watcher's dedup (lastConfigData == data) suppresses our own write.
+        lastConfigData = data
         Self.atomicWrite(data, to: Self.configURL)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-            self?.suppressWatch = false
-        }
     }
 
     // MARK: - Projects
@@ -370,11 +369,18 @@ class AgentConfig {
             fileDescriptor: fd, eventMask: .write, queue: .main
         )
         source.setEventHandler { [weak self] in
-            guard let self, !self.suppressWatch else { return }
-            // Content-based dedup: only reload if agents.json actually changed
+            BridgeMetrics.shared.recordConfigWatcherFire()
+            guard let self else { return }
+            // Content-based dedup: only reload if agents.json actually changed.
+            // Compare raw bytes (definitive — no hash collisions).
+            // This also suppresses our own writes (save() updates lastConfigData
+            // before the kqueue event arrives).
             guard let data = try? Data(contentsOf: Self.configURL) else { return }
-            let hash = data.hashValue
-            guard hash != self.lastConfigHash else { return }
+            guard data != self.lastConfigData else {
+                BridgeMetrics.shared.recordConfigReloadDeduped()
+                return
+            }
+            BridgeMetrics.shared.recordConfigReload()
             self.load()
         }
         source.setCancelHandler { close(fd) }

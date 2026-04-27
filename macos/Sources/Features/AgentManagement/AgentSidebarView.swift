@@ -17,7 +17,8 @@ struct AgentSidebarView: View {
     @State private var editingTask: (project: String, task: String)?
     @State private var editingAgent: UUID?
     @State private var pendingDirectory: (project: String, path: String)?
-    @State private var hoveredID: UUID?
+    /// Project names the user has collapsed. Empty default = all expanded.
+    @State private var collapsedProjects: Set<String> = []
 
     var body: some View {
         Group {
@@ -32,6 +33,10 @@ struct AgentSidebarView: View {
                 Divider()
                 bottomBar
             }
+        }
+        .onChange(of: selectedID) { _, newId in
+            guard let id = newId, let project = config.project(forAgent: id) else { return }
+            onSelectAgent(id, project)
         }
     }
 
@@ -59,18 +64,31 @@ struct AgentSidebarView: View {
     // MARK: - Agent List
 
     private var agentList: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
-                ForEach(config.projects) { project in
-                    Section {
-                        projectContent(project)
-                    } header: {
-                        projectHeader(project)
-                    }
+        List(selection: $selectedID) {
+            ForEach(config.projects) { project in
+                Section(isExpanded: expansionBinding(for: project)) {
+                    projectContent(project)
+                } header: {
+                    projectHeader(project)
                 }
             }
-            .padding(.horizontal, 8)
         }
+        .listStyle(.sidebar)
+    }
+
+    /// Binding for `Section(isExpanded:)`. Backed by `collapsedProjects` so the
+    /// default (empty set) means everything starts expanded.
+    private func expansionBinding(for project: AgentProject) -> Binding<Bool> {
+        Binding(
+            get: { !collapsedProjects.contains(project.name) },
+            set: { isExpanded in
+                if isExpanded {
+                    collapsedProjects.remove(project.name)
+                } else {
+                    collapsedProjects.insert(project.name)
+                }
+            }
+        )
     }
 
     // MARK: - Project Header
@@ -123,6 +141,9 @@ struct AgentSidebarView: View {
                     }
                 }
         }
+        .padding(.horizontal, 12)
+        .padding(.top, 20)
+        .padding(.bottom, 8)
     }
 
     // MARK: - Project Content
@@ -134,7 +155,7 @@ struct AgentSidebarView: View {
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.quaternary)
                 .lineLimit(1)
-                .padding(.bottom, 6)
+                .padding(.bottom, 8)
         }
 
         if pendingDirectory?.project == project.name {
@@ -145,7 +166,7 @@ struct AgentSidebarView: View {
             Text("No tasks — add one from the \u{2026} menu")
                 .font(.system(.caption2, design: .monospaced))
                 .foregroundStyle(.quaternary)
-                .padding(.vertical, 4)
+                .padding(.vertical, 8)
         }
 
         ForEach(project.tasks) { task in
@@ -155,19 +176,12 @@ struct AgentSidebarView: View {
                 if let agent = bridge.agents[entry.id] {
                     AgentRow(
                         agent: agent,
-                        isSelected: selectedID == entry.id,
-                        isHovered: hoveredID == entry.id,
                         isEditing: editingAgent == entry.id,
                         editText: editingAgent == entry.id ? $editText : .constant(""),
                         onCommitRename: { confirmRenameAgent(id: entry.id) },
                         onCancelEdit: { editingAgent = nil }
                     )
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        selectedID = entry.id
-                        onSelectAgent(entry.id, project)
-                    }
-                    .onHover { h in hoveredID = h ? entry.id : (hoveredID == entry.id ? nil : hoveredID) }
+                    .tag(entry.id)
                     .contextMenu {
                         Button("Rename Agent") {
                             editText = agent.name
@@ -232,8 +246,8 @@ struct AgentSidebarView: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.top, 8)
-        .padding(.bottom, 2)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
     }
 
     // MARK: - New Agent Field
@@ -256,8 +270,8 @@ struct AgentSidebarView: View {
                 }
                 .onExitCommand { addingAgentTo = nil }
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 8)
     }
 
     // MARK: - Bottom Bar
@@ -286,7 +300,8 @@ struct AgentSidebarView: View {
                 .foregroundStyle(.quaternary)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
+        .background(.thinMaterial)
     }
 
     // MARK: - Rename Helpers
@@ -400,11 +415,12 @@ struct AgentSidebarView: View {
 }
 
 // MARK: - Agent Row (per-row observation)
+//
+// Selection styling, row background, and hover are provided by `List` with
+// `.listStyle(.sidebar)`. AgentRow renders only the row content.
 
 struct AgentRow: View {
     var agent: AgentInstance
-    let isSelected: Bool
-    let isHovered: Bool
     let isEditing: Bool
     @Binding var editText: String
     let onCommitRename: () -> Void
@@ -424,7 +440,7 @@ struct AgentRow: View {
                     .onExitCommand(perform: onCancelEdit)
             } else {
                 Text(agent.name)
-                    .font(.system(.body, design: .monospaced, weight: isSelected ? .semibold : .medium))
+                    .font(.system(.body, design: .monospaced, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -436,16 +452,12 @@ struct AgentRow: View {
                     Text(state.label)
                         .font(.system(.caption2, design: .rounded, weight: .medium))
                         .foregroundStyle(state.color)
-                        .contentTransition(.opacity)
                 }
 
                 stateIcon(state)
                     .frame(width: 14, alignment: .center)
             }
         }
-        .padding(.vertical, 5)
-        .padding(.horizontal, 8)
-        .background(rowBackground(state: state))
     }
 
     // MARK: - Status Dot
@@ -467,14 +479,5 @@ struct AgentRow: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(state.color)
         }
-    }
-
-    // MARK: - Row Background
-
-    private func rowBackground(state: DisplayState) -> some View {
-        RoundedRectangle(cornerRadius: 8)
-            .fill(isSelected
-                ? state.selectionTint.opacity(0.18)
-                : (isHovered ? Color.secondary.opacity(0.08) : Color.clear))
     }
 }
