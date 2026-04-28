@@ -113,33 +113,41 @@ struct AgentSidebarView: View {
 
             Spacer(minLength: 8)
 
-            Image(systemName: "ellipsis")
-                .font(.system(.caption2, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .frame(width: 20, height: 16)
-                .contentShape(Rectangle())
-                .contextMenu {
-                    Button("Add Task") {
-                        let name = "Task \(project.tasks.count + 1)"
-                        config.addTask(project: project.name, name: name)
-                    }
-                    Button("Rename Project") {
-                        editText = project.name
-                        editingProject = project.name
-                    }
-                    Button("Set Directory\u{2026}") { pickDirectory(project: project.name) }
-                    Divider()
-                    Button("Delete Project", role: .destructive) {
-                        DispatchQueue.main.async {
-                            for task in project.tasks {
-                                for agent in task.agents {
-                                    onDeleteAgent?(agent.id)
-                                }
+            // Default Menu style: invokes NSMenu on click, no persistent
+            // NSPopUpButton in the hierarchy — avoids the constraint-invalidation
+            // cycle that Menu(.borderlessButton) caused.
+            Menu {
+                Button("Add Task") {
+                    let name = "Task \(project.tasks.count + 1)"
+                    config.addTask(project: project.name, name: name)
+                }
+                Button("Rename Project") {
+                    editText = project.name
+                    editingProject = project.name
+                }
+                Button("Set Directory\u{2026}") { pickDirectory(project: project.name) }
+                Divider()
+                Button("Delete Project", role: .destructive) {
+                    DispatchQueue.main.async {
+                        for task in project.tasks {
+                            for agent in task.agents {
+                                onDeleteAgent?(agent.id)
                             }
-                            config.removeProject(name: project.name)
                         }
+                        config.removeProject(name: project.name)
                     }
                 }
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(.caption2, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 20, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.button)
+            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
+            .fixedSize()
         }
         .padding(.horizontal, 12)
         .padding(.top, 20)
