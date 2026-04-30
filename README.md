@@ -1,12 +1,11 @@
-<h1>
 <p align="center">
-  <br>Clawddy
-</h1>
-  <p align="center">
-    Multi-agent terminal workspace built on <a href="https://github.com/ghostty-org/ghostty">Ghostty</a>.
-    <br />
-    Manage, monitor, and switch between Claude Code agents from a native macOS interface.
-  </p>
+  <img src="docs/images/clawddy_ascii.gif" alt="Clawddy" width="600">
+</p>
+
+<p align="center">
+  Multi-agent terminal workspace built on <a href="https://github.com/ghostty-org/ghostty">Ghostty</a>.
+  <br />
+  Manage, monitor, and switch between Claude Code agents from a native macOS interface.
 </p>
 
 ## About
