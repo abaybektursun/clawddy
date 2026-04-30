@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/images/clawddy_ascii.gif" alt="Clawddy" width="600">
+  <img src="docs/images/clawddy_ascii.gif" alt="Clawddy" width="200">
 </p>
 
 <p align="center">
