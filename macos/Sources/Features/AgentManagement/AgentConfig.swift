@@ -12,34 +12,54 @@ struct AgentEntry: Codable, Identifiable, Equatable {
 }
 
 struct AgentProject: Codable, Identifiable {
+    let id: UUID
     var name: String
     var tasks: [AgentTask]
     var workingDirectory: String?
-    var id: String { name }
+
+    init(id: UUID = UUID(), name: String, tasks: [AgentTask] = [], workingDirectory: String? = nil) {
+        self.id = id
+        self.name = name
+        self.tasks = tasks
+        self.workingDirectory = workingDirectory
+    }
+
+    // Migration: decode missing `id` (pre-UUID schema) → generate fresh UUID.
+    private enum CodingKeys: String, CodingKey { case id, name, tasks, workingDirectory }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.name = try c.decode(String.self, forKey: .name)
+        self.tasks = try c.decodeIfPresent([AgentTask].self, forKey: .tasks) ?? []
+        self.workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory)
+    }
 }
 
 struct AgentTask: Codable, Identifiable {
+    let id: UUID
     var name: String
     var agents: [AgentEntry]
-    var id: String { name }
 
-    // Migration: decode from [String] (v1) or [AgentEntry] (v2+)
-    private enum CodingKeys: String, CodingKey { case name, agents }
-
-    init(name: String, agents: [AgentEntry] = []) {
+    init(id: UUID = UUID(), name: String, agents: [AgentEntry] = []) {
+        self.id = id
         self.name = name
         self.agents = agents
     }
 
+    // Migration: decode missing `id` → fresh UUID; agents from [String] (v1) or [AgentEntry] (v2+).
+    private enum CodingKeys: String, CodingKey { case id, name, agents }
+
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        name = try container.decode(String.self, forKey: .name)
-        if let entries = try? container.decode([AgentEntry].self, forKey: .agents) {
-            agents = entries
-        } else if let names = try? container.decode([String].self, forKey: .agents) {
-            agents = names.map { AgentEntry(id: UUID(), name: $0) }
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.name = try c.decode(String.self, forKey: .name)
+        if let entries = try? c.decode([AgentEntry].self, forKey: .agents) {
+            self.agents = entries
+        } else if let names = try? c.decode([String].self, forKey: .agents) {
+            self.agents = names.map { AgentEntry(id: UUID(), name: $0) }
         } else {
-            agents = []
+            self.agents = []
         }
     }
 }
@@ -95,6 +115,18 @@ class AgentConfig {
         lastConfigData = data
         projects = config.projects
         migrateStatusFiles()
+
+        // Schema migration: if encoded form differs from on-disk bytes, structs
+        // gained new fields (e.g. fresh UUIDs for legacy projects/tasks). Save
+        // back so they persist.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let reEncoded = try? encoder.encode(AgentConfigFile(projects: projects)),
+           reEncoded != data {
+            logger.info("schema migration — persisting new UUIDs")
+            save()
+        }
+
         logger.info("load — \(config.projects.count) projects, \(self.allAgentEntries.count) agents")
         onReloaded?()
     }
@@ -143,63 +175,88 @@ class AgentConfig {
 
     // MARK: - Projects
 
-    func addProject(name: String) {
-        guard !name.isEmpty, !projects.contains(where: { $0.name == name }) else { return }
-        projects.append(AgentProject(name: name, tasks: []))
+    /// Add a project. Returns the new project's UUID on success, nil if empty or duplicate.
+    @discardableResult
+    func addProject(name: String) -> UUID? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !projects.contains(where: { $0.name == trimmed })
+        else { return nil }
+        let project = AgentProject(name: trimmed, tasks: [])
+        projects.append(project)
+        save()
+        return project.id
+    }
+
+    func removeProject(id: UUID) {
+        projects.removeAll { $0.id == id }
         save()
     }
 
-    func removeProject(name: String) {
-        projects.removeAll { $0.name == name }
+    /// Rename by stable id. Rejects duplicate names. Returns true on success.
+    @discardableResult
+    func renameProject(id: UUID, newName: String) -> Bool {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let i = projects.firstIndex(where: { $0.id == id }),
+              projects[i].name != trimmed,
+              !projects.contains(where: { $0.name == trimmed && $0.id != id })
+        else { return false }
+        projects[i].name = trimmed
         save()
-    }
-
-    func renameProject(old: String, new: String) {
-        guard let i = projects.firstIndex(where: { $0.name == old }),
-              !projects.contains(where: { $0.name == new })
-        else { return }
-        projects[i].name = new
-        save()
+        return true
     }
 
     // MARK: - Tasks
 
-    func addTask(project: String, name: String) {
+    /// Add a task. Returns the new task's UUID on success, nil if empty or duplicate.
+    @discardableResult
+    func addTask(project: String, name: String) -> UUID? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pi = projects.firstIndex(where: { $0.name == project }),
-              !name.isEmpty,
-              !projects[pi].tasks.contains(where: { $0.name == name })
-        else { return }
-        projects[pi].tasks.append(AgentTask(name: name))
+              !trimmed.isEmpty,
+              !projects[pi].tasks.contains(where: { $0.name == trimmed })
+        else { return nil }
+        let task = AgentTask(name: trimmed)
+        projects[pi].tasks.append(task)
         save()
+        return task.id
     }
 
-    func removeTask(project: String, name: String) {
-        guard let pi = projects.firstIndex(where: { $0.name == project }),
-              let ti = projects[pi].tasks.firstIndex(where: { $0.name == name })
+    func removeTask(projectId: UUID, taskId: UUID) {
+        guard let pi = projects.firstIndex(where: { $0.id == projectId }),
+              let ti = projects[pi].tasks.firstIndex(where: { $0.id == taskId })
         else { return }
         projects[pi].tasks.remove(at: ti)
         save()
     }
 
-    func renameTask(project: String, old: String, new: String) {
-        guard let pi = projects.firstIndex(where: { $0.name == project }),
-              let ti = projects[pi].tasks.firstIndex(where: { $0.name == old }),
-              !projects[pi].tasks.contains(where: { $0.name == new })
-        else { return }
-        projects[pi].tasks[ti].name = new
+    /// Rename by stable id. Rejects duplicate names within project. Returns true on success.
+    @discardableResult
+    func renameTask(projectId: UUID, taskId: UUID, newName: String) -> Bool {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let pi = projects.firstIndex(where: { $0.id == projectId }),
+              let ti = projects[pi].tasks.firstIndex(where: { $0.id == taskId }),
+              projects[pi].tasks[ti].name != trimmed,
+              !projects[pi].tasks.contains(where: { $0.name == trimmed && $0.id != taskId })
+        else { return false }
+        projects[pi].tasks[ti].name = trimmed
         save()
+        return true
     }
 
     // MARK: - Agents (UUID-based)
 
-    /// Add agent, returning the created entry.
+    /// Add agent, returning the created entry. Trims whitespace and rejects empty names.
     @discardableResult
     func addAgent(project: String, task: String, name: String) -> AgentEntry? {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pi = projects.firstIndex(where: { $0.name == project }),
               let ti = projects[pi].tasks.firstIndex(where: { $0.name == task }),
-              !name.isEmpty
+              !trimmed.isEmpty
         else { return nil }
-        let entry = AgentEntry(id: UUID(), name: name)
+        let entry = AgentEntry(id: UUID(), name: trimmed)
         projects[pi].tasks[ti].agents.append(entry)
         save()
         return entry
@@ -224,10 +281,12 @@ class AgentConfig {
     }
 
     func renameAgent(id: UUID, newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         for pi in projects.indices {
             for ti in projects[pi].tasks.indices {
                 if let ai = projects[pi].tasks[ti].agents.firstIndex(where: { $0.id == id }) {
-                    projects[pi].tasks[ti].agents[ai].name = newName
+                    projects[pi].tasks[ti].agents[ai].name = trimmed
                     save()
                     return
                 }
