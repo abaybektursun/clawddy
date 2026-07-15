@@ -64,8 +64,26 @@ sudo xcode-select --switch /Applications/Xcode.app
 >
 > Main branch development of Ghostty requires **Xcode 26 and the macOS 26 SDK**.
 >
-> You do not need to be running on macOS 26 to build Ghostty, you can
-> still use Xcode 26 on macOS 15 stable.
+> Xcode 26 requires macOS 15.6 or newer. This development-host requirement is
+> separate from Ghostty's macOS 14 application deployment target.
+
+The Xcode project, not the top-level Zig build, is authoritative for the macOS
+application. Build and test it through the repository wrapper:
+
+```shell
+macos/build.nu --scheme Ghostty --configuration Debug --action build
+macos/build.nu --scheme Ghostty --configuration Debug --action test
+```
+
+If you changed code outside `macos/`, update the underlying Ghostty library
+before invoking the wrapper:
+
+```shell
+zig build -Demit-macos-app=false
+```
+
+See [macOS Development](docs/MACOS_DEVELOPMENT.md) for the platform architecture,
+Apple-framework conventions, compatibility backlog, and required test matrix.
 
 ## AI and Agents
 

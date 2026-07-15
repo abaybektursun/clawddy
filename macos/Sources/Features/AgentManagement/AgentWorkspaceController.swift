@@ -1,49 +1,71 @@
 import AppKit
 import SwiftUI
 
-/// Container that refuses first responder so the sidebar never steals
-/// focus from the terminal surface. Mouse events still pass through normally.
-private final class NonFocusableContainer: NSView {
-    override var acceptsFirstResponder: Bool { false }
+/// The navigation and list panes contain safe, reversible controls, so they
+/// opt into receiving the click that activates an inactive window. The
+/// terminal pane deliberately does not use this host: its first activation
+/// click must never be encoded as terminal input.
+final class AgentInteractiveHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-/// The main workspace window — NSSplitViewController with sidebar + detail.
-/// Sidebar shows project/task/agent tree, detail shows the active terminal.
+/// Centralizes first-responder transitions for the mixed AppKit/SwiftUI/Ghostty
+/// workspace. Ghostty maintains its own logical focus bit, which must be
+/// reconciled immediately after AppKit changes the actual responder.
+final class AgentWorkspaceWindow: NSWindow {
+    var onFirstResponderChanged: (() -> Void)?
+
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        let accepted = super.makeFirstResponder(responder)
+        if accepted { onFirstResponderChanged?() }
+        return accepted
+    }
+}
+
+/// Three-column workspace: navigation, agent list, and terminal detail.
 final class AgentWorkspaceController: NSSplitViewController {
 
     private weak var detailVC: NSViewController?
+    private let onSearch: () -> Void
+    private let onFocusTerminal: () -> Void
+    private let canFocusTerminal: () -> Bool
+    private let onShowAgentDetails: () -> Void
+    private let canShowAgentDetails: () -> Bool
 
-    init(sidebarView: NSView, detailViewController: NSViewController) {
+    init(
+        navigationView: NSView,
+        agentListView: NSView,
+        detailViewController: NSViewController,
+        onSearch: @escaping () -> Void,
+        onFocusTerminal: @escaping () -> Void,
+        canFocusTerminal: @escaping () -> Bool,
+        onShowAgentDetails: @escaping () -> Void,
+        canShowAgentDetails: @escaping () -> Bool
+    ) {
         self.detailVC = detailViewController
+        self.onSearch = onSearch
+        self.onFocusTerminal = onFocusTerminal
+        self.canFocusTerminal = canFocusTerminal
+        self.onShowAgentDetails = onShowAgentDetails
+        self.canShowAgentDetails = canShowAgentDetails
         super.init(nibName: nil, bundle: nil)
 
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: {
-            let vc = NSViewController()
-            // Wrap in a non-focusable container so the sidebar VC never becomes
-            // first responder. Arrow keys flow through to the terminal surface.
-            let wrapper = NonFocusableContainer()
-            wrapper.translatesAutoresizingMaskIntoConstraints = false
-            sidebarView.translatesAutoresizingMaskIntoConstraints = false
-            wrapper.addSubview(sidebarView)
-            NSLayoutConstraint.activate([
-                sidebarView.topAnchor.constraint(equalTo: wrapper.topAnchor),
-                sidebarView.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
-                sidebarView.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
-                sidebarView.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
-            ])
-            vc.view = wrapper
-            return vc
-        }())
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: Self.wrap(navigationView))
         sidebarItem.canCollapse = true
-        sidebarItem.minimumThickness = 220
-        sidebarItem.maximumThickness = 350
+        sidebarItem.minimumThickness = 210
+        sidebarItem.maximumThickness = 320
         sidebarItem.allowsFullHeightLayout = true
+
+        let listItem = NSSplitViewItem(viewController: Self.wrap(agentListView))
+        listItem.canCollapse = true
+        listItem.minimumThickness = 260
+        listItem.maximumThickness = 420
 
         let detailItem = NSSplitViewItem(viewController: detailViewController)
         detailItem.minimumThickness = 400
 
         addSplitViewItem(sidebarItem)
+        addSplitViewItem(listItem)
         addSplitViewItem(detailItem)
     }
 
@@ -52,12 +74,32 @@ final class AgentWorkspaceController: NSSplitViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        splitView.autosaveName = "ClawddyAgentWorkspaceSplit"
         // Disable live-resize content redraw on the detail pane.
         // The terminal IOSurface layer recreates on every frame change, causing GPU stalls.
         // With .never, the existing content stretches during drag; layout() fires once at end.
         if let detailView = detailVC?.view {
-            detailView.layerContentsRedrawPolicy = .duringViewResize
+            detailView.layerContentsRedrawPolicy = .never
         }
+    }
+
+    @objc private func showSearch() { onSearch() }
+    @objc private func focusTerminal() { onFocusTerminal() }
+    @objc private func showAgentDetails() { onShowAgentDetails() }
+
+    private static func wrap(_ content: NSView) -> NSViewController {
+        let controller = NSViewController()
+        let wrapper = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: wrapper.topAnchor),
+            content.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
+        ])
+        controller.view = wrapper
+        return controller
     }
 }
 
@@ -65,11 +107,19 @@ final class AgentWorkspaceController: NSSplitViewController {
 
 extension AgentWorkspaceController: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarTrackingSeparator]
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .agentSearch, .agentDetails, .focusTerminal]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.sidebarTrackingSeparator]
+        [
+            .toggleSidebar,
+            .sidebarTrackingSeparator,
+            .flexibleSpace,
+            .space,
+            .agentSearch,
+            .agentDetails,
+            .focusTerminal,
+        ]
     }
 
     func toolbar(
@@ -77,25 +127,77 @@ extension AgentWorkspaceController: NSToolbarDelegate {
         itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
-        NSToolbarItem(itemIdentifier: itemIdentifier)
+        switch itemIdentifier {
+        case .agentSearch:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Search Agents"
+            item.paletteLabel = "Search Agents"
+            item.toolTip = "Search Agents"
+            item.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Search Agents")
+            item.target = self
+            item.action = #selector(showSearch)
+            return item
+        case .focusTerminal:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Focus Terminal"
+            item.paletteLabel = "Focus Terminal"
+            item.toolTip = "Focus Terminal"
+            item.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Focus Terminal")
+            item.target = self
+            item.action = #selector(focusTerminal)
+            return item
+        case .agentDetails:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Agent Details"
+            item.paletteLabel = "Agent Details"
+            item.toolTip = "Show Model, Effort, and Context"
+            item.image = NSImage(
+                systemSymbolName: "info.circle",
+                accessibilityDescription: "Agent Details")
+            item.target = self
+            item.action = #selector(showAgentDetails)
+            return item
+        default:
+            return nil
+        }
     }
 }
 
+extension AgentWorkspaceController: NSToolbarItemValidation {
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+        switch item.itemIdentifier {
+        case .focusTerminal: return canFocusTerminal()
+        case .agentDetails: return canShowAgentDetails()
+        default: return true
+        }
+    }
+}
+
+private extension NSToolbarItem.Identifier {
+    static let agentSearch = NSToolbarItem.Identifier("ClawddySearchAgents")
+    static let focusTerminal = NSToolbarItem.Identifier("ClawddyFocusTerminal")
+    static let agentDetails = NSToolbarItem.Identifier("ClawddyAgentDetails")
+}
+
 /// Creates the workspace window with proper Liquid Glass sidebar styling.
-func makeAgentWorkspaceWindow(controller: AgentWorkspaceController) -> NSWindow {
-    let window = NSWindow(
+func makeAgentWorkspaceWindow(controller: AgentWorkspaceController) -> AgentWorkspaceWindow {
+    let window = AgentWorkspaceWindow(
         contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
         backing: .buffered,
         defer: false
     )
     window.contentViewController = controller
-    window.setFrameAutosaveName("AgentWorkspace")
     window.title = "Clawddy"
-    window.titleVisibility = .hidden
-    window.titlebarAppearsTransparent = true
-    window.contentMinSize = NSSize(width: 620, height: 400)
+    window.subtitle = "Agent Workspace"
+    window.titleVisibility = .visible
+    window.titlebarAppearsTransparent = false
+    window.contentMinSize = NSSize(width: 900, height: 480)
     window.isReleasedWhenClosed = false
+    window.identifier = NSUserInterfaceItemIdentifier("ClawddyAgentWorkspace")
+    window.isRestorable = true
+    window.restorationClass = AgentWorkspaceRestoration.self
+    window.autorecalculatesKeyViewLoop = true
 
     // Toolbar with sidebar tracking separator — must set delegate before assigning to window
     let toolbar = NSToolbar(identifier: "AgentWorkspaceToolbar")
@@ -104,6 +206,27 @@ func makeAgentWorkspaceWindow(controller: AgentWorkspaceController) -> NSWindow 
     window.toolbar = toolbar
     window.toolbarStyle = .unifiedCompact
 
-    window.center()
+    if !window.setFrameUsingName("AgentWorkspace") {
+        window.center()
+    }
+    window.setFrameAutosaveName("AgentWorkspace")
     return window
+}
+
+final class AgentWorkspaceRestoration: NSObject, NSWindowRestoration {
+    static func restoreWindow(
+        withIdentifier identifier: NSUserInterfaceItemIdentifier,
+        state: NSCoder,
+        completionHandler: @escaping (NSWindow?, Error?) -> Void
+    ) {
+        guard let delegate = NSApp.delegate as? AppDelegate else {
+            let error = NSError(
+                domain: "com.mitchellh.ghostty.clawddy.restoration",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "The agent workspace is not ready."])
+            completionHandler(nil, error)
+            return
+        }
+        delegate.restoreAgentWorkspaceWindow(completionHandler: completionHandler)
+    }
 }

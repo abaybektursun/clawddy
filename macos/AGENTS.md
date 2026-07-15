@@ -1,5 +1,8 @@
 # macOS Ghostty Application
 
+- Read [`docs/MACOS_DEVELOPMENT.md`](../docs/MACOS_DEVELOPMENT.md) before
+  changing AppKit, SwiftUI, Metal, system integration, entitlements, or macOS
+  build settings. It is the source of truth for platform policy and validation.
 - Use `swiftlint` for formatting and linting Swift code.
 - If code outside of `macos/` directory is modified, use
   `zig build -Demit-macos-app=false` before building the macOS app to update
@@ -9,6 +12,25 @@
   - Build: `macos/build.nu [--scheme Ghostty] [--configuration Debug] [--action build]`
   - Output: `macos/build/<configuration>/Ghostty.app` (e.g. `macos/build/Debug/Ghostty.app`)
 - Run unit tests directly with `macos/build.nu --action test`
+
+## Platform Rules
+
+- Preserve the macOS 14 deployment target unless a platform-support change is
+  explicitly requested. Availability-gate newer APIs.
+- Prefer public, nondeprecated APIs. Do not add private symbols, KVC access to
+  private properties, or dependencies on internal AppKit class names without a
+  documented public-API analysis and failure-safe behavior.
+- Keep UI-owned mutable state on the main actor. Background work must return to
+  the main actor before mutating AppKit, SwiftUI, or observable UI state.
+- Treat the general pasteboard as privacy-sensitive. Do not read it for menu
+  validation or type discovery, and test programmatic reads such as OSC 52 with
+  Apple's pasteboard privacy developer preview enabled.
+- Request notification and protected-resource permissions in context, never as
+  an unconditional application-launch side effect.
+- Custom controls and terminal state changes must maintain accessibility labels,
+  keyboard behavior, and appropriate accessibility notifications.
+- New or changed system integration must include the relevant manual test from
+  the validation matrix in `docs/MACOS_DEVELOPMENT.md`.
 
 ## AppleScript
 

@@ -29,7 +29,17 @@ A file for [guiding coding agents](https://agents.md/).
 
 - Shared Zig core: `src/`
 - macOS app: `macos/`
+- macOS development policy: `docs/MACOS_DEVELOPMENT.md`
 - GTK (Linux and FreeBSD) app: `src/apprt/gtk`
+
+## Engineering Standard
+
+- Diagnose and state the root cause and owning invariant before changing code.
+- Fix the authoritative state, lifecycle, or input boundary rather than masking
+  symptoms in an individual view.
+- Add regression coverage for the invariant and important transition or race
+  cases. Treat surface-level retries, duplicated state, and one-off UI patches
+  as design failures unless the platform contract requires them.
 
 ## Issue and PR Guidelines
 

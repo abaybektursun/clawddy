@@ -51,32 +51,34 @@ final class BridgeMetrics {
     // Periodic flush + watchdog timers
     private var flushTimer: DispatchSourceTimer?
     private var pingTimer: DispatchSourceTimer?
+    private var snapshotAgentCount = 0
+    private var snapshotSurfaceCount = 0
 
     private init() {}
 
     // MARK: - Public recording API (call from any thread; cheap)
 
-    func recordWatcherFire()           { queue.async { self.watcherFires += 1 } }
-    func recordPollFired()             { queue.async { self.pollsFired += 1 } }
-    func recordPollThrottled()         { queue.async { self.pollsThrottled += 1 } }
-    func recordConfigWatcherFire()     { queue.async { self.configWatcherFires += 1 } }
-    func recordConfigReload()          { queue.async { self.configReloads += 1 } }
-    func recordConfigReloadDeduped()   { queue.async { self.configReloadsDeduped += 1 } }
-    func recordProcessExitNotif()      { queue.async { self.processExitNotifs += 1 } }
-    func recordHeartbeat()             { queue.async { self.heartbeats += 1 } }
-    func recordAggregateChange()       { queue.async { self.aggregateChanges += 1 } }
-    func recordDockBadgeUpdate()       { queue.async { self.dockBadgeUpdates += 1 } }
+    func recordWatcherFire() { queue.async { self.watcherFires += 1 } }
+    func recordPollFired() { queue.async { self.pollsFired += 1 } }
+    func recordPollThrottled() { queue.async { self.pollsThrottled += 1 } }
+    func recordConfigWatcherFire() { queue.async { self.configWatcherFires += 1 } }
+    func recordConfigReload() { queue.async { self.configReloads += 1 } }
+    func recordConfigReloadDeduped() { queue.async { self.configReloadsDeduped += 1 } }
+    func recordProcessExitNotif() { queue.async { self.processExitNotifs += 1 } }
+    func recordHeartbeat() { queue.async { self.heartbeats += 1 } }
+    func recordAggregateChange() { queue.async { self.aggregateChanges += 1 } }
+    func recordDockBadgeUpdate() { queue.async { self.dockBadgeUpdates += 1 } }
 
-    func recordMutClaudeState()        { queue.async { self.mutClaudeState += 1 } }
-    func recordMutProcessState()       { queue.async { self.mutProcessState += 1 } }
-    func recordMutIsUnread()           { queue.async { self.mutIsUnread += 1 } }
-    func recordMutAgentName()          { queue.async { self.mutAgentName += 1 } }
-    func recordMutLastEventContent()   { queue.async { self.mutLastEventContent += 1 } }
+    func recordMutClaudeState() { queue.async { self.mutClaudeState += 1 } }
+    func recordMutProcessState() { queue.async { self.mutProcessState += 1 } }
+    func recordMutIsUnread() { queue.async { self.mutIsUnread += 1 } }
+    func recordMutAgentName() { queue.async { self.mutAgentName += 1 } }
+    func recordMutLastEventContent() { queue.async { self.mutLastEventContent += 1 } }
     func recordMutLastAggregateState() { queue.async { self.mutLastAggregateState += 1 } }
-    func recordMutAgentsDict()         { queue.async { self.mutAgentsDict += 1 } }
+    func recordMutAgentsDict() { queue.async { self.mutAgentsDict += 1 } }
 
-    func recordSurfaceCreated()         { queue.async { self.surfacesCreated += 1 } }
-    func recordSurfaceDestroyedExit()   { queue.async { self.surfacesDestroyedExit += 1 } }
+    func recordSurfaceCreated() { queue.async { self.surfacesCreated += 1 } }
+    func recordSurfaceDestroyedExit() { queue.async { self.surfacesDestroyedExit += 1 } }
     func recordSurfaceDestroyedDelete() { queue.async { self.surfacesDestroyedDelete += 1 } }
 
     func recordApplyRawEvents(durationMs: Double) {
@@ -99,12 +101,17 @@ final class BridgeMetrics {
 
     // MARK: - Lifecycle
 
-    func start(agentCount: @escaping () -> Int, surfaceCount: @escaping () -> Int) {
+    func start() {
+        guard flushTimer == nil, pingTimer == nil else { return }
+
         // Periodic flush every 5s
         let flush = DispatchSource.makeTimerSource(queue: queue)
         flush.schedule(deadline: .now() + 5, repeating: 5)
         flush.setEventHandler { [weak self] in
-            self?.flush(agentCount: agentCount(), surfaceCount: surfaceCount())
+            guard let self else { return }
+            self.flush(
+                agentCount: self.snapshotAgentCount,
+                surfaceCount: self.snapshotSurfaceCount)
         }
         flush.resume()
         self.flushTimer = flush
@@ -121,6 +128,27 @@ final class BridgeMetrics {
         logger.info("metrics started")
     }
 
+    /// Update values owned by the bridge. Callers pass immutable snapshots so
+    /// the metrics queue never reaches into main-thread-owned dictionaries.
+    func updateSnapshot(agentCount: Int, surfaceCount: Int) {
+        queue.async {
+            self.snapshotAgentCount = agentCount
+            self.snapshotSurfaceCount = surfaceCount
+        }
+    }
+
+    func stop() {
+        flushTimer?.cancel()
+        flushTimer = nil
+        pingTimer?.cancel()
+        pingTimer = nil
+        queue.async {
+            self.snapshotAgentCount = 0
+            self.snapshotSurfaceCount = 0
+        }
+        logger.info("metrics stopped")
+    }
+
     // MARK: - Stack capture (post-mortem analysis on stall)
 
     private func captureStackTrace() {
@@ -132,7 +160,7 @@ final class BridgeMetrics {
         // Run sample on ourselves from a detached background process.
         // Doesn't depend on main thread — uses Mach API to read stacks.
         let task = Process()
-        task.launchPath = "/usr/bin/sample"
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/sample")
         task.arguments = ["\(pid)", "3", "-file", path]
         task.standardOutput = FileHandle.nullDevice
         task.standardError = FileHandle.nullDevice

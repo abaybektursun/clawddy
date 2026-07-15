@@ -2,7 +2,7 @@ import SwiftUI
 
 struct CommandOption: Identifiable, Hashable {
     /// Unique identifier for this option.
-    let id = UUID()
+    let id: UUID
     /// The primary text displayed for this command.
     let title: String
     /// Secondary text displayed below the title.
@@ -17,6 +17,8 @@ struct CommandOption: Identifiable, Hashable {
     let leadingColor: Color?
     /// Badge text displayed as a pill.
     let badge: String?
+    /// Additional semantic terms used for filtering but not displayed.
+    let searchTerms: [String]
     /// Whether to visually emphasize this option.
     let emphasis: Bool
     /// Sort key for stable ordering when titles are equal.
@@ -25,6 +27,7 @@ struct CommandOption: Identifiable, Hashable {
     let action: () -> Void
 
     init(
+        id: UUID = UUID(),
         title: String,
         subtitle: String? = nil,
         description: String? = nil,
@@ -32,10 +35,12 @@ struct CommandOption: Identifiable, Hashable {
         leadingIcon: String? = nil,
         leadingColor: Color? = nil,
         badge: String? = nil,
+        searchTerms: [String] = [],
         emphasis: Bool = false,
         sortKey: AnySortKey? = nil,
         action: @escaping () -> Void
     ) {
+        self.id = id
         self.title = title
         self.subtitle = subtitle
         self.description = description
@@ -43,6 +48,7 @@ struct CommandOption: Identifiable, Hashable {
         self.leadingIcon = leadingIcon
         self.leadingColor = leadingColor
         self.badge = badge
+        self.searchTerms = searchTerms
         self.emphasis = emphasis
         self.sortKey = sortKey
         self.action = action
@@ -61,28 +67,33 @@ struct CommandPaletteView: View {
     @Binding var isPresented: Bool
     var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
     var options: [CommandOption]
+    /// Search-field placeholder text.
+    var placeholder: String = "Execute a command…"
+    /// Maximum height of the results table. Increase for larger pickers.
+    var tableMaxHeight: CGFloat = 200
+    /// Whether to draw the rounded stroke around the palette card.
+    /// Stock Ghostty uses true; floating panels over the desktop look cleaner with false.
+    var showsBorder: Bool = true
+    /// Whether to draw the palette's own material card + shadow + divider.
+    /// Set false when an external surface (a Liquid Glass panel) provides the
+    /// background — avoids stacking a second material over the glass.
+    var showsBackground: Bool = true
     @State private var query = ""
-    @State private var selectedIndex: UInt?
+    @State private var selectedIndex: UInt? = 0
     @State private var hoveredOptionID: UUID?
+    @State private var appeared = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // The options that we should show, taking into account any filtering from
-    // the query. Options with matching leadingColor are ranked higher.
+    // the query.
     var filteredOptions: [CommandOption] {
         if query.isEmpty {
             return options
         } else {
-            // Filter by title/subtitle match OR color match
-            let filtered = options.filter {
+            return options.filter {
                 $0.title.localizedCaseInsensitiveContains(query) ||
                 ($0.subtitle?.localizedCaseInsensitiveContains(query) ?? false) ||
-                colorMatchScore(for: $0.leadingColor, query: query) > 0
-            }
-
-            // Sort by color match score (higher scores first), then maintain original order
-            return filtered.sorted { a, b in
-                let scoreA = colorMatchScore(for: a.leadingColor, query: query)
-                let scoreB = colorMatchScore(for: b.leadingColor, query: query)
-                return scoreA > scoreB
+                $0.searchTerms.contains(where: { $0.localizedCaseInsensitiveContains(query) })
             }
         }
     }
@@ -104,7 +115,7 @@ struct CommandPaletteView: View {
         }
 
         VStack(alignment: .leading, spacing: 0) {
-            CommandPaletteQuery(query: $query) { event in
+            CommandPaletteQuery(query: $query, placeholder: placeholder) { event in
                 switch event {
                 case .exit:
                     isPresented = false
@@ -132,95 +143,81 @@ struct CommandPaletteView: View {
                     break
                 }
             }
-            .onChange(of: query) { newValue in
-                // If the user types a query then we want to make sure the first
-                // value is selected. If the user clears the query and we were selecting
-                // the first, we unset any selection.
-                if !newValue.isEmpty {
-                    if selectedIndex == nil {
-                        selectedIndex = 0
-                    }
-                } else {
-                    if let selectedIndex, selectedIndex == 0 {
-                        self.selectedIndex = nil
-                    }
-                }
+            .onChange(of: query) {
+                selectedIndex = filteredOptions.isEmpty ? nil : 0
             }
 
-            Divider()
+            if showsBackground {
+                Divider()
+            }
 
             CommandTable(
                 options: filteredOptions,
                 selectedIndex: $selectedIndex,
-                hoveredOptionID: $hoveredOptionID) { option in
+                hoveredOptionID: $hoveredOptionID,
+                maxHeight: tableMaxHeight) { option in
                     isPresented = false
                     option.action()
             }
         }
         .frame(maxWidth: 500)
         .background(
-            ZStack {
-                Rectangle()
-                    .fill(.ultraThinMaterial)
-                Rectangle()
-                    .fill(backgroundColor)
-                    .blendMode(.color)
+            Group {
+                if showsBackground {
+                    ZStack {
+                        Rectangle()
+                            .fill(.ultraThinMaterial)
+                        Rectangle()
+                            .fill(backgroundColor)
+                            .blendMode(.color)
+                    }
+                    .compositingGroup()
+                }
             }
-                .compositingGroup()
         )
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .clipShape(RoundedRectangle(cornerRadius: showsBackground ? 10 : 0))
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color(nsColor: .tertiaryLabelColor).opacity(0.75))
+            Group {
+                if showsBorder {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(nsColor: .tertiaryLabelColor).opacity(0.75))
+                }
+            }
         )
-        .shadow(radius: 32, x: 0, y: 12)
-        .padding()
+        .shadow(radius: showsBackground ? 32 : 0, x: 0, y: showsBackground ? 12 : 0)
+        .padding(showsBackground ? 16 : 12)
+        .scaleEffect(appeared ? 1 : 0.97)
+        .opacity(appeared ? 1 : 0)
+        .onAppear {
+            if reduceMotion {
+                appeared = true
+            } else {
+                withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) { appeared = true }
+            }
+        }
         .environment(\.colorScheme, scheme)
-        .onChange(of: isPresented) { newValue in
+        .onChange(of: isPresented) { _, newValue in
             if !newValue {
                 // This is optional, since most of the time
                 // there will be a delay before the next use.
                 // To keep behavior the same as before, we reset it.
                 query = ""
+                selectedIndex = options.isEmpty ? nil : 0
             }
         }
-    }
-
-    /// Returns a score (0.0 to 1.0) indicating how well a color matches a search query color name.
-    /// Returns 0 if no color name in the query matches, or if the color is nil.
-    private func colorMatchScore(for color: Color?, query: String) -> Double {
-        guard let color = color else { return 0 }
-
-        let queryLower = query.lowercased()
-        let nsColor = NSColor(color)
-
-        var bestScore: Double = 0
-        for name in NSColor.colorNames {
-            guard queryLower.contains(name),
-                  let systemColor = NSColor(named: name) else { continue }
-
-            let distance = nsColor.distance(to: systemColor)
-            // Max distance in weighted RGB space is ~3.0, so normalize and invert
-            // Use a threshold to determine "close enough" matches
-            let maxDistance: Double = 1.5
-            if distance < maxDistance {
-                let score = 1.0 - (distance / maxDistance)
-                bestScore = max(bestScore, score)
-            }
-        }
-
-        return bestScore
     }
 }
 
 /// The text field for building the query for the command palette.
 private struct CommandPaletteQuery: View {
     @Binding var query: String
+    var placeholder: String
     var onEvent: ((KeyboardEvent) -> Void)?
     @FocusState private var isTextFieldFocused: Bool
 
-    init(query: Binding<String>, onEvent: ((KeyboardEvent) -> Void)? = nil) {
+    init(query: Binding<String>, placeholder: String = "Execute a command…", onEvent: ((KeyboardEvent) -> Void)? = nil) {
         _query = query
+        self.placeholder = placeholder
         self.onEvent = onEvent
     }
 
@@ -250,31 +247,35 @@ private struct CommandPaletteQuery: View {
             .frame(width: 0, height: 0)
             .accessibilityHidden(true)
 
-            TextField("Execute a command…", text: $query)
-                .padding()
-                .font(.system(size: 20, weight: .light))
-                .frame(height: 48)
-                .textFieldStyle(.plain)
-                .focused($isTextFieldFocused)
-                .onChange(of: isTextFieldFocused) { focused in
-                    if !focused {
-                        onEvent?(.exit)
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+
+                TextField(placeholder, text: $query)
+                    .font(.system(size: 18))
+                    .textFieldStyle(.plain)
+                    .focused($isTextFieldFocused)
+                    .accessibilityLabel("Search")
+                    .onExitCommand { onEvent?(.exit) }
+                    .onMoveCommand { onEvent?(.move($0)) }
+                    .onSubmit { onEvent?(.submit) }
+
+                if !query.isEmpty {
+                    Button("Clear Search", systemImage: "xmark.circle.fill") {
+                        query = ""
                     }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
                 }
-                .onExitCommand { onEvent?(.exit) }
-                .onMoveCommand { onEvent?(.move($0)) }
-                .onSubmit { onEvent?(.submit) }
-                .onAppear {
-                    // Grab focus on the first appearance.
-                    // Debug and Release build using Xcode 26.4,
-                    // has same issue again
-                    // Fixes: https://github.com/ghostty-org/ghostty/issues/8497
-                    // SearchOverlay works magically as expected, I don't know
-                    // why it's different here, but dispatching to next loop fixes it
-                    DispatchQueue.main.async {
-                        isTextFieldFocused = true
-                    }
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 52)
+            .onAppear {
+                DispatchQueue.main.async {
+                    isTextFieldFocused = true
                 }
+            }
         }
     }
 }
@@ -283,7 +284,14 @@ private struct CommandTable: View {
     var options: [CommandOption]
     @Binding var selectedIndex: UInt?
     @Binding var hoveredOptionID: UUID?
+    var maxHeight: CGFloat = 200
     var action: (CommandOption) -> Void
+    @AccessibilityFocusState private var accessibilityFocusedOptionID: UUID?
+
+    private var selectedOptionID: UUID? {
+        guard let selectedIndex, !options.isEmpty else { return nil }
+        return options[min(Int(selectedIndex), options.count - 1)].id
+    }
 
     var body: some View {
         if options.isEmpty {
@@ -310,16 +318,18 @@ private struct CommandTable: View {
                             ) {
                                 action(option)
                             }
+                            .accessibilityFocused(
+                                $accessibilityFocusedOptionID,
+                                equals: option.id)
                         }
                     }
                     .padding(10)
                 }
-                .frame(maxHeight: 200)
-                .onChange(of: selectedIndex) { _ in
-                    guard let selectedIndex,
-                          selectedIndex < options.count else { return }
-                    proxy.scrollTo(
-                        options[Int(selectedIndex)].id)
+                .frame(maxHeight: maxHeight)
+                .onChange(of: selectedOptionID, initial: true) { _, optionID in
+                    guard let optionID else { return }
+                    proxy.scrollTo(optionID)
+                    accessibilityFocusedOptionID = optionID
                 }
             }
         }
@@ -397,6 +407,9 @@ private struct CommandRow: View {
         .onHover { hovering in
             hoveredID = hovering ? option.id : nil
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityValue(option.badge ?? "")
     }
 }
 
