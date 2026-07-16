@@ -12,6 +12,14 @@
   - Build: `macos/build.nu [--scheme Ghostty] [--configuration Debug] [--action build]`
   - Output: `macos/build/<configuration>/Ghostty.app` (e.g. `macos/build/Debug/Ghostty.app`)
 - Run unit tests directly with `macos/build.nu --action test`
+- For Clawddy validation in this workspace, build and run `Release` only. Never
+  launch the Debug, ReleaseLocal, preview, or development-mode app.
+- Automation shells may set `NO_COLOR`. Remove that automation-only variable
+  when launching Clawddy (for example, `env -u NO_COLOR open -na <app>`) so it
+  is not inherited by interactive Claude or Codex terminals. Do not globally
+  override a user's intentional `NO_COLOR` preference in application code.
+- When replacing a running Clawddy build, match the built executable's absolute
+  path and leave every other Ghostty or Clawddy process untouched.
 
 ## Platform Rules
 

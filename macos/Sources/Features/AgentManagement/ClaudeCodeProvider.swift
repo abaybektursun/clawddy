@@ -100,12 +100,14 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
     func probe(environmentPath: String) -> AgentProviderHealth {
         guard let executable = AgentExecutableLocator.locate(id.executableName, path: environmentPath)
         else {
-            return AgentProviderHealth(installation: .missing, authentication: .signedOut)
+            return AgentProviderHealth(
+                installation: .missing,
+                authentication: .unavailable("Claude Code is not installed."))
         }
         let version = AgentProcessProbe.run(
             executable: executable,
             arguments: ["--version"],
-            environmentPath: environmentPath)?.output
+            environmentPath: environmentPath).successfulOutput
         let auth = AgentProcessProbe.run(
             executable: executable,
             arguments: ["auth", "status"],
@@ -115,7 +117,26 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
             } ?? [:])
         return AgentProviderHealth(
             installation: .ready(executable: executable.path, version: version),
-            authentication: auth?.status == 0 ? .signedIn : .signedOut)
+            authentication: Self.authenticationState(from: auth))
+    }
+
+    static func authenticationState(
+        from outcome: AgentProcessProbe.Outcome
+    ) -> AgentProviderAuthState {
+        let result: AgentProcessProbe.Result
+        switch outcome {
+        case .completed(let completed): result = completed
+        case .launchFailed:
+            return .unavailable("Claude Code sign-in status could not be started.")
+        case .timedOut:
+            return .unavailable("Claude Code sign-in status timed out.")
+        }
+        if let data = result.output.data(using: .utf8),
+           let status = try? JSONDecoder().decode(AuthenticationStatus.self, from: data) {
+            return status.loggedIn ? .signedIn : .signedOut
+        }
+        if result.status == 0 { return .signedIn }
+        return .unavailable("Claude Code returned an unreadable sign-in status.")
     }
 
     func cleanup(agentID: UUID) {
@@ -142,5 +163,9 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
             }
             settings["hooks"] = hooks
         }
+    }
+
+    private struct AuthenticationStatus: Decodable {
+        var loggedIn: Bool
     }
 }

@@ -125,6 +125,13 @@ enum AgentSelectionIntent: Equatable {
     case reveal
     /// Records that the user deliberately exposed this agent's detail content.
     case inspect
+
+    /// A row click remains meaningful when the row is already selected. List
+    /// selection bindings only report value changes, so user intent must not
+    /// be inferred from UUID mutation alone.
+    static func rowClick(currentSelection _: UUID?, clickedID _: UUID) -> Self {
+        .inspect
+    }
 }
 
 /// Irreversible or session-affecting workspace operations. Keeping these in one
@@ -577,6 +584,15 @@ struct AgentListView: View {
                         let instance = item.instance
                         AgentListRow(agent: instance, project: project.name, task: task.name)
                             .tag(entry.id)
+                            .contentShape(Rectangle())
+                            .simultaneousGesture(TapGesture().onEnded {
+                                onSelectAgent(
+                                    entry.id,
+                                    project,
+                                    .rowClick(
+                                        currentSelection: model.selectedAgentID,
+                                        clickedID: entry.id))
+                            })
                             .simultaneousGesture(TapGesture(count: 2).onEnded {
                                 onActivateAgent(entry.id, project)
                             })
@@ -1015,8 +1031,13 @@ private struct NewAgentSheet: View {
         case .unavailable(let reason):
             return reason
         case .ready(_, let version):
-            if health.authentication == .signedOut {
+            switch health.authentication {
+            case .signedOut:
                 return "You can complete sign-in when the terminal opens."
+            case .unavailable(let reason):
+                return reason
+            case .checking, .signedIn:
+                break
             }
             if provider == .codex {
                 let prefix = version.map { "\($0). " } ?? ""

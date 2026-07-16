@@ -155,19 +155,34 @@ class AgentConfig {
         guard (expanded as NSString).isAbsolutePath else { return fallback }
         return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
     }
-    /// The macOS account home from the user database. Terminal processes need
-    /// this value so system services such as the login Keychain resolve in the
-    /// same user context even when the app itself is launched with an isolated
-    /// home directory.
-    static var accountHomeDirectory: URL {
-        if let record = getpwuid(getuid()),
-           let directory = record.pointee.pw_dir {
-            return URL(
-                fileURLWithPath: String(cString: directory),
-                isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
+    private struct AccountIdentity: Sendable {
+        var homeDirectory: URL
+        var userName: String
     }
+
+    /// Resolve the effective macOS account identity once from the user database.
+    /// Provider CLIs use these conventional values to locate per-user config and
+    /// credential records; the actual Keychain security identity remains the
+    /// subprocess's inherited effective UID and audit session.
+    private static let accountIdentity: AccountIdentity = {
+        if let record = getpwuid(geteuid()) {
+            let passwordRecord = record.pointee
+            if let directory = passwordRecord.pw_dir,
+               let userName = passwordRecord.pw_name {
+                return AccountIdentity(
+                    homeDirectory: URL(
+                        fileURLWithPath: String(cString: directory),
+                        isDirectory: true),
+                    userName: String(cString: userName))
+            }
+        }
+        return AccountIdentity(
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser,
+            userName: NSUserName())
+    }()
+
+    static var accountHomeDirectory: URL { accountIdentity.homeDirectory }
+    static var accountUserName: String { accountIdentity.userName }
 
     /// Claude's supported configuration root. This deliberately remains
     /// independent from the account home used for Keychain lookup.

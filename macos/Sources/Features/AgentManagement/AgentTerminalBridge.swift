@@ -555,15 +555,12 @@ final class AgentBridge {
             && agent.surfaceState == .inactive
             && agent.processState == .notStarted
             && agent.unreadCompletion == nil {
-            switch authentication {
-            case .signedOut where agent.interactionState != .authentication:
-                agent.interactionState = .authentication
+            let reconciled = AgentAuthenticationPresentation.reconciledInteraction(
+                current: agent.interactionState,
+                authentication: authentication)
+            if reconciled != agent.interactionState {
+                agent.interactionState = reconciled
                 changed = true
-            case .signedIn where agent.interactionState == .authentication:
-                agent.interactionState = .none
-                changed = true
-            default:
-                break
             }
         }
         if changed { updateAggregate() }

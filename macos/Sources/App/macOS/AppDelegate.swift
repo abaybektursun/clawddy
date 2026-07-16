@@ -1463,6 +1463,7 @@ extension AppDelegate {
                     self?.agentWorkspaceModel.selectedAgentID != nil
                 })
             let window = makeAgentWorkspaceWindow(controller: controller)
+            window.firstMouseSafeViews = [navigationView, agentListView]
             window.onFirstResponderChanged = { [weak detailVC] in
                 detailVC?.workspaceFirstResponderDidChange()
             }
@@ -1477,8 +1478,8 @@ extension AppDelegate {
         }
 
         if activate {
-            agentWorkspaceWindow?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            agentWorkspaceWindow?.makeKeyAndOrderFront(nil)
         }
         return agentWorkspaceWindow
     }

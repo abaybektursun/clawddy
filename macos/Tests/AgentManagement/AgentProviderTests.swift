@@ -3,6 +3,82 @@ import Testing
 @testable import Ghostty
 
 struct AgentProviderTests {
+    @Test func providerProbeEnvironmentPreservesMacOSAccountIdentity() {
+        let environment = AgentProcessProbe.environment(
+            environmentPath: "/custom/bin:/usr/bin",
+            additionalEnvironment: [
+                "CODEX_HOME": "/tmp/codex",
+                "HOME": "/hostile/home",
+                "USER": "wrong-user",
+            ],
+            inheritedEnvironment: [
+                "LANG": "en_US.UTF-8",
+                "HTTPS_PROXY": "https://proxy.example",
+                "LOGNAME": "wrong-logname",
+            ],
+            accountHomeDirectory: URL(fileURLWithPath: "/Users/example", isDirectory: true),
+            accountUserName: "example")
+
+        #expect(environment == [
+            "HOME": "/Users/example",
+            "PATH": "/custom/bin:/usr/bin",
+            "USER": "example",
+            "LOGNAME": "example",
+            "CODEX_HOME": "/tmp/codex",
+            "LANG": "en_US.UTF-8",
+            "HTTPS_PROXY": "https://proxy.example",
+        ])
+    }
+
+    @Test func claudeAuthenticationDistinguishesSignedOutFromProbeFailure() {
+        #expect(ClaudeCodeProvider.authenticationState(from: .completed(.init(
+            status: 0,
+            output: #"{"loggedIn":true}"#))) == .signedIn)
+        #expect(ClaudeCodeProvider.authenticationState(from: .completed(.init(
+            status: 1,
+            output: #"{"loggedIn":false}"#))) == .signedOut)
+        #expect(ClaudeCodeProvider.authenticationState(from: .timedOut) == .unavailable(
+            "Claude Code sign-in status timed out."))
+        #expect(ClaudeCodeProvider.authenticationState(from: .launchFailed("missing")) == .unavailable(
+            "Claude Code sign-in status could not be started."))
+        #expect(ClaudeCodeProvider.authenticationState(from: .completed(.init(
+            status: 1,
+            output: "Keychain lookup failed"))) == .unavailable(
+                "Claude Code returned an unreadable sign-in status."))
+    }
+
+    @Test func codexAuthenticationDistinguishesSignedOutFromProbeFailure() {
+        #expect(CodexProvider.authenticationState(from: .completed(.init(
+            status: 0,
+            output: "Logged in using ChatGPT"))) == .signedIn)
+        #expect(CodexProvider.authenticationState(from: .completed(.init(
+            status: 1,
+            output: "Not logged in"))) == .signedOut)
+        #expect(CodexProvider.authenticationState(from: .timedOut) == .unavailable(
+            "Codex sign-in status timed out."))
+        #expect(CodexProvider.authenticationState(from: .launchFailed("missing")) == .unavailable(
+            "Codex sign-in status could not be started."))
+        #expect(CodexProvider.authenticationState(from: .completed(.init(
+            status: 1,
+            output: "Credential store unavailable"))) == .unavailable(
+                "Codex returned an unreadable sign-in status."))
+    }
+
+    @Test func providerAuthenticationPresentationRetractsStaleSignInRequirement() {
+        #expect(AgentAuthenticationPresentation.reconciledInteraction(
+            current: .none,
+            authentication: .signedOut) == .authentication)
+        #expect(AgentAuthenticationPresentation.reconciledInteraction(
+            current: .authentication,
+            authentication: .signedIn) == .none)
+        #expect(AgentAuthenticationPresentation.reconciledInteraction(
+            current: .authentication,
+            authentication: .unavailable("Probe failed")) == .none)
+        #expect(AgentAuthenticationPresentation.reconciledInteraction(
+            current: .permission,
+            authentication: .unavailable("Probe failed")) == .permission)
+    }
+
     @Test func explicitAgentDataDirectorySupportsIsolatedAppInstances() {
         let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
         let isolated = URL(

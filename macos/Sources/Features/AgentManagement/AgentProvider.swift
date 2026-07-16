@@ -210,6 +210,20 @@ struct AgentProviderHealth: Equatable, Sendable {
     }
 }
 
+enum AgentAuthenticationPresentation {
+    static func reconciledInteraction(
+        current: AgentInteractionState,
+        authentication: AgentProviderAuthState
+    ) -> AgentInteractionState {
+        if authentication == .signedOut { return .authentication }
+        guard current == .authentication else { return current }
+        switch authentication {
+        case .signedIn, .unavailable: return .none
+        case .checking, .signedOut: return current
+        }
+    }
+}
+
 enum AgentProviderIssue: Error, Equatable, LocalizedError, Sendable {
     case executableMissing(AgentProviderID)
     case integrationFailed(AgentProviderID, String)
@@ -399,9 +413,41 @@ enum AgentExecutableLocator {
 }
 
 enum AgentProcessProbe {
-    struct Result: Sendable {
+    struct Result: Equatable, Sendable {
         var status: Int32
         var output: String
+    }
+
+    enum Outcome: Equatable, Sendable {
+        case completed(Result)
+        case launchFailed(String)
+        case timedOut
+
+        var successfulOutput: String? {
+            guard case .completed(let result) = self, result.status == 0 else { return nil }
+            return result.output
+        }
+    }
+
+    /// Preserve the user's complete launch environment because provider
+    /// authentication can depend on Keychain identity, API-key variables,
+    /// proxies, certificate paths, and provider-specific configuration. Force
+    /// account identity and PATH last so an isolated app instance or caller
+    /// cannot accidentally probe a different macOS account.
+    static func environment(
+        environmentPath: String,
+        additionalEnvironment: [String: String] = [:],
+        inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        accountHomeDirectory: URL = AgentConfig.accountHomeDirectory,
+        accountUserName: String = AgentConfig.accountUserName
+    ) -> [String: String] {
+        var environment = inheritedEnvironment
+        environment.merge(additionalEnvironment, uniquingKeysWith: { _, additional in additional })
+        environment["HOME"] = accountHomeDirectory.path
+        environment["PATH"] = environmentPath
+        environment["USER"] = accountUserName
+        environment["LOGNAME"] = accountUserName
+        return environment
     }
 
     static func run(
@@ -410,15 +456,14 @@ enum AgentProcessProbe {
         environmentPath: String,
         additionalEnvironment: [String: String] = [:],
         timeout: TimeInterval = 3
-    ) -> Result? {
+    ) -> Outcome {
         let process = Process()
         let output = Pipe()
         process.executableURL = executable
         process.arguments = arguments
-        process.environment = additionalEnvironment.merging([
-            "HOME": AgentConfig.accountHomeDirectory.path,
-            "PATH": environmentPath,
-        ], uniquingKeysWith: { current, _ in current })
+        process.environment = environment(
+            environmentPath: environmentPath,
+            additionalEnvironment: additionalEnvironment)
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
         process.standardError = output
@@ -428,17 +473,17 @@ enum AgentProcessProbe {
         do {
             try process.run()
         } catch {
-            return nil
+            return .launchFailed(error.localizedDescription)
         }
         if finished.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()
             _ = finished.wait(timeout: .now() + 1)
-            return nil
+            return .timedOut
         }
         let data = output.fileHandleForReading.readDataToEndOfFile()
-        return Result(
+        return .completed(Result(
             status: process.terminationStatus,
             output: (String(data: data, encoding: .utf8) ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines))
+                .trimmingCharacters(in: .whitespacesAndNewlines)))
     }
 }

@@ -15,10 +15,44 @@ final class AgentInteractiveHostingView<Content: View>: NSHostingView<Content> {
 final class AgentWorkspaceWindow: NSWindow {
     var onFirstResponderChanged: (() -> Void)?
 
+    /// Regions whose controls are safe to operate with the click that makes
+    /// this window key. The terminal is intentionally never registered: an
+    /// activation click must not become terminal input.
+    var firstMouseSafeViews: [NSView] = []
+
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
         let accepted = super.makeFirstResponder(responder)
         if accepted { onFirstResponderChanged?() }
         return accepted
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        let targetsSafeRegion = firstMouseSafeViews.contains { view in
+            guard view.window === self, !view.isHiddenOrHasHiddenAncestor else { return false }
+            return view.bounds.contains(view.convert(event.locationInWindow, from: nil))
+        }
+        if AgentFirstMousePolicy.shouldPromoteWindow(
+            eventType: event.type,
+            windowIsKey: isKeyWindow,
+            targetsSafeRegion: targetsSafeRegion
+        ) {
+            // Promote before AppKit dispatches the original event. This avoids
+            // target-dependent acceptsFirstMouse behavior inside SwiftUI/List
+            // without synthesizing, reposting, or retrying the click.
+            NSApp.activate(ignoringOtherApps: true)
+            makeKey()
+        }
+        super.sendEvent(event)
+    }
+}
+
+enum AgentFirstMousePolicy {
+    static func shouldPromoteWindow(
+        eventType: NSEvent.EventType,
+        windowIsKey: Bool,
+        targetsSafeRegion: Bool
+    ) -> Bool {
+        eventType == .leftMouseDown && !windowIsKey && targetsSafeRegion
     }
 }
 

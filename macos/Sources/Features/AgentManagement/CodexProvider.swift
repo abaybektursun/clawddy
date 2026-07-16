@@ -102,12 +102,14 @@ struct CodexProvider: AgentProviderAdapter {
     func probe(environmentPath: String) -> AgentProviderHealth {
         guard let executable = AgentExecutableLocator.locate(id.executableName, path: environmentPath)
         else {
-            return AgentProviderHealth(installation: .missing, authentication: .signedOut)
+            return AgentProviderHealth(
+                installation: .missing,
+                authentication: .unavailable("Codex is not installed."))
         }
         let version = AgentProcessProbe.run(
             executable: executable,
             arguments: ["--version"],
-            environmentPath: environmentPath)?.output
+            environmentPath: environmentPath).successfulOutput
         let auth = AgentProcessProbe.run(
             executable: executable,
             arguments: ["login", "status"],
@@ -117,8 +119,27 @@ struct CodexProvider: AgentProviderAdapter {
             } ?? [:])
         return AgentProviderHealth(
             installation: .ready(executable: executable.path, version: version),
-            authentication: auth?.status == 0 ? .signedIn : .signedOut,
+            authentication: Self.authenticationState(from: auth),
             integrationIssue: Self.isHookReviewRequired ? Self.hookReviewNotice : nil)
+    }
+
+    static func authenticationState(
+        from outcome: AgentProcessProbe.Outcome
+    ) -> AgentProviderAuthState {
+        let result: AgentProcessProbe.Result
+        switch outcome {
+        case .completed(let completed): result = completed
+        case .launchFailed:
+            return .unavailable("Codex sign-in status could not be started.")
+        case .timedOut:
+            return .unavailable("Codex sign-in status timed out.")
+        }
+        if result.status == 0 { return .signedIn }
+        let output = result.output.lowercased()
+        if output.contains("not logged in") || output.contains("not signed in") {
+            return .signedOut
+        }
+        return .unavailable("Codex returned an unreadable sign-in status.")
     }
 
     func cleanup(agentID _: UUID) {}
