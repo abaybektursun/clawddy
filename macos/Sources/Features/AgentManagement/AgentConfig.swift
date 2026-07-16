@@ -131,8 +131,29 @@ class AgentConfig {
     private var lastConfigData: Data?
 
     static var baseDir: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/ghostty-agents")
+        resolveBaseDirectory(
+            environment: ProcessInfo.processInfo.environment,
+            defaultHomeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+    }
+
+    /// Resolve Clawddy's complete mutable data root. macOS does not guarantee
+    /// that Foundation's home-directory APIs honor an inherited `HOME`, so a
+    /// parallel app instance must use an explicit absolute override rather than
+    /// relying on process environment emulation.
+    static func resolveBaseDirectory(
+        environment: [String: String],
+        defaultHomeDirectory: URL
+    ) -> URL {
+        let fallback = defaultHomeDirectory
+            .appendingPathComponent(".config/ghostty-agents", isDirectory: true)
+        guard let rawValue = environment["GHOSTTY_AGENT_DATA_DIR"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !rawValue.isEmpty
+        else { return fallback }
+
+        let expanded = (rawValue as NSString).expandingTildeInPath
+        guard (expanded as NSString).isAbsolutePath else { return fallback }
+        return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
     }
     /// The macOS account home from the user database. Terminal processes need
     /// this value so system services such as the login Keychain resolve in the

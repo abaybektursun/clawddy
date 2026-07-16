@@ -450,6 +450,12 @@ Only state that cannot be reconstructed is persisted in:
 ~/.config/ghostty-agents/state.json
 ```
 
+`GHOSTTY_AGENT_DATA_DIR` may select a different absolute root for the complete
+configuration, status, hook, and state tree. Parallel production-build testing
+uses this explicit boundary because Foundation's macOS home-directory APIs do
+not reliably follow an overridden `HOME`; changing `HOME` alone is not an
+isolation mechanism.
+
 It contains provider-tagged unread and last-applied completion identities,
 pending provider renames, and per-agent event-journal byte offsets. The durable
 last-applied identity makes replay idempotent even after unread state is

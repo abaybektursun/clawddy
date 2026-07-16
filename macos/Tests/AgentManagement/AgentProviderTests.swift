@@ -3,6 +3,25 @@ import Testing
 @testable import Ghostty
 
 struct AgentProviderTests {
+    @Test func explicitAgentDataDirectorySupportsIsolatedAppInstances() {
+        let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
+        let isolated = URL(
+            fileURLWithPath: "/private/tmp/clawddy-isolated",
+            isDirectory: true)
+
+        #expect(AgentConfig.resolveBaseDirectory(
+            environment: ["GHOSTTY_AGENT_DATA_DIR": isolated.path],
+            defaultHomeDirectory: home) == isolated.standardizedFileURL)
+        #expect(AgentConfig.resolveBaseDirectory(
+            environment: ["GHOSTTY_AGENT_DATA_DIR": "relative/path"],
+            defaultHomeDirectory: home) == home
+                .appendingPathComponent(".config/ghostty-agents", isDirectory: true))
+        #expect(AgentConfig.resolveBaseDirectory(
+            environment: [:],
+            defaultHomeDirectory: home) == home
+                .appendingPathComponent(".config/ghostty-agents", isDirectory: true))
+    }
+
     @Test func legacyAgentConfigMigratesToClaudeCode() throws {
         let id = UUID()
         let data = Data("""
