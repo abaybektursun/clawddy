@@ -42,6 +42,7 @@ struct CodexProvider: AgentProviderAdapter {
         else { return .failure(.executableMissing(id)) }
 
         var globalArguments: [String] = []
+        globalArguments += id.startModeArguments(request.launchProfile.startMode)
         if let model = normalized(request.launchProfile.modelID) {
             globalArguments += ["--model", model]
         }

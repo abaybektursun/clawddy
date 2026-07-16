@@ -97,7 +97,7 @@ struct AgentTask: Codable, Identifiable, Sendable {
 }
 
 struct AgentConfigFile: Codable {
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 5
 
     var schemaVersion: Int
     var projects: [AgentProject]

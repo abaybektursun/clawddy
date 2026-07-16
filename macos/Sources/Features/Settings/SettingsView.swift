@@ -1,31 +1,118 @@
 import SwiftUI
+import GhosttyKit
 
 struct SettingsView: View {
-    // We need access to our app delegate to know if we're quitting or not.
-    @EnvironmentObject private var appDelegate: AppDelegate
+    @State private var preferences = AgentPreferencesStore.load()
+    @State private var persistenceError: String?
 
     var body: some View {
-        HStack {
-            Image("AppIconImage")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 128, height: 128)
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Agent Defaults")
+                    .font(.title2.weight(.semibold))
+                Text("Choose how newly created agents start. Each agent keeps its selected mode.")
+                    .foregroundStyle(.secondary)
+            }
 
-            VStack(alignment: .leading) {
-                Text("Coming Soon. 🚧").font(.title)
-                Text("You can't configure settings in the GUI yet. To modify settings, " +
-                     "edit the file at $HOME/.config/ghostty/config.ghostty and restart Ghostty.")
-                .multilineTextAlignment(.leading)
-                .lineLimit(nil)
+            GroupBox {
+                VStack(spacing: 0) {
+                    providerRow(.claudeCode)
+                    Divider()
+                        .padding(.leading, 48)
+                    providerRow(.codex)
+                }
+            }
+
+            Label(
+                "Unrestricted modes can run commands, access the network, and modify files without asking. Use them only in projects you trust.",
+                systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel("Warning")
+                .accessibilityValue(
+                    "Unrestricted modes can run commands, access the network, and modify files without asking. Use them only in projects you trust.")
+
+            if let persistenceError {
+                Label(persistenceError, systemImage: "exclamationmark.circle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Terminal Configuration")
+                        .font(.callout.weight(.medium))
+                    Text("Appearance, fonts, key bindings, and other Ghostty settings.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Open Configuration…") {
+                    Ghostty.App.openConfig()
+                }
             }
         }
-        .padding()
-        .frame(minWidth: 500, maxWidth: 500, minHeight: 156, maxHeight: 156)
+        .padding(24)
+        .frame(width: 590)
+    }
+
+    private func providerRow(_ provider: AgentProviderID) -> some View {
+        let mode = preferences.defaultStartMode(for: provider)
+        return HStack(alignment: .top, spacing: 12) {
+            Image(systemName: provider.symbolName)
+                .font(.title3)
+                .foregroundStyle(.tint)
+                .frame(width: 36, height: 36)
+                .background(.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 9))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(provider.displayName)
+                    .font(.headline)
+                Text(provider.startModeDescription(mode))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 16)
+
+            Picker(
+                "Default start mode for \(provider.displayName)",
+                selection: modeBinding(for: provider)
+            ) {
+                ForEach(AgentStartMode.allCases) { option in
+                    Text(provider.startModeTitle(option)).tag(option)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 220)
+        }
+        .padding(12)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func modeBinding(for provider: AgentProviderID) -> Binding<AgentStartMode> {
+        Binding(
+            get: { preferences.defaultStartMode(for: provider) },
+            set: { newValue in
+                var updated = preferences
+                updated.setDefaultStartMode(newValue, for: provider)
+                do {
+                    try AgentPreferencesStore.save(updated)
+                    preferences = updated
+                    persistenceError = nil
+                } catch {
+                    persistenceError = "Agent defaults could not be saved: \(error.localizedDescription)"
+                }
+            })
     }
 }
 
-struct SettingsView_Previews: PreviewProvider {
-    static var previews: some View {
-        SettingsView()
-    }
+#Preview {
+    SettingsView()
 }

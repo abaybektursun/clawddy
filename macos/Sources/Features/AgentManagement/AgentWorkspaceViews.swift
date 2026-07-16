@@ -821,6 +821,8 @@ private struct NewAgentSheet: View {
     @State private var provider = Self.restoredProvider
     @State private var model = ""
     @State private var effort: String?
+    @State private var startMode = AgentPreferencesStore.load()
+        .defaultStartMode(for: Self.restoredProvider)
     @State private var error: String?
     @State private var showsRunSettings = false
     @FocusState private var focused: Bool
@@ -894,6 +896,15 @@ private struct NewAgentSheet: View {
             DisclosureGroup("Run Settings", isExpanded: $showsRunSettings) {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                     GridRow {
+                        Text("Start mode")
+                        Picker("Start mode", selection: $startMode) {
+                            ForEach(AgentStartMode.allCases) { option in
+                                Text(provider.startModeTitle(option)).tag(option)
+                            }
+                        }
+                        .labelsHidden()
+                    }
+                    GridRow {
                         Text("Model")
                         TextField("Provider default", text: $model)
                             .textFieldStyle(.roundedBorder)
@@ -937,6 +948,7 @@ private struct NewAgentSheet: View {
         .onChange(of: provider) { _, _ in
             model = ""
             effort = nil
+            startMode = AgentPreferencesStore.load().defaultStartMode(for: provider)
             error = nil
         }
     }
@@ -1020,7 +1032,8 @@ private struct NewAgentSheet: View {
         let selectedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         let profile = AgentLaunchProfile(
             modelID: selectedModel.isEmpty ? nil : selectedModel,
-            reasoningEffort: effort)
+            reasoningEffort: effort,
+            startMode: startMode)
         if commit(trimmed, provider, profile) {
             UserDefaults.standard.set(provider.rawValue, forKey: "clawddy.newAgent.provider")
             dismiss()

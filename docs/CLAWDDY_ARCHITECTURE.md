@@ -37,6 +37,7 @@ or process model.
 | Component                         | Responsibility                                                                                                    |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `AgentConfig.swift`               | Versioned JSON model, atomic persistence, schema migration, and provider-identity recovery                        |
+| `AgentPreferences.swift`          | Versioned provider start-mode defaults, isolated persistence, and canonical launch policy                         |
 | `AgentProvider.swift`             | Provider protocol, capability matrix, health/auth state, launch records, and provider event vocabulary           |
 | `ClaudeCodeProvider.swift`        | Claude Code command construction, hook installation, auth probe, and event normalization                         |
 | `CodexProvider.swift`             | Codex command construction, hook installation, auth probe, and event normalization                               |
@@ -132,7 +133,7 @@ Current encoded shape:
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "projects": [
     {
       "id": "B150F75F-55CD-44BE-8994-3B8A840D71B5",
@@ -149,7 +150,8 @@ Current encoded shape:
               "provider": "codex",
               "launchProfile": {
                 "modelID": null,
-                "reasoningEffort": "high"
+                "reasoningEffort": "high",
+                "startMode": "unrestricted"
               }
             }
           ]
@@ -166,6 +168,13 @@ Claude Code, and writes the migrated form back. Legacy name-keyed status files
 are moved to UUID-keyed names when possible. Once a tagged session or pending
 fork exists, its provider is authoritative; an external config edit cannot make
 another provider consume that identity.
+
+`AgentLaunchProfile.startMode` is durable per-agent launch policy. Missing
+values migrate to `unrestricted`, preserving Claude Code's established behavior
+and making Codex YOLO the requested product default. The native Settings window
+stores separate defaults for newly created Claude Code and Codex agents in
+`preferences.json`; the new-agent sheet snapshots the selected default, and
+forks retain the source agent's mode.
 
 Configuration writes are atomic and UI mutations are transactional: a failed
 replacement restores the previous observable model and surfaces a configuration
@@ -413,11 +422,13 @@ generation. Command selection is ordered:
 3. Start a fresh interactive provider TUI.
 
 Claude Code uses its interactive `--resume` and `--fork-session` paths plus
-optional model, effort, and status-line settings. Codex uses the stable
-interactive `resume` and `fork` subcommands plus optional `--model` and
-`model_reasoning_effort` configuration. Clawddy does not use Codex's experimental
-app-server and does not pass Codex's approval, sandbox, or hook-trust bypass
-flags.
+optional model, effort, and status-line settings. Its unrestricted mode adds
+`--dangerously-skip-permissions`. Codex uses the stable interactive `resume` and
+`fork` subcommands plus optional `--model` and `model_reasoning_effort`
+configuration. Its YOLO mode adds the canonical
+`--dangerously-bypass-approvals-and-sandbox` flag. Standard mode omits these
+provider-specific overrides. Clawddy does not use Codex's experimental
+app-server or bypass Codex hook trust.
 
 Before the provider command yields to the fallback shell, the launcher appends a
 provider-exit event under the same journal lock. The script then replaces itself
@@ -560,9 +571,11 @@ testing, and accessible semantics must not depend on it.
   uses `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `GHOSTTY_AGENT_STATUS_DIR`; do not
   copy credentials or create a second login Keychain for an alternate-home
   installation.
-- The agent launcher currently passes Claude's
-  `--dangerously-skip-permissions` flag. This is an explicit product behavior,
-  not a macOS entitlement; changes to it require a product-level security review.
+- New installations default Claude Code to `--dangerously-skip-permissions` and
+  Codex to `--dangerously-bypass-approvals-and-sandbox`. These are explicit,
+  user-visible product defaults—not macOS entitlements. Settings can choose the
+  providers' standard permission behavior, and the agent detail inspector shows
+  the mode captured when each agent was created.
 - Notification denial must not prevent in-app state from updating.
 - Clawddy does not read the general pasteboard directly. Any future clipboard
   integration must follow the pasteboard privacy policy in the macOS guide.

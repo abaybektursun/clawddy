@@ -33,15 +33,74 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
         case .codex: return .codex
         }
     }
+
+    func startModeTitle(_ mode: AgentStartMode) -> String {
+        switch (self, mode) {
+        case (.claudeCode, .unrestricted): return "Dangerously Skip Permissions"
+        case (.codex, .unrestricted): return "YOLO"
+        case (_, .standard): return "Standard Permissions"
+        }
+    }
+
+    func startModeDescription(_ mode: AgentStartMode) -> String {
+        switch (self, mode) {
+        case (.claudeCode, .unrestricted):
+            return "Bypasses all Claude Code permission checks."
+        case (.codex, .unrestricted):
+            return "Runs without approval prompts or the Codex sandbox."
+        case (_, .standard):
+            return "Uses the provider’s normal approval and sandbox behavior."
+        }
+    }
+
+    func startModeArguments(_ mode: AgentStartMode) -> [String] {
+        guard mode == .unrestricted else { return [] }
+        switch self {
+        case .claudeCode: return ["--dangerously-skip-permissions"]
+        case .codex: return ["--dangerously-bypass-approvals-and-sandbox"]
+        }
+    }
+}
+
+enum AgentStartMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    case unrestricted
+    case standard
+
+    var id: Self { self }
 }
 
 struct AgentLaunchProfile: Codable, Equatable, Sendable {
     var modelID: String?
     var reasoningEffort: String?
+    var startMode: AgentStartMode
 
-    init(modelID: String? = nil, reasoningEffort: String? = nil) {
+    init(
+        modelID: String? = nil,
+        reasoningEffort: String? = nil,
+        startMode: AgentStartMode = .unrestricted
+    ) {
         self.modelID = modelID
         self.reasoningEffort = reasoningEffort
+        self.startMode = startMode
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case modelID, reasoningEffort, startMode
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        startMode = try container.decodeIfPresent(AgentStartMode.self, forKey: .startMode)
+            ?? .unrestricted
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(modelID, forKey: .modelID)
+        try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
+        try container.encode(startMode, forKey: .startMode)
     }
 
     var displayReasoningEffort: String? {

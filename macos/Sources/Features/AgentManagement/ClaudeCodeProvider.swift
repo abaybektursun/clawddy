@@ -39,7 +39,7 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
         } else {
             arguments += ["--name", request.name]
         }
-        arguments.append("--dangerously-skip-permissions")
+        arguments += id.startModeArguments(request.launchProfile.startMode)
         if let model = request.launchProfile.modelID, !model.isEmpty {
             arguments += ["--model", model]
         }

@@ -255,6 +255,9 @@ private struct AgentMetadataInspectorView: View {
 
             Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 9) {
                 detailRow("Provider", agent.provider.displayName)
+                detailRow(
+                    "Start mode",
+                    agent.provider.startModeTitle(agent.launchProfile.startMode))
                 if let metadata = agent.metadata {
                     detailRow("Model", metadata.displayModel ?? "Not reported")
                     detailRow("Model ID", metadata.modelID ?? "Not reported")
@@ -423,7 +426,10 @@ private struct AgentMetadataInspectorView: View {
 extension AgentInstance {
     var metadataAccessibilityValue: String {
         guard let metadata else {
-            var configured = ["Provider: \(provider.displayName)"]
+            var configured = [
+                "Provider: \(provider.displayName)",
+                "Start mode: \(provider.startModeTitle(launchProfile.startMode))",
+            ]
             if let model = launchProfile.modelID {
                 configured.append("Requested model: \(model)")
             }
@@ -449,6 +455,7 @@ extension AgentInstance {
 
         var parts = [String]()
         parts.append("Provider: \(provider.displayName)")
+        parts.append("Start mode: \(provider.startModeTitle(launchProfile.startMode))")
         parts.append("Model: \(metadata.displayModel ?? "not reported")")
         parts.append("Reasoning effort: \(metadata.displayEffort ?? "not reported")")
         if let requested = launchProfile.displayReasoningEffort {

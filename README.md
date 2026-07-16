@@ -36,6 +36,7 @@ integration points in `AppDelegate.swift` and the shared command palette. The
 ```
 macos/Sources/Features/AgentManagement/
   AgentConfig.swift                — Config persistence and provider migration
+  AgentPreferences.swift           — Provider default start modes and atomic persistence
   AgentProvider.swift              — Provider protocol, capabilities, health, and launch types
   ClaudeCodeProvider.swift         — Claude Code launch, hooks, auth, and event normalization
   CodexProvider.swift              — Codex launch, hooks, auth, and event normalization
@@ -89,7 +90,7 @@ Agents are defined in `~/.config/ghostty-agents/agents.json`:
 
 ```json
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "projects": [
     {
       "id": "B150F75F-55CD-44BE-8994-3B8A840D71B5",
@@ -106,7 +107,8 @@ Agents are defined in `~/.config/ghostty-agents/agents.json`:
               "provider": "codex",
               "launchProfile": {
                 "modelID": null,
-                "reasoningEffort": "high"
+                "reasoningEffort": "high",
+                "startMode": "unrestricted"
               }
             }
           ]
@@ -122,6 +124,11 @@ configuration is migrated automatically and defaults to Claude Code. Hooks are
 installed lazily for the selected provider without replacing unrelated user
 hooks. Codex requires the user to review a newly installed command hook with
 `/hooks` before Codex will run it.
+
+Clawddy → Settings configures the default start mode for newly created agents.
+The product defaults are **Dangerously Skip Permissions** for Claude Code and
+**YOLO** for Codex; choose **Standard Permissions** to retain the provider's
+normal approval and sandbox behavior.
 
 ## Syncing with upstream Ghostty
 

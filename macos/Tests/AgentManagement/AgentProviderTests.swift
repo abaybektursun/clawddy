@@ -46,7 +46,7 @@ struct AgentProviderTests {
         #expect(agent.launchProfile == AgentLaunchProfile())
     }
 
-    @Test func mixedProviderConfigRoundTripsAtSchemaFour() throws {
+    @Test func mixedProviderConfigRoundTripsAtSchemaFive() throws {
         let agents = [
             AgentEntry(name: "Claude", provider: .claudeCode),
             AgentEntry(
@@ -65,8 +65,44 @@ struct AgentProviderTests {
         let data = try JSONEncoder().encode(source)
         let decoded = try JSONDecoder().decode(AgentConfigFile.self, from: data)
         let decodedAgents = try #require(decoded.projects.first?.tasks.first?.agents)
-        #expect(decoded.schemaVersion == 4)
+        #expect(decoded.schemaVersion == 5)
         #expect(decodedAgents == agents)
+    }
+
+    @Test func preStartModeLaunchProfileMigratesToUnrestricted() throws {
+        let profile = try JSONDecoder().decode(
+            AgentLaunchProfile.self,
+            from: Data("{\"modelID\":\"existing-model\",\"reasoningEffort\":\"high\"}".utf8))
+        #expect(profile.modelID == "existing-model")
+        #expect(profile.reasoningEffort == "high")
+        #expect(profile.startMode == .unrestricted)
+    }
+
+    @Test func defaultStartModesAreUnrestrictedAndPersistIndependently() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("preferences.json")
+
+        var preferences = AgentPreferencesStore.load(from: url)
+        #expect(preferences.defaultStartMode(for: .claudeCode) == .unrestricted)
+        #expect(preferences.defaultStartMode(for: .codex) == .unrestricted)
+
+        preferences.setDefaultStartMode(.standard, for: .codex)
+        try AgentPreferencesStore.save(preferences, to: url)
+        #expect(AgentPreferencesStore.load(from: url) == preferences)
+        #expect(AgentPreferencesStore.load(from: url)
+            .defaultStartMode(for: .claudeCode) == .unrestricted)
+        #expect(AgentPreferencesStore.load(from: url)
+            .defaultStartMode(for: .codex) == .standard)
+    }
+
+    @Test func startModesMapToProviderCanonicalArguments() {
+        #expect(AgentProviderID.claudeCode.startModeArguments(.unrestricted)
+            == ["--dangerously-skip-permissions"])
+        #expect(AgentProviderID.codex.startModeArguments(.unrestricted)
+            == ["--dangerously-bypass-approvals-and-sandbox"])
+        #expect(AgentProviderID.claudeCode.startModeArguments(.standard).isEmpty)
+        #expect(AgentProviderID.codex.startModeArguments(.standard).isEmpty)
     }
 
     @Test func providerTaggedSessionStoreMigratesOnlyClaudeLegacyFiles() throws {
@@ -211,6 +247,7 @@ struct AgentProviderTests {
 
         let fresh = try launch(provider.prepareLaunch(base))
         #expect(fresh.arguments == [
+            "--dangerously-bypass-approvals-and-sandbox",
             "--model", "gpt-5.4", "--config", "model_reasoning_effort=\"xhigh\"",
         ])
 
@@ -228,7 +265,11 @@ struct AgentProviderTests {
             sourceSessionID: "source-1")
         let forked = try launch(provider.prepareLaunch(forkRequest))
         #expect(forked.arguments.suffix(2) == ["fork", "source-1"])
-        #expect(!forked.arguments.contains(where: { $0.contains("dangerously") }))
+
+        var standardRequest = base
+        standardRequest.launchProfile.startMode = .standard
+        let standard = try launch(provider.prepareLaunch(standardRequest))
+        #expect(!standard.arguments.contains(where: { $0.contains("dangerously") }))
     }
 
     @Test func adaptersNormalizeProviderSpecificHooksToSharedEvents() throws {

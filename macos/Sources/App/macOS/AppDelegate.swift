@@ -30,7 +30,7 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuAbout: NSMenuItem?
     @IBOutlet private var menuServices: NSMenu?
     @IBOutlet private var menuCheckForUpdates: NSMenuItem?
-    @IBOutlet private var menuOpenConfig: NSMenuItem?
+    @IBOutlet private var menuSettings: NSMenuItem?
     @IBOutlet private var menuReloadConfig: NSMenuItem?
     @IBOutlet private var menuSecureInput: NSMenuItem?
     @IBOutlet private var menuQuit: NSMenuItem?
@@ -1032,6 +1032,10 @@ class AppDelegate: NSObject,
         Ghostty.App.openConfig()
     }
 
+    @IBAction func showSettings(_ sender: Any?) {
+        SettingsController.shared.show()
+    }
+
     @IBAction func reloadConfig(_ sender: Any?) {
         ghostty.reloadConfig()
     }
@@ -1625,7 +1629,7 @@ extension AppDelegate {
         // modify this stuff as code.
         self.menuAbout?.setImageIfDesired(systemSymbolName: "info.circle")
         self.menuCheckForUpdates?.setImageIfDesired(systemSymbolName: "square.and.arrow.down")
-        self.menuOpenConfig?.setImageIfDesired(systemSymbolName: "gear")
+        self.menuSettings?.setImageIfDesired(systemSymbolName: "gear")
         self.menuReloadConfig?.setImageIfDesired(systemSymbolName: "arrow.trianglehead.2.clockwise.rotate.90")
         self.menuSecureInput?.setImageIfDesired(systemSymbolName: "lock.display")
         self.menuNewWindow?.setImageIfDesired(systemSymbolName: "macwindow.badge.plus")
@@ -1670,7 +1674,6 @@ extension AppDelegate {
         menuShortcutManager.reset()
 
         syncMenuShortcut(config, action: "check_for_updates", menuItem: self.menuCheckForUpdates)
-        syncMenuShortcut(config, action: "open_config", menuItem: self.menuOpenConfig)
         syncMenuShortcut(config, action: "reload_config", menuItem: self.menuReloadConfig)
         syncMenuShortcut(config, action: "quit", menuItem: self.menuQuit)
 
