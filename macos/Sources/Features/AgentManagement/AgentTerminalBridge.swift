@@ -1,33 +1,11 @@
 import AppKit
 import SwiftUI
 import GhosttyKit
-import UserNotifications
+@preconcurrency import UserNotifications
 import os
 
 private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "AgentBridge")
-
-// MARK: - Process State (app-controlled)
-
-enum ProcessState: Codable, Equatable {
-    case inactive       // no terminal surface
-    case launching      // surface created, waiting for first hook
-    case alive          // claude confirmed running (hook received)
-    case unconfirmed    // surface exists, but lifecycle status is unavailable
-    case failed         // the surface or launch script could not be created
-    case dead           // surface destroyed or process exited
-}
-
-// MARK: - Claude State (hook-controlled)
-
-enum ClaudeState: Codable, Equatable {
-    case unknown
-    case idle           // Stop / SessionStart / PostCompact / SessionEnd
-    case thinking       // UserPromptSubmit
-    case working        // PreToolUse / PostToolUse
-    case permission     // PermissionRequest
-    case error          // StopFailure / PostToolUseFailure
-    case compacting     // PreCompact
-}
+private let agentPollThrottle: TimeInterval = 0.2
 
 // MARK: - Display State (derived, never stored)
 
@@ -39,6 +17,8 @@ enum DisplayState: Equatable {
     case thinking
     case working
     case permission
+    case input
+    case authentication
     case error
     case compacting
     case statusUnavailable
@@ -53,7 +33,7 @@ enum DisplayState: Equatable {
         case .finished:     return .yellow
         case .thinking:     return .blue
         case .working:      return .green
-        case .permission, .statusUnavailable: return .orange
+        case .permission, .input, .authentication, .statusUnavailable: return .orange
         case .error, .failed: return .red
         case .compacting:   return .purple
         case .dead:         return .secondary.opacity(0.3)
@@ -65,7 +45,7 @@ enum DisplayState: Equatable {
         case .finished:     return .yellow
         case .thinking:     return .blue
         case .working:      return .green
-        case .permission:   return .orange
+        case .permission, .input, .authentication: return .orange
         case .statusUnavailable: return .orange
         case .error, .failed: return .red
         case .compacting:   return .purple
@@ -82,6 +62,8 @@ enum DisplayState: Equatable {
         case .thinking:     return "Thinking"
         case .working:      return "Working"
         case .permission:   return "Waiting for You"
+        case .input:        return "Input Required"
+        case .authentication: return "Sign In Required"
         case .error:        return "Needs Attention"
         case .compacting:   return "Optimizing Context"
         case .statusUnavailable: return "Status Unavailable"
@@ -99,6 +81,8 @@ enum DisplayState: Equatable {
         case .thinking:     return "brain"
         case .working:      return "bolt.fill"
         case .permission:   return "exclamationmark.circle.fill"
+        case .input:        return "keyboard.fill"
+        case .authentication: return "person.crop.circle.badge.exclamationmark"
         case .error:        return "xmark.circle.fill"
         case .compacting:   return "arrow.triangle.2.circlepath"
         case .statusUnavailable: return "exclamationmark.circle"
@@ -109,7 +93,7 @@ enum DisplayState: Equatable {
 
     var needsAttention: Bool {
         switch self {
-        case .finished, .permission, .error, .failed: return true
+        case .finished, .permission, .input, .authentication, .error, .failed: return true
         default: return false
         }
     }
@@ -125,57 +109,95 @@ enum DisplayState: Equatable {
 // MARK: - Agent Instance (per-agent observable)
 
 @Observable
+@MainActor
 final class AgentInstance: Identifiable {
     let id: UUID
     var name: String
-    var processState: ProcessState = .inactive
-    var claudeState: ClaudeState = .unknown
-    var isUnread: Bool = false
+    let provider: AgentProviderID
+    var launchProfile: AgentLaunchProfile
+    var surfaceState: AgentSurfaceState = .inactive
+    var processState: AgentProcessState = .notStarted
+    var activityState: AgentActivityState = .unknown
+    var interactionState: AgentInteractionState = .none
+    var telemetryHealth: AgentTelemetryHealth = .notStarted
+    var unreadCompletion: AgentCompletionID?
+    var lastAppliedCompletion: AgentCompletionID?
     var failureMessage: String?
+    var runtimeErrorMessage: String?
+    var launchGeneration: UUID?
+    var sessionID: String?
     var metadata: AgentSessionMetadata?
     var metadataAvailability: AgentMetadataAvailability = .notStarted
     @ObservationIgnored var lastHookTime: Date?
     @ObservationIgnored var launchTime: Date?
 
     var displayState: DisplayState {
-        switch processState {
-        case .inactive:  return .inactive
-        case .dead:      return .dead
-        case .launching: return .launching
-        case .unconfirmed: return .statusUnavailable
-        case .failed:    return .failed
-        case .alive:
-            if isUnread && claudeState == .idle { return .finished }
-            switch claudeState {
-            case .unknown:    return .launching
-            case .idle:       return .idle
-            case .thinking:   return .thinking
-            case .working:    return .working
-            case .permission: return .permission
-            case .error:      return .error
-            case .compacting: return .compacting
-            }
+        if failureMessage != nil { return .failed }
+        if runtimeErrorMessage != nil { return .error }
+        switch interactionState {
+        case .permission: return .permission
+        case .input: return .input
+        case .authentication: return .authentication
+        case .none: break
+        }
+        // Completion is durable user-attention state. A provider or surface
+        // exit must not hide work that the user has not reviewed yet.
+        if unreadCompletion != nil { return .finished }
+        switch surfaceState {
+        case .inactive: return .inactive
+        case .opening: return .launching
+        case .failed: return .failed
+        case .closed: return .dead
+        case .open: break
+        }
+        if processState == .exited { return .dead }
+        switch activityState {
+        case .unknown:
+            if case .unavailable = telemetryHealth { return .statusUnavailable }
+            return .launching
+        case .idle: return .idle
+        case .reasoning: return .thinking
+        case .executing: return .working
+        case .compacting: return .compacting
         }
     }
 
-    init(id: UUID, name: String) {
-        self.id = id
-        self.name = name
+    init(entry: AgentEntry) {
+        id = entry.id
+        name = entry.name
+        provider = entry.provider
+        launchProfile = entry.launchProfile
     }
+
+    var isUnread: Bool { unreadCompletion != nil }
 
     var runtimeSnapshot: AgentRuntimeSnapshot {
         get {
             AgentRuntimeSnapshot(
+                surfaceState: surfaceState,
                 processState: processState,
-                claudeState: claudeState,
-                isUnread: isUnread,
-                failureMessage: failureMessage)
+                activityState: activityState,
+                interactionState: interactionState,
+                telemetryHealth: telemetryHealth,
+                unreadCompletion: unreadCompletion,
+                lastAppliedCompletion: lastAppliedCompletion,
+                failureMessage: failureMessage,
+                runtimeErrorMessage: runtimeErrorMessage,
+                launchGeneration: launchGeneration,
+                sessionID: sessionID)
         }
         set {
+            surfaceState = newValue.surfaceState
             processState = newValue.processState
-            claudeState = newValue.claudeState
-            isUnread = newValue.isUnread
+            activityState = newValue.activityState
+            interactionState = newValue.interactionState
+            telemetryHealth = newValue.telemetryHealth
+            unreadCompletion = newValue.unreadCompletion
+            lastAppliedCompletion = newValue.lastAppliedCompletion
             failureMessage = newValue.failureMessage
+            runtimeErrorMessage = newValue.runtimeErrorMessage
+            launchGeneration = newValue.launchGeneration
+            sessionID = newValue.sessionID
         }
     }
 }
@@ -191,21 +213,182 @@ enum AggregateState: Equatable {
 // MARK: - Persisted Bridge State
 
 private struct PersistedState: Codable {
-    var unreadAgents: Set<UUID> = []
+    var unreadCompletions: [UUID: AgentCompletionID] = [:]
+    var lastAppliedCompletions: [UUID: AgentCompletionID] = [:]
     var pendingRenames: [UUID: String] = [:]
     var eventOffsets: [UUID: Int] = [:]
+
+    private enum CodingKeys: String, CodingKey {
+        case unreadCompletions, unreadAgents, lastAppliedCompletions, pendingRenames, eventOffsets
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        unreadCompletions = try container.decodeIfPresent(
+            [UUID: AgentCompletionID].self,
+            forKey: .unreadCompletions) ?? [:]
+        lastAppliedCompletions = try container.decodeIfPresent(
+            [UUID: AgentCompletionID].self,
+            forKey: .lastAppliedCompletions) ?? [:]
+        pendingRenames = try container.decodeIfPresent(
+            [UUID: String].self,
+            forKey: .pendingRenames) ?? [:]
+        eventOffsets = try container.decodeIfPresent(
+            [UUID: Int].self,
+            forKey: .eventOffsets) ?? [:]
+        // `unreadAgents` is intentionally decoded by AgentBridge.start because
+        // only the current config knows the migrated provider identity.
+        legacyUnreadAgents = try container.decodeIfPresent(
+            Set<UUID>.self,
+            forKey: .unreadAgents) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(unreadCompletions, forKey: .unreadCompletions)
+        try container.encode(lastAppliedCompletions, forKey: .lastAppliedCompletions)
+        try container.encode(pendingRenames, forKey: .pendingRenames)
+        try container.encode(eventOffsets, forKey: .eventOffsets)
+    }
+
+    var legacyUnreadAgents: Set<UUID> = []
 }
 
-private struct AgentMetadataFileUpdate: @unchecked Sendable {
+private struct AgentMetadataFileUpdate: Sendable {
     let data: Data
     let snapshot: AgentSessionMetadata?
+}
+
+private struct AgentPreparedSurfaceLaunch: Sendable {
+    var provider: AgentProviderID
+    var generation: UUID
+    var scriptURL: URL
+    var environment: [String: String]
+    var metadataAvailability: AgentMetadataAvailability
+    var integrationIssue: String?
+}
+
+private enum AgentSurfaceLaunchOutcome: Sendable {
+    case success(AgentPreparedSurfaceLaunch)
+    case failure(
+        AgentProviderIssue,
+        provider: AgentProviderID,
+        generation: UUID,
+        integrationIssue: String?)
+}
+
+private struct AgentAppHandle: @unchecked Sendable {
+    var value: ghostty_app_t
+}
+
+private final class AgentDetailReference: @unchecked Sendable {
+    weak var value: AgentDetailViewController?
+
+    init(_ value: AgentDetailViewController) {
+        self.value = value
+    }
+}
+
+private struct AgentLaunchCoordinator: Sendable {
+    let providerRegistry: AgentProviderRegistry
+
+    func prepare(_ initialRequest: AgentLaunchRequest) -> AgentSurfaceLaunchOutcome {
+        var request = initialRequest
+        let agentID = request.agentID
+        let name = request.name
+        let provider = request.provider
+        let generation = request.launchGeneration
+        let adapter = providerRegistry.adapter(for: provider)
+        request.session = AgentSessionStore.session(for: agentID, provider: provider)
+        request.pendingFork = AgentSessionStore.pendingFork(for: agentID, provider: provider)
+        let prepared: AgentPreparedLaunch
+        switch adapter.prepareLaunch(request) {
+        case .success(let launch): prepared = launch
+        case .failure(let issue):
+            return .failure(
+                issue,
+                provider: provider,
+                generation: generation,
+                integrationIssue: nil)
+        }
+        let integrationIssue: String?
+        switch adapter.prepareIntegration() {
+        case .success(let preparation): integrationIssue = preparation.notice
+        case .failure(let issue): integrationIssue = issue.localizedDescription
+        }
+
+        var environment = prepared.environment
+        environment["HOME"] = AgentConfig.accountHomeDirectory.path
+        environment["PATH"] = request.environmentPath
+        environment["GHOSTTY_AGENT_STATUS_DIR"] = AgentConfig.statusDir.path
+        environment["GHOSTTY_AGENT_ID"] = agentID.uuidString
+        environment["GHOSTTY_AGENT_PROVIDER"] = provider.rawValue
+        environment["GHOSTTY_AGENT_LAUNCH_GENERATION"] = generation.uuidString
+        let command = ([prepared.executableURL.path] + prepared.arguments)
+            .map(AgentHookRuntime.shellQuote)
+            .joined(separator: " ")
+        let exports = environment.sorted(by: { $0.key < $1.key }).map {
+            "export \($0.key)=\(AgentHookRuntime.shellQuote($0.value))"
+        }.joined(separator: "\n")
+        let script = """
+            #!/bin/zsh -l
+            \(exports)
+            printf '\\033]2;%s\\007' \(AgentHookRuntime.shellQuote(name))
+            clear
+            \(command)
+            command_status=$?
+            \(AgentHookRuntime.exitEventCommand(
+                provider: provider,
+                agentID: agentID,
+                generation: generation))
+            printf '\\n\\033[33mAgent exited (status %s). Continuing in your login shell.\\033[0m\\n' "$command_status"
+            exec "${SHELL:-/bin/zsh}" -l
+            """
+        let scriptURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clawddy-\(agentID.uuidString)-\(UUID().uuidString).sh")
+        guard AgentConfig.atomicWrite(Data(script.utf8), to: scriptURL) else {
+            return .failure(
+                .launchPreparationFailed(provider, "The launch script could not be created."),
+                provider: provider,
+                generation: generation,
+                integrationIssue: integrationIssue)
+        }
+        do {
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: scriptURL.path)
+        } catch {
+            try? FileManager.default.removeItem(at: scriptURL)
+            return .failure(
+                .launchPreparationFailed(
+                    provider,
+                    "The launch script could not be made executable."),
+                provider: provider,
+                generation: generation,
+                integrationIssue: integrationIssue)
+        }
+        return .success(AgentPreparedSurfaceLaunch(
+            provider: provider,
+            generation: generation,
+            scriptURL: scriptURL,
+            environment: environment,
+            metadataAvailability: prepared.metadataAvailability,
+            integrationIssue: integrationIssue))
+    }
 }
 
 // MARK: - Agent Bridge
 
 @Observable
+@MainActor
 final class AgentBridge {
     private(set) var agents: [UUID: AgentInstance] = [:]
+    private(set) var providerHealth: [AgentProviderID: AgentProviderHealth] = Dictionary(
+        uniqueKeysWithValues: AgentProviderID.allCases.map {
+            ($0, AgentProviderHealth())
+        })
 
     var onAggregateStateChanged: ((AggregateState) -> Void)?
     var onSendText: ((UUID, String) -> Void)?
@@ -221,13 +404,24 @@ final class AgentBridge {
     private var heartbeatTimer: Timer?
     private var statusDirWatcher: DispatchSourceFileSystemObject?
     private let ioQueue = DispatchQueue(label: "clawddy.io", qos: .utility)
+    private let healthQueue = DispatchQueue(
+        label: "clawddy.provider-health",
+        qos: .utility,
+        attributes: .concurrent)
+    private var healthRefreshGenerations: [AgentProviderID: UUID] = [:]
     private var compactingTimers: [UUID: Timer] = [:]
     private var launchScripts: [UUID: URL] = [:]
-    var environmentPath: String?
+    private let providerRegistry = AgentProviderRegistry()
+    private var integrationIssues: [AgentProviderID: String] = [:]
+    var environmentPath: String? {
+        didSet {
+            guard environmentPath != oldValue else { return }
+            refreshProviderHealth()
+        }
+    }
 
     /// Throttle file watcher: hooks fire bursts (4 fs events per claude event,
     /// ×N agents = 100+/sec). Coalesce into one poll per window.
-    private static let pollThrottle: TimeInterval = 0.2
     private var pollPending = false
     private var pollInFlight = false
     private var pollAgainNeeded = false
@@ -254,19 +448,34 @@ final class AgentBridge {
 
         // Reconstruct agents from config
         for entry in config.allAgentEntries {
-            let agent = AgentInstance(id: entry.id, name: entry.name)
-            agent.processState = .inactive
-            agent.claudeState = .unknown
-            agent.isUnread = persisted.unreadAgents.contains(entry.id)
+            let agent = AgentInstance(entry: entry)
+            agent.unreadCompletion = persisted.unreadCompletions[entry.id]
+            agent.lastAppliedCompletion = persisted.lastAppliedCompletions[entry.id]
+                ?? agent.unreadCompletion
+            if agent.unreadCompletion == nil, persisted.legacyUnreadAgents.contains(entry.id) {
+                agent.unreadCompletion = AgentCompletionID(
+                    provider: entry.provider,
+                    sessionID: AgentSessionStore.session(
+                        for: entry.id,
+                        provider: entry.provider)?.sessionID,
+                    turnID: nil,
+                    launchGeneration: UUID(),
+                    eventID: "legacy-unread")
+                agent.lastAppliedCompletion = agent.unreadCompletion
+            }
             agents[entry.id] = agent
         }
+
+        refreshProviderHealth()
 
         // File watcher for real-time state updates
         startStatusDirWatcher()
 
         // Heartbeat timer: infrequent fallback for edge cases (crashes without notification)
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
-            self?.heartbeat()
+            Task { @MainActor [weak self] in
+                self?.heartbeat()
+            }
         }
 
         // Surgical metrics for diagnosing freezes
@@ -295,9 +504,69 @@ final class AgentBridge {
             NotificationCenter.default.removeObserver(observer)
         }
         surfaceObservers.removeAll()
-        removeAllLaunchScripts()
+        removeAllLaunchScripts(synchronously: true)
         persistState(synchronously: true)
         BridgeMetrics.shared.stop()
+    }
+
+    private var effectiveEnvironmentPath: String {
+        if let environmentPath, !environmentPath.isEmpty { return environmentPath }
+        if let inherited = ProcessInfo.processInfo.environment["PATH"], !inherited.isEmpty {
+            return inherited
+        }
+        return "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    }
+
+    func refreshProviderHealth(_ targetProvider: AgentProviderID? = nil) {
+        let path = effectiveEnvironmentPath
+        let providers = targetProvider.map { [$0] } ?? AgentProviderID.allCases
+        for provider in providers {
+            let refreshGeneration = UUID()
+            healthRefreshGenerations[provider] = refreshGeneration
+            let adapter = providerRegistry.adapter(for: provider)
+            healthQueue.async { [weak self] in
+                var health = adapter.probe(environmentPath: path)
+                Task { @MainActor [weak self] in
+                    guard let self,
+                          self.healthRefreshGenerations[provider] == refreshGeneration
+                    else { return }
+                    if let issue = self.integrationIssues[provider] {
+                        health.integrationIssue = issue
+                    }
+                    self.providerHealth[provider] = health
+                    self.reconcileInactiveAuthentication(
+                        provider: provider,
+                        authentication: health.authentication)
+                }
+            }
+        }
+    }
+
+    func providerCapabilities(for provider: AgentProviderID) -> AgentProviderCapabilities {
+        providerRegistry.capabilities(for: provider)
+    }
+
+    private func reconcileInactiveAuthentication(
+        provider: AgentProviderID,
+        authentication: AgentProviderAuthState
+    ) {
+        var changed = false
+        for agent in agents.values where agent.provider == provider
+            && agent.surfaceState == .inactive
+            && agent.processState == .notStarted
+            && agent.unreadCompletion == nil {
+            switch authentication {
+            case .signedOut where agent.interactionState != .authentication:
+                agent.interactionState = .authentication
+                changed = true
+            case .signedIn where agent.interactionState == .authentication:
+                agent.interactionState = .none
+                changed = true
+            default:
+                break
+            }
+        }
+        if changed { updateAggregate() }
     }
 
     // MARK: - Reconciliation (call after config.load())
@@ -308,8 +577,10 @@ final class AgentBridge {
 
         // Add instances for new entries
         for entry in allEntries where agents[entry.id] == nil {
-            let agent = AgentInstance(id: entry.id, name: entry.name)
-            agent.processState = .inactive
+            let agent = AgentInstance(entry: entry)
+            if providerHealth[entry.provider]?.authentication == .signedOut {
+                agent.interactionState = .authentication
+            }
             agents[entry.id] = agent
             BridgeMetrics.shared.recordMutAgentsDict()
         }
@@ -324,11 +595,43 @@ final class AgentBridge {
             metadataFileData.removeValue(forKey: id)
         }
 
-        // Sync display names — only mutate if actually different
+        // Sync editable values. Provider identity can replace only a runtime
+        // that has never launched and has no persisted session identity.
         for entry in allEntries {
-            if let agent = agents[entry.id], agent.name != entry.name {
-                agent.name = entry.name
-                BridgeMetrics.shared.recordMutAgentName()
+            if let agent = agents[entry.id] {
+                let persistedProvider = AgentSessionStore.persistedProvider(for: entry.id)
+                switch AgentRuntimeProviderPolicy.decision(
+                    current: agent.provider,
+                    requested: entry.provider,
+                    persistedProvider: persistedProvider,
+                    surfaceState: agent.surfaceState,
+                    processState: agent.processState) {
+                case .unchanged:
+                    break
+                case .replaceInactiveRuntime:
+                    let replacement = AgentInstance(entry: entry)
+                    if providerHealth[entry.provider]?.authentication == .signedOut {
+                        replacement.interactionState = .authentication
+                    }
+                    if agent.unreadCompletion?.provider == entry.provider {
+                        replacement.unreadCompletion = agent.unreadCompletion
+                    }
+                    if agent.lastAppliedCompletion?.provider == entry.provider {
+                        replacement.lastAppliedCompletion = agent.lastAppliedCompletion
+                    }
+                    agents[entry.id] = replacement
+                    BridgeMetrics.shared.recordMutAgentsDict()
+                    continue
+                case .preserveRuntimeAndRestoreConfig:
+                    logger.warning(
+                        "rejected provider change for bound or active agent \(entry.id)")
+                    _ = config.restoreProvider(id: entry.id, provider: agent.provider)
+                }
+                if agent.name != entry.name {
+                    agent.name = entry.name
+                    BridgeMetrics.shared.recordMutAgentName()
+                }
+                agent.launchProfile = entry.launchProfile
             }
         }
         updateAggregate()
@@ -338,10 +641,25 @@ final class AgentBridge {
 
     // MARK: - Agent Creation (sync with config)
 
-    func createAgent(name: String, config: AgentConfig, project: String, task: String) -> AgentEntry? {
-        guard let entry = config.addAgent(project: project, task: task, name: name) else { return nil }
-        let instance = AgentInstance(id: entry.id, name: entry.name)
-        instance.processState = .inactive
+    func createAgent(
+        name: String,
+        provider: AgentProviderID = .claudeCode,
+        launchProfile: AgentLaunchProfile = AgentLaunchProfile(),
+        config: AgentConfig,
+        project: String,
+        task: String
+    ) -> AgentEntry? {
+        guard let entry = config.addAgent(
+            project: project,
+            task: task,
+            name: name,
+            provider: provider,
+            launchProfile: launchProfile)
+        else { return nil }
+        let instance = AgentInstance(entry: entry)
+        if providerHealth[provider]?.authentication == .signedOut {
+            instance.interactionState = .authentication
+        }
         agents[entry.id] = instance
         BridgeMetrics.shared.recordMutAgentsDict()
         updateMetricsSnapshot()
@@ -354,153 +672,190 @@ final class AgentBridge {
                        project: AgentProject) {
         guard let agent = agents[id] else { return }
 
-        let needsNewSurface = !detailVC.hasSurface(id: id)
-
-        if needsNewSurface {
-            apply(.launchRequested, to: agent)
-            agent.launchTime = Date()
-            agent.lastHookTime = nil
-
-            // One-shot launch timeout instead of polling
-            launchTimers[id]?.invalidate()
-            launchTimers[id] = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) {
-                [weak self] _ in
-                guard let self, let agent = self.agents[id],
-                      agent.processState == .launching, agent.lastHookTime == nil
-                else { return }
-                self.apply(.launchTimedOut, to: agent)
-                self.launchTimers.removeValue(forKey: id)
-                self.updateAggregate()
-            }
+        if detailVC.hasSurface(id: id), agent.processState == .exited {
+            discardSurfaceForRestart(id: id, detailVC: detailVC, provider: agent.provider)
         }
 
-        let isNew = detailVC.showOrSwitch(
-            id: id,
-            displayName: agent.name,
-            projectName: project.name,
-            agent: agent
-        ) {
-            let command = self.buildCommand(
+        if detailVC.hasSurface(id: id) {
+            _ = detailVC.showOrSwitch(
+                id: id,
+                displayName: agent.name,
+                projectName: project.name,
                 agent: agent,
-                workingDirectory: project.workingDirectory)
-            let name = agent.name.replacingOccurrences(of: "'", with: "'\\''")
-            // Claude needs the macOS account home to resolve the user's login
-            // Keychain. Its supported config root and Clawddy's telemetry root
-            // remain explicit so alternate-home installations stay isolated.
-            let home = AgentConfig.accountHomeDirectory.path
-                .replacingOccurrences(of: "'", with: "'\\''")
-            let claudeConfigExport: String
-            if let url = AgentConfig.claudeConfigEnvironmentOverride {
-                let path = url.path.replacingOccurrences(of: "'", with: "'\\''")
-                claudeConfigExport = "export CLAUDE_CONFIG_DIR='\(path)'"
-            } else {
-                claudeConfigExport = ""
-            }
-            let statusDir = AgentConfig.statusDir.path
-                .replacingOccurrences(of: "'", with: "'\\''")
-            let script = """
-                #!/bin/zsh -l
-                export HOME='\(home)'
-                \(claudeConfigExport)
-                export GHOSTTY_AGENT_STATUS_DIR='\(statusDir)'
-                export GHOSTTY_AGENT_NAME='\(id.uuidString)'
-                printf '\\033]2;%s\\007' '\(name)'
-                clear
-                \(command)
-                command_status=$?
-                printf '\\n\\033[33mAgent exited (status %s). Continuing in your login shell.\\033[0m\\n' "$command_status"
-                exec "${SHELL:-/bin/zsh}" -l
-                """
-
-            let scriptURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("clawddy-\(id.uuidString)-\(UUID().uuidString).sh")
-            guard let data = script.data(using: .utf8),
-                  AgentConfig.atomicWrite(data, to: scriptURL)
-            else {
-                self.apply(.launchFailed("The launch script could not be created."), to: agent)
-                self.updateAggregate()
-                return nil
-            }
-            do {
-                try FileManager.default.setAttributes(
-                    [.posixPermissions: 0o700],
-                    ofItemAtPath: scriptURL.path)
-            } catch {
-                try? FileManager.default.removeItem(at: scriptURL)
-                self.apply(
-                    .launchFailed("The launch script could not be made executable."),
-                    to: agent)
-                self.updateAggregate()
-                return nil
-            }
-            self.removeLaunchScript(for: id)
-            self.launchScripts[id] = scriptURL
-
-            var surfaceConfig = Ghostty.SurfaceConfiguration()
-            surfaceConfig.command = scriptURL.path
-            surfaceConfig.workingDirectory = project.workingDirectory
-            var environment = [
-                "HOME": AgentConfig.accountHomeDirectory.path,
-                "GHOSTTY_AGENT_STATUS_DIR": AgentConfig.statusDir.path,
-                "GHOSTTY_AGENT_NAME": id.uuidString,
-            ]
-            if let url = AgentConfig.claudeConfigEnvironmentOverride {
-                environment["CLAUDE_CONFIG_DIR"] = url.path
-            }
-            if let environmentPath = self.environmentPath {
-                environment["PATH"] = environmentPath
-            }
-            surfaceConfig.environmentVariables = environment
-            return (app, surfaceConfig)
+                createConfig: { nil })
+            setCurrentlyViewedAgent(id)
+            return
         }
 
-        if isNew, let surface = detailVC.surfaceView(for: id) {
-            surfaceViews[id] = surface
+        // A second activation while background preparation is in flight only
+        // reveals the existing launch state; it never creates a competing run.
+        if agent.surfaceState == .opening, agent.processState == .launching {
+            detailVC.selectAgent(agent, projectName: project.name)
+            setCurrentlyViewedAgent(id)
+            return
+        }
+
+        let generation = UUID()
+        apply(.launchRequested(generation: generation), to: agent)
+        if providerHealth[agent.provider]?.authentication == .signedOut {
+            apply(
+                .interactionRequired(
+                    generation: generation,
+                    interaction: .authentication),
+                to: agent)
+        }
+        agent.launchTime = Date()
+        agent.lastHookTime = nil
+        detailVC.selectAgent(agent, projectName: project.name)
+        setCurrentlyViewedAgent(id)
+        scheduleLaunchTimeout(agentID: id, generation: generation)
+
+        let provider = agent.provider
+        let name = agent.name
+        let profile = agent.launchProfile
+        let path = effectiveEnvironmentPath
+        let workingDirectory = project.workingDirectory
+        let projectName = project.name
+        let appHandle = AgentAppHandle(value: app)
+        let detailReference = AgentDetailReference(detailVC)
+        let launchCoordinator = AgentLaunchCoordinator(providerRegistry: providerRegistry)
+        let launchRequest = AgentLaunchRequest(
+            agentID: id,
+            name: name,
+            provider: provider,
+            launchProfile: profile,
+            workingDirectory: workingDirectory,
+            environmentPath: path,
+            launchGeneration: generation,
+            session: nil,
+            pendingFork: nil)
+        ioQueue.async { [weak self] in
+            let outcome = launchCoordinator.prepare(launchRequest)
+            Task { @MainActor [weak self] in
+                guard let self, let detailVC = detailReference.value else {
+                    if case .success(let launch) = outcome {
+                        DispatchQueue.global(qos: .utility).async {
+                            try? FileManager.default.removeItem(at: launch.scriptURL)
+                        }
+                    }
+                    return
+                }
+                self.finishSurfaceLaunch(
+                    outcome,
+                    agentID: id,
+                    projectName: projectName,
+                    workingDirectory: workingDirectory,
+                    app: appHandle.value,
+                    detailVC: detailVC)
+            }
+        }
+    }
+
+    private func scheduleLaunchTimeout(agentID: UUID, generation: UUID) {
+        launchTimers[agentID]?.invalidate()
+        launchTimers[agentID] = Timer.scheduledTimer(
+            withTimeInterval: 10,
+            repeats: false
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let agent = self.agents[agentID],
+                      agent.processState == .launching,
+                      agent.launchGeneration == generation,
+                      agent.lastHookTime == nil
+                else { return }
+                self.apply(.launchTimedOut(generation: generation), to: agent)
+                self.launchTimers.removeValue(forKey: agentID)
+                self.updateAggregate()
+            }
+        }
+    }
+
+    private func finishSurfaceLaunch(
+        _ outcome: AgentSurfaceLaunchOutcome,
+        agentID: UUID,
+        projectName: String,
+        workingDirectory: String?,
+        app: ghostty_app_t,
+        detailVC: AgentDetailViewController
+    ) {
+        guard let agent = agents[agentID] else {
+            if case .success(let launch) = outcome {
+                removeFileOffMain(launch.scriptURL)
+            }
+            return
+        }
+        let integrationIssue: String?
+        switch outcome {
+        case .success(let launch): integrationIssue = launch.integrationIssue
+        case .failure(_, _, _, let issue): integrationIssue = issue
+        }
+        integrationIssues[agent.provider] = integrationIssue
+        if var health = providerHealth[agent.provider] {
+            health.integrationIssue = integrationIssue
+            providerHealth[agent.provider] = health
+        }
+
+        switch outcome {
+        case .failure(let issue, let provider, let generation, _):
+            guard agent.launchGeneration == generation,
+                  agent.provider == provider
+            else { return }
+            apply(
+                .launchFailed(generation: generation, message: issue.localizedDescription),
+                to: agent)
+            launchTimers[agentID]?.invalidate()
+            launchTimers.removeValue(forKey: agentID)
+            updateAggregate()
+
+        case .success(let launch):
+            guard agent.launchGeneration == launch.generation,
+                  agent.provider == launch.provider,
+                  agent.processState == .launching
+            else {
+                removeFileOffMain(launch.scriptURL)
+                return
+            }
+            agent.metadataAvailability = launch.integrationIssue.map {
+                .unavailable($0)
+            } ?? launch.metadataAvailability
+            removeLaunchScript(for: agentID)
+            launchScripts[agentID] = launch.scriptURL
+            let shouldReveal = currentlyViewedAgentId == agentID && detailVC.activeID == agentID
+            let isNew = detailVC.showOrSwitch(
+                id: agentID,
+                displayName: agent.name,
+                projectName: projectName,
+                agent: agent,
+                focusTerminal: shouldReveal,
+                select: shouldReveal
+            ) {
+                var surfaceConfig = Ghostty.SurfaceConfiguration()
+                surfaceConfig.command = launch.scriptURL.path
+                surfaceConfig.workingDirectory = workingDirectory
+                surfaceConfig.environmentVariables = launch.environment
+                return (app, surfaceConfig)
+            }
+            guard isNew, let surface = detailVC.surfaceView(for: agentID) else {
+                removeFileOffMain(launch.scriptURL)
+                launchScripts.removeValue(forKey: agentID)
+                return
+            }
+            surfaceViews[agentID] = surface
+            apply(.surfaceOpened(generation: launch.generation), to: agent)
             BridgeMetrics.shared.recordSurfaceCreated()
             updateMetricsSnapshot()
-
-            // Observe process exit notification from Zig backend — immediate detection
             let observer = NotificationCenter.default.addObserver(
-                forName: Ghostty.Notification.ghosttyCloseSurface, object: surface,
+                forName: Ghostty.Notification.ghosttyCloseSurface,
+                object: surface,
                 queue: .main
             ) { [weak self] _ in
                 BridgeMetrics.shared.recordProcessExitNotif()
-                self?.handleSurfaceDeath(id: id)
+                Task { @MainActor [weak self] in
+                    self?.handleSurfaceDeath(id: agentID)
+                }
             }
-            surfaceObservers[id] = observer
+            surfaceObservers[agentID] = observer
         }
-
-        // Track which agent is being viewed + clear unread
-        setCurrentlyViewedAgent(id)
-    }
-
-    // MARK: - Command Building
-
-    private func buildCommand(agent: AgentInstance, workingDirectory: String?) -> String {
-        let name = agent.name.replacingOccurrences(of: "'", with: "'\\''")
-        let preparation = AgentMetadataRuntime.prepare(
-            agentID: agent.id,
-            workingDirectory: workingDirectory)
-        let settingsArgument: String
-        if let settingsURL = preparation.settingsURL {
-            settingsArgument = " --settings \(AgentMetadataRuntime.shellQuote(settingsURL.path))"
-            agent.metadataAvailability = .waiting
-        } else {
-            settingsArgument = ""
-            agent.metadataAvailability = .unavailable(
-                preparation.unavailableReason ?? "Session metadata is unavailable.")
-        }
-
-        // Priority 1: resume existing session
-        if let sessionId = readSessionFile(agent.id) {
-            return "claude --resume '\(sessionId)' --dangerously-skip-permissions\(settingsArgument)"
-        }
-        // Priority 2: fork from source
-        if let sourceId = readForkSource(agent.id) {
-            return "claude --resume '\(sourceId)' --fork-session --name '\(name)' --dangerously-skip-permissions\(settingsArgument)"
-        }
-        // Priority 3: fresh start
-        return "claude --name '\(name)' --dangerously-skip-permissions\(settingsArgument)"
     }
 
     // MARK: - Fork
@@ -509,7 +864,11 @@ final class AgentBridge {
         guard let source = agents[sourceId] else { return nil }
 
         // Read source session — abort if none
-        guard let sourceSessionId = readSessionFile(sourceId) else {
+        guard providerRegistry.capabilities(for: source.provider).fork.isSupported,
+              let sourceSession = AgentSessionStore.session(
+                  for: sourceId,
+                  provider: source.provider)
+        else {
             logger.warning("fork: no session for source \(sourceId)")
             return nil
         }
@@ -524,15 +883,21 @@ final class AgentBridge {
         }
 
         // Create agent (sync config + bridge)
-        guard let entry = createAgent(name: forkName, config: config, project: project, task: task) else {
+        guard let entry = createAgent(
+            name: forkName,
+            provider: source.provider,
+            launchProfile: source.launchProfile,
+            config: config,
+            project: project,
+            task: task)
+        else {
             return nil
         }
 
-        // Write .forkFrom marker
-        let forkUrl = statusDir.appendingPathComponent("\(entry.id.uuidString).forkFrom")
-        guard let marker = sourceSessionId.data(using: .utf8),
-              atomicWrite(marker, to: forkUrl)
-        else {
+        let pending = AgentPendingFork(
+            provider: source.provider,
+            sourceSessionID: sourceSession.sessionID)
+        guard AgentSessionStore.write(pending, for: entry.id) else {
             deleteAgent(id: entry.id, config: config)
             logger.error("fork: failed to persist source session for \(entry.id)")
             return nil
@@ -555,6 +920,11 @@ final class AgentBridge {
         agent.name = safeName
         BridgeMetrics.shared.recordMutAgentName()
 
+        guard providerRegistry.capabilities(for: agent.provider).sessionRename.isSupported else {
+            pendingRenames.removeValue(forKey: id)
+            persistState()
+            return
+        }
         if isSafeForInput(agent.displayState) {
             logger.info("rename: sending /rename for \(id) immediately")
             onSendText?(id, "/rename \(safeName)\n")
@@ -599,6 +969,7 @@ final class AgentBridge {
     }
 
     private func removeAgentRuntime(id: UUID) {
+        let agentProvider = agents[id]?.provider ?? .claudeCode
         BridgeMetrics.shared.recordSurfaceDestroyedDelete()
         destroySurface(id: id)
         agents.removeValue(forKey: id)
@@ -608,13 +979,10 @@ final class AgentBridge {
         metadataFileData.removeValue(forKey: id)
 
         // Clean status files
+        let adapter = providerRegistry.adapter(for: agentProvider)
         ioQueue.async {
-            let dir = AgentConfig.statusDir
-            for ext in ["session", "forkFrom", "lastEvent", "events", "metadata.json"] {
-                try? FileManager.default.removeItem(
-                    at: dir.appendingPathComponent("\(id.uuidString).\(ext)"))
-            }
-            AgentMetadataRuntime.remove(agentID: id)
+            AgentSessionStore.removeAll(for: id)
+            adapter.cleanup(agentID: id)
         }
     }
 
@@ -625,16 +993,14 @@ final class AgentBridge {
         BridgeMetrics.shared.recordHeartbeat()
 
         // Check for process exits that the notification might have missed (e.g., crashes)
-        for (id, surface) in surfaceViews {
-            if surface.processExited {
-                handleSurfaceDeath(id: id)
-            }
+        for (id, surface) in surfaceViews where surface.processExited {
+            handleSurfaceDeath(id: id)
         }
     }
 
     // MARK: - Event-Driven Polling (triggered by file watcher only)
 
-    private func requestStatusPoll(after delay: TimeInterval = AgentBridge.pollThrottle) {
+    private func requestStatusPoll(after delay: TimeInterval = agentPollThrottle) {
         guard !isTerminating else { return }
         guard !pollPending, !pollInFlight else {
             pollAgainNeeded = true
@@ -643,11 +1009,13 @@ final class AgentBridge {
         }
         pollPending = true
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self, !self.isTerminating else { return }
-            self.pollPending = false
-            self.pollInFlight = true
-            BridgeMetrics.shared.recordPollFired()
-            self.pollStatusFiles()
+            Task { @MainActor [weak self] in
+                guard let self, !self.isTerminating else { return }
+                self.pollPending = false
+                self.pollInFlight = true
+                BridgeMetrics.shared.recordPollFired()
+                self.pollStatusFiles()
+            }
         }
     }
 
@@ -662,8 +1030,8 @@ final class AgentBridge {
         let offsets = eventOffsets
         let knownMetadataData = metadataFileData
         let statusDir = statusDir
+        let providers = agents.mapValues(\.provider)
         ioQueue.async { [weak self] in
-            guard let self else { return }
             var batches: [UUID: AgentEventJournalBatch] = [:]
             var metadataUpdates: [UUID: AgentMetadataFileUpdate] = [:]
             for id in ids {
@@ -691,6 +1059,7 @@ final class AgentBridge {
                     }
                 }
 
+                guard providers[id] == .claudeCode else { continue }
                 let metadataURL = statusDir.appendingPathComponent("\(id.uuidString).metadata.json")
                 guard let metadataData = try? Data(contentsOf: metadataURL),
                       metadataData != knownMetadataData[id]
@@ -705,7 +1074,7 @@ final class AgentBridge {
                     data: metadataData,
                     snapshot: snapshot)
             }
-            DispatchQueue.main.async { [weak self] in
+            Task { @MainActor [weak self] in
                 self?.applyRawEvents(batches, metadataUpdates: metadataUpdates)
             }
         }
@@ -739,16 +1108,63 @@ final class AgentBridge {
 
         for (id, batch) in batches {
             guard let agent = agents[id] else { continue }
-            for data in batch.records {
-                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            for (recordIndex, data) in batch.records.enumerated() {
+                guard let rawEvent = try? JSONDecoder().decode(
+                    AgentRawProviderEvent.self,
+                    from: data)
                 else { continue }
-                let newClaude = parseClaudeState(from: json)
-                if newClaude == .unknown { continue }
+                let eventProvider: AgentProviderID
+                if let taggedProvider = rawEvent.provider {
+                    guard taggedProvider == agent.provider else {
+                        logger.error("ignored provider-mismatched event for \(id)")
+                        continue
+                    }
+                    eventProvider = taggedProvider
+                } else {
+                    // Untagged journals predate provider support and can only
+                    // belong to migrated Claude Code agents.
+                    guard agent.provider == .claudeCode else { continue }
+                    eventProvider = .claudeCode
+                }
+                guard rawEvent.hasSupportedSchema(for: eventProvider) else {
+                    logger.error(
+                        "ignored unsupported event schema for \(id): \(rawEvent.schemaVersion ?? -1)")
+                    continue
+                }
+                guard let currentGeneration = agent.launchGeneration else { continue }
+                let eventGeneration: UUID
+                if let taggedGeneration = rawEvent.launchGeneration {
+                    guard taggedGeneration == currentGeneration else {
+                        logger.debug("ignored stale launch event for \(id)")
+                        continue
+                    }
+                    eventGeneration = taggedGeneration
+                } else {
+                    guard eventProvider == .claudeCode else { continue }
+                    eventGeneration = currentGeneration
+                }
+                let domainEvents = providerRegistry.adapter(for: eventProvider)
+                    .normalize(rawEvent)
+                guard !domainEvents.isEmpty else { continue }
 
                 let oldSnapshot = agent.runtimeSnapshot
-                let effects = apply(
-                    .hook(newClaude, isViewed: currentlyViewedAgentId == id),
-                    to: agent)
+                var effects: [AgentRuntimeEffect] = []
+                for (domainIndex, domainEvent) in domainEvents.enumerated() {
+                    effects += apply(
+                        .provider(
+                            generation: eventGeneration,
+                            provider: eventProvider,
+                            eventID: rawEvent.eventID
+                                ?? "\(eventGeneration.uuidString):\(batch.endOffset):\(recordIndex):\(domainIndex)",
+                            event: domainEvent,
+                            isViewed: currentlyViewedAgentId == id),
+                        to: agent)
+                    applyMetadata(
+                        rawEvent,
+                        domainEvent: domainEvent,
+                        provider: eventProvider,
+                        to: agent)
+                }
                 if oldSnapshot != agent.runtimeSnapshot {
                     anyChanged = true
                 }
@@ -757,10 +1173,23 @@ final class AgentBridge {
                     launchTimers[id]?.invalidate()
                     launchTimers.removeValue(forKey: id)
                     removeLaunchScript(for: id)
-                    let forkURL = statusDir.appendingPathComponent("\(id.uuidString).forkFrom")
-                    if FileManager.default.fileExists(atPath: forkURL.path) {
-                        ioQueue.async { try? FileManager.default.removeItem(at: forkURL) }
+                    let provider = agent.provider
+                    integrationIssues[provider] = nil
+                    ioQueue.async {
+                        AgentSessionStore.clearPendingFork(for: id)
+                        if provider == .codex {
+                            CodexProvider.clearHookReviewRequired()
+                        }
                     }
+                    refreshProviderHealth(provider)
+                }
+                if effects.contains(where: {
+                    if case .providerExited = $0 { return true }
+                    return false
+                }) {
+                    launchTimers[id]?.invalidate()
+                    launchTimers.removeValue(forKey: id)
+                    removeLaunchScript(for: id)
                 }
                 agent.lastHookTime = Date()
                 updateCompactingTimer(for: agent)
@@ -779,7 +1208,7 @@ final class AgentBridge {
                         postNotification(agentId: id, kind: .permission,
                             title: "Agent is waiting for you", body: "\(agent.name) needs your response")
                     }
-                    if effects.contains(.failed), newClaude == .error {
+                    if effects.contains(.failed) {
                         postNotification(agentId: id, kind: .error,
                             title: "Agent needs attention", body: "\(agent.name) encountered an error")
                     }
@@ -821,6 +1250,52 @@ final class AgentBridge {
         requestStatusPoll(after: 0)
     }
 
+    private func applyMetadata(
+        _ rawEvent: AgentRawProviderEvent,
+        domainEvent: AgentDomainEvent,
+        provider: AgentProviderID,
+        to agent: AgentInstance
+    ) {
+        if case .sessionStarted(let sessionID, _, _) = domainEvent,
+           let sessionID,
+           !sessionID.isEmpty,
+           let generation = agent.launchGeneration {
+            let binding = AgentSessionBinding(
+                provider: provider,
+                sessionID: sessionID,
+                launchGeneration: generation)
+            let agentID = agent.id
+            ioQueue.async {
+                _ = AgentSessionStore.write(binding, for: agentID)
+            }
+        }
+
+        guard rawEvent.model != nil || rawEvent.permissionMode != nil || rawEvent.sessionID != nil
+        else { return }
+        var metadata = agent.metadata ?? AgentSessionMetadata(
+            provider: provider,
+            modelID: rawEvent.model,
+            effortLevel: nil,
+            sessionID: rawEvent.sessionID,
+            runtimeVersion: runtimeVersion(for: provider),
+            permissionMode: rawEvent.permissionMode)
+        metadata.provider = provider
+        metadata.modelID = rawEvent.model ?? metadata.modelID
+        metadata.sessionID = rawEvent.sessionID ?? metadata.sessionID
+        metadata.runtimeVersion = runtimeVersion(for: provider) ?? metadata.runtimeVersion
+        metadata.permissionMode = rawEvent.permissionMode ?? metadata.permissionMode
+        metadata.observedAt = Date()
+        agent.metadata = metadata
+        agent.metadataAvailability = .available
+    }
+
+    private func runtimeVersion(for provider: AgentProviderID) -> String? {
+        guard case .ready(_, let version) = providerHealth[provider]?.installation else {
+            return nil
+        }
+        return version
+    }
+
     private func scheduleJournalCompaction(id: UUID, acknowledgedOffset: Int) {
         guard compactingJournals.insert(id).inserted else { return }
         let url = statusDir.appendingPathComponent("\(id.uuidString).events")
@@ -846,26 +1321,6 @@ final class AgentBridge {
         }
     }
 
-    // MARK: - State Parsing
-
-    private func parseClaudeState(from json: [String: Any]) -> ClaudeState {
-        guard let event = json["hook_event_name"] as? String, !event.isEmpty else { return .unknown }
-        switch event {
-        case "SessionStart":       return .idle
-        case "UserPromptSubmit":   return .thinking
-        case "PreToolUse":         return .working
-        case "PostToolUse":        return .working
-        case "PostToolUseFailure": return .error
-        case "PermissionRequest":  return .permission
-        case "Stop":               return .idle
-        case "StopFailure":        return .error
-        case "PreCompact":         return .compacting
-        case "PostCompact":        return .idle
-        case "SessionEnd":         return .idle
-        default:                   return .unknown
-        }
-    }
-
     private func isSafeForInput(_ state: DisplayState) -> Bool {
         switch state {
         case .idle, .finished: return true
@@ -877,17 +1332,18 @@ final class AgentBridge {
     private func apply(
         _ event: AgentRuntimeEvent,
         to agent: AgentInstance
-    ) -> Set<AgentRuntimeEffect> {
+    ) -> [AgentRuntimeEffect] {
         let old = agent.runtimeSnapshot
         let result = AgentStateReducer.reduce(old, event: event)
         agent.runtimeSnapshot = result.state
         if old.processState != result.state.processState {
             BridgeMetrics.shared.recordMutProcessState()
         }
-        if old.claudeState != result.state.claudeState {
-            BridgeMetrics.shared.recordMutClaudeState()
+        if old.activityState != result.state.activityState
+            || old.interactionState != result.state.interactionState {
+            BridgeMetrics.shared.recordMutActivityState()
         }
-        if old.isUnread != result.state.isUnread {
+        if old.unreadCompletion != result.state.unreadCompletion {
             BridgeMetrics.shared.recordMutIsUnread()
         }
         return result.effects
@@ -896,17 +1352,24 @@ final class AgentBridge {
     private func updateCompactingTimer(for agent: AgentInstance) {
         compactingTimers[agent.id]?.invalidate()
         compactingTimers.removeValue(forKey: agent.id)
-        guard agent.claudeState == .compacting else { return }
+        guard agent.activityState == .compacting,
+              let generation = agent.launchGeneration
+        else { return }
 
         compactingTimers[agent.id] = Timer.scheduledTimer(
             withTimeInterval: Self.compactingTimeout,
             repeats: false
         ) { [weak self, weak agent] _ in
-            guard let self, let agent, agent.claudeState == .compacting else { return }
-            self.apply(.compactionExpired, to: agent)
-            self.compactingTimers.removeValue(forKey: agent.id)
-            self.updateAggregate()
-            self.persistState()
+            Task { @MainActor [weak self, weak agent] in
+                guard let self, let agent,
+                      agent.activityState == .compacting,
+                      agent.launchGeneration == generation
+                else { return }
+                self.apply(.compactionExpired(generation: generation), to: agent)
+                self.compactingTimers.removeValue(forKey: agent.id)
+                self.updateAggregate()
+                self.persistState()
+            }
         }
     }
 
@@ -941,6 +1404,26 @@ final class AgentBridge {
 
     func surfaceView(for id: UUID) -> Ghostty.SurfaceView? { surfaceViews[id] }
 
+    private func discardSurfaceForRestart(
+        id: UUID,
+        detailVC: AgentDetailViewController,
+        provider: AgentProviderID
+    ) {
+        surfaceViews.removeValue(forKey: id)
+        if let observer = surfaceObservers.removeValue(forKey: id) {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        launchTimers[id]?.invalidate()
+        launchTimers.removeValue(forKey: id)
+        compactingTimers[id]?.invalidate()
+        compactingTimers.removeValue(forKey: id)
+        removeLaunchScript(for: id)
+        let adapter = providerRegistry.adapter(for: provider)
+        ioQueue.async { adapter.cleanup(agentID: id) }
+        detailVC.removeSurface(id: id)
+        updateMetricsSnapshot()
+    }
+
     private func destroySurface(id: UUID) {
         surfaceViews.removeValue(forKey: id)
         updateMetricsSnapshot()
@@ -949,7 +1432,10 @@ final class AgentBridge {
         compactingTimers[id]?.invalidate()
         compactingTimers.removeValue(forKey: id)
         removeLaunchScript(for: id)
-        AgentMetadataRuntime.remove(agentID: id)
+        if let provider = agents[id]?.provider {
+            let adapter = providerRegistry.adapter(for: provider)
+            ioQueue.async { adapter.cleanup(agentID: id) }
+        }
 
         // Remove process exit observer
         if let observer = surfaceObservers.removeValue(forKey: id) {
@@ -957,7 +1443,7 @@ final class AgentBridge {
         }
 
         if let agent = agents[id] {
-            apply(.surfaceDied, to: agent)
+            apply(.surfaceDied(generation: agent.launchGeneration), to: agent)
         }
         onSurfaceDeath?(id)
         updateAggregate()
@@ -968,32 +1454,6 @@ final class AgentBridge {
         logger.info("surface death: \(id)")
         BridgeMetrics.shared.recordSurfaceDestroyedExit()
         destroySurface(id: id)
-    }
-
-    // MARK: - File I/O (called from ioQueue)
-
-    /// Characters allowed in session IDs: alphanumeric, hyphen, underscore.
-    /// Rejects anything that could be a shell metacharacter.
-    private static let safeIdCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
-
-    private func readSessionFile(_ id: UUID) -> String? {
-        let url = statusDir.appendingPathComponent("\(id.uuidString).session")
-        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              trimmed.unicodeScalars.allSatisfy(Self.safeIdCharacters.contains)
-        else { return nil }
-        return trimmed
-    }
-
-    private func readForkSource(_ id: UUID) -> String? {
-        let url = statusDir.appendingPathComponent("\(id.uuidString).forkFrom")
-        guard let raw = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              trimmed.unicodeScalars.allSatisfy(Self.safeIdCharacters.contains)
-        else { return nil }
-        return trimmed
     }
 
     // MARK: - Notifications
@@ -1087,11 +1547,20 @@ final class AgentBridge {
 
     func persistState(synchronously: Bool = false) {
         var state = PersistedState()
-        state.unreadAgents = Set(agents.values.filter(\.isUnread).map(\.id))
+        state.unreadCompletions = Dictionary(uniqueKeysWithValues: agents.values.compactMap {
+            guard let completion = $0.unreadCompletion else { return nil }
+            return ($0.id, completion)
+        })
+        state.lastAppliedCompletions = Dictionary(uniqueKeysWithValues: agents.values.compactMap {
+            guard let completion = $0.lastAppliedCompletion else { return nil }
+            return ($0.id, completion)
+        })
         state.pendingRenames = pendingRenames
         state.eventOffsets = eventOffsets
         guard let data = try? JSONEncoder().encode(state) else { return }
-        let write = { _ = AgentConfig.atomicWrite(data, to: AgentConfig.stateURL) }
+        let write: @Sendable () -> Void = {
+            _ = AgentConfig.atomicWrite(data, to: AgentConfig.stateURL)
+        }
         if synchronously {
             ioQueue.sync(execute: write)
         } else {
@@ -1131,25 +1600,27 @@ final class AgentBridge {
 
     private func removeLaunchScript(for id: UUID) {
         guard let url = launchScripts.removeValue(forKey: id) else { return }
-        try? FileManager.default.removeItem(at: url)
+        removeFileOffMain(url)
     }
 
-    private func removeAllLaunchScripts() {
-        let urls = launchScripts.values
+    private func removeAllLaunchScripts(synchronously: Bool = false) {
+        let urls = Array(launchScripts.values)
         launchScripts.removeAll()
-        for url in urls {
-            try? FileManager.default.removeItem(at: url)
+        let remove: @Sendable () -> Void = {
+            for url in urls {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+        if synchronously {
+            ioQueue.sync(execute: remove)
+        } else {
+            ioQueue.async(execute: remove)
         }
     }
-}
 
-// MARK: - ClaudeState helpers
-
-extension ClaudeState {
-    var isActiveState: Bool {
-        switch self {
-        case .thinking, .working: return true
-        default: return false
+    private func removeFileOffMain(_ url: URL) {
+        ioQueue.async {
+            try? FileManager.default.removeItem(at: url)
         }
     }
 }

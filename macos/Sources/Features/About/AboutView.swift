@@ -83,7 +83,7 @@ struct AboutView: View {
                     Text("Clawddy")
                         .bold()
                         .font(.title)
-                    Text("Multi-agent Claude Code workspace \nbuilt on Ghostty.")
+                    Text("Multi-provider agent workspace \nbuilt on Ghostty.")
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                         .font(.caption)

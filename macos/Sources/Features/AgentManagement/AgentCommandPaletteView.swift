@@ -29,11 +29,14 @@ struct AgentCommandPaletteView: View {
                     options.append(CommandOption(
                         id: entry.id,
                         title: entry.name,
-                        subtitle: "\(project.name) / \(task.name)",
+                        subtitle: "\(entry.provider.displayName) · \(project.name) / \(task.name)",
                         leadingIcon: state.iconName,
                         leadingColor: state.color,
                         badge: state.label,
-                        searchTerms: [project.name, task.name, state.label]
+                        searchTerms: [
+                            project.name, task.name, state.label, entry.provider.displayName,
+                        ]
+                            + entry.launchProfile.searchTerms
                             + (instance?.metadata?.searchTerms ?? []),
                         action: { onSelectAgent(id, proj) }
                     ))

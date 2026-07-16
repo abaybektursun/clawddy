@@ -29,7 +29,7 @@ final class BridgeMetrics {
     private var dockBadgeUpdates = 0
 
     // Per-property mutation counts (only counted when value actually changed)
-    private var mutClaudeState = 0
+    private var mutActivityState = 0
     private var mutProcessState = 0
     private var mutIsUnread = 0
     private var mutAgentName = 0
@@ -69,7 +69,7 @@ final class BridgeMetrics {
     func recordAggregateChange() { queue.async { self.aggregateChanges += 1 } }
     func recordDockBadgeUpdate() { queue.async { self.dockBadgeUpdates += 1 } }
 
-    func recordMutClaudeState() { queue.async { self.mutClaudeState += 1 } }
+    func recordMutActivityState() { queue.async { self.mutActivityState += 1 } }
     func recordMutProcessState() { queue.async { self.mutProcessState += 1 } }
     func recordMutIsUnread() { queue.async { self.mutIsUnread += 1 } }
     func recordMutAgentName() { queue.async { self.mutAgentName += 1 } }
@@ -182,10 +182,10 @@ final class BridgeMetrics {
 
         let stallAlert = stallNow > 3.0
         let summary = String(
-            format: "watcher=%d polls=%d/throttled=%d applyRawEvents=%d avg=%.1fms max=%.1fms | MUT cs=%d ps=%d un=%d nm=%d lec=%d agg=%d ad=%d | cfg w=%d r=%d d=%d | surfaces alive=%d +%d -exit=%d/del=%d | exitNotif=%d hb=%d aggCh=%d dock=%d | stall max=%.2fs now=%.2fs | agents=%d",
+            format: "watcher=%d polls=%d/throttled=%d applyRawEvents=%d avg=%.1fms max=%.1fms | MUT activity=%d process=%d unread=%d name=%d events=%d aggregate=%d agents=%d | cfg w=%d r=%d d=%d | surfaces alive=%d +%d -exit=%d/del=%d | exitNotif=%d hb=%d aggCh=%d dock=%d | stall max=%.2fs now=%.2fs | agents=%d",
             watcherFires, pollsFired, pollsThrottled,
             applyRawEventsCalls, avgApply, applyRawEventsMaxMs,
-            mutClaudeState, mutProcessState, mutIsUnread, mutAgentName,
+            mutActivityState, mutProcessState, mutIsUnread, mutAgentName,
             mutLastEventContent, mutLastAggregateState, mutAgentsDict,
             configWatcherFires, configReloads, configReloadsDeduped,
             surfaceCount, surfacesCreated, surfacesDestroyedExit, surfacesDestroyedDelete,
@@ -209,7 +209,7 @@ final class BridgeMetrics {
         applyRawEventsCalls = 0; applyRawEventsTotalMs = 0; applyRawEventsMaxMs = 0
         configWatcherFires = 0; configReloads = 0; configReloadsDeduped = 0
         processExitNotifs = 0; heartbeats = 0; aggregateChanges = 0; dockBadgeUpdates = 0
-        mutClaudeState = 0; mutProcessState = 0; mutIsUnread = 0; mutAgentName = 0
+        mutActivityState = 0; mutProcessState = 0; mutIsUnread = 0; mutAgentName = 0
         mutLastEventContent = 0; mutLastAggregateState = 0; mutAgentsDict = 0
         surfacesCreated = 0
         surfacesDestroyedExit = 0; surfacesDestroyedDelete = 0

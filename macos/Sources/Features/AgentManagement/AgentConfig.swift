@@ -7,12 +7,43 @@ private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "Agent
 
 // MARK: - Data Model
 
-struct AgentEntry: Codable, Identifiable, Equatable {
+struct AgentEntry: Codable, Identifiable, Equatable, Sendable {
     let id: UUID
     var name: String
+    let provider: AgentProviderID
+    var launchProfile: AgentLaunchProfile
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        provider: AgentProviderID = .claudeCode,
+        launchProfile: AgentLaunchProfile = AgentLaunchProfile()
+    ) {
+        self.id = id
+        self.name = name
+        self.provider = provider
+        self.launchProfile = launchProfile
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, provider, launchProfile
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        name = try container.decode(String.self, forKey: .name)
+        // Every persisted agent created before provider support was a Claude
+        // Code session. This default is the authoritative migration boundary.
+        provider = try container.decodeIfPresent(AgentProviderID.self, forKey: .provider)
+            ?? .claudeCode
+        launchProfile = try container.decodeIfPresent(
+            AgentLaunchProfile.self,
+            forKey: .launchProfile) ?? AgentLaunchProfile()
+    }
 }
 
-struct AgentProject: Codable, Identifiable {
+struct AgentProject: Codable, Identifiable, Sendable {
     let id: UUID
     var name: String
     var tasks: [AgentTask]
@@ -37,7 +68,7 @@ struct AgentProject: Codable, Identifiable {
     }
 }
 
-struct AgentTask: Codable, Identifiable {
+struct AgentTask: Codable, Identifiable, Sendable {
     let id: UUID
     var name: String
     var agents: [AgentEntry]
@@ -65,8 +96,8 @@ struct AgentTask: Codable, Identifiable {
     }
 }
 
-private struct AgentConfigFile: Codable {
-    static let currentSchemaVersion = 3
+struct AgentConfigFile: Codable {
+    static let currentSchemaVersion = 4
 
     var schemaVersion: Int
     var projects: [AgentProject]
@@ -109,8 +140,7 @@ class AgentConfig {
     /// home directory.
     static var accountHomeDirectory: URL {
         if let record = getpwuid(getuid()),
-           let directory = record.pointee.pw_dir
-        {
+           let directory = record.pointee.pw_dir {
             return URL(
                 fileURLWithPath: String(cString: directory),
                 isDirectory: true)
@@ -147,6 +177,28 @@ class AgentConfig {
             fileURLWithPath: (rawValue as NSString).expandingTildeInPath,
             isDirectory: true)
     }
+
+    /// Codex stores configuration, authentication, sessions, and hooks under
+    /// CODEX_HOME. Match the account's normal installation unless the caller
+    /// explicitly selected another Codex home.
+    static var codexConfigDir: URL {
+        explicitCodexConfigDir ?? accountHomeDirectory
+            .appendingPathComponent(".codex", isDirectory: true)
+    }
+
+    static var codexConfigEnvironmentOverride: URL? {
+        explicitCodexConfigDir
+    }
+
+    private static var explicitCodexConfigDir: URL? {
+        guard let rawValue = ProcessInfo.processInfo.environment["CODEX_HOME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !rawValue.isEmpty
+        else { return nil }
+        return URL(
+            fileURLWithPath: (rawValue as NSString).expandingTildeInPath,
+            isDirectory: true)
+    }
     static var configURL: URL { baseDir.appendingPathComponent("agents.json") }
     static var statusDir: URL { baseDir.appendingPathComponent("status") }
     static var hooksDir: URL { baseDir.appendingPathComponent("hooks") }
@@ -166,8 +218,6 @@ class AgentConfig {
     init() {
         do {
             try ensureDirs()
-            try ensureHookScript()
-            if !Self.hooksInstalled() { try installHooks() }
         } catch {
             errorMessage = error.localizedDescription
             logger.error("setup failed: \(error.localizedDescription)")
@@ -193,8 +243,12 @@ class AgentConfig {
             projects = config.projects
             errorMessage = nil
             migrateStatusFiles()
+            let restoredProviderIdentity = Self.enforcePersistedProviderBindings(
+                in: &projects,
+                statusDirectory: Self.statusDir)
 
-            if config.schemaVersion < AgentConfigFile.currentSchemaVersion {
+            if config.schemaVersion < AgentConfigFile.currentSchemaVersion
+                || restoredProviderIdentity {
                 logger.info("schema migration from v\(config.schemaVersion)")
                 save()
             }
@@ -216,7 +270,10 @@ class AgentConfig {
                 for entry in task.agents {
                     let oldKey = Self.v1AgentKey(project: project.name, task: task.name, agent: entry.name)
                     let newKey = entry.id.uuidString
-                    for ext in ["session", "state", "heartbeat", "forkFrom", "lastEvent", "events", "json"] {
+                    for ext in [
+                        "session", "session.json", "state", "heartbeat", "forkFrom",
+                        "fork.json", "lastEvent", "events", "events.lock", "json", "metadata.json",
+                    ] {
                         let oldURL = Self.statusDir.appendingPathComponent("\(oldKey).\(ext)")
                         let newURL = Self.statusDir.appendingPathComponent("\(newKey).\(ext)")
                         if fm.fileExists(atPath: oldURL.path) && !fm.fileExists(atPath: newURL.path) {
@@ -232,6 +289,39 @@ class AgentConfig {
     private static func v1AgentKey(project: String, task: String, agent: String) -> String {
         "\(project)/\(task)/\(agent)"
             .replacingOccurrences(of: "[^a-zA-Z0-9._-]", with: "_", options: .regularExpression)
+    }
+
+    /// A provider becomes part of an agent's durable identity as soon as a
+    /// resumable session or pending fork exists. This prevents an external
+    /// config edit from attempting to resume one provider's session with
+    /// another provider's CLI.
+    @discardableResult
+    static func enforcePersistedProviderBindings(
+        in projects: inout [AgentProject],
+        statusDirectory: URL
+    ) -> Bool {
+        var changed = false
+        for projectIndex in projects.indices {
+            for taskIndex in projects[projectIndex].tasks.indices {
+                for agentIndex in projects[projectIndex].tasks[taskIndex].agents.indices {
+                    let entry = projects[projectIndex].tasks[taskIndex].agents[agentIndex]
+                    guard let provider = AgentSessionStore.persistedProvider(
+                        for: entry.id,
+                        directory: statusDirectory),
+                          provider != entry.provider
+                    else { continue }
+                    projects[projectIndex].tasks[taskIndex].agents[agentIndex] = AgentEntry(
+                        id: entry.id,
+                        name: entry.name,
+                        provider: provider,
+                        launchProfile: entry.launchProfile)
+                    changed = true
+                    logger.warning(
+                        "restored provider identity for agent \(entry.id) to \(provider.rawValue)")
+                }
+            }
+        }
+        return changed
     }
 
     @discardableResult
@@ -345,7 +435,13 @@ class AgentConfig {
 
     /// Add agent, returning the created entry. Trims whitespace and rejects empty names.
     @discardableResult
-    func addAgent(project: String, task: String, name: String) -> AgentEntry? {
+    func addAgent(
+        project: String,
+        task: String,
+        name: String,
+        provider: AgentProviderID = .claudeCode,
+        launchProfile: AgentLaunchProfile = AgentLaunchProfile()
+    ) -> AgentEntry? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pi = projects.firstIndex(where: { $0.name == project }),
               let ti = projects[pi].tasks.firstIndex(where: { $0.name == task }),
@@ -354,7 +450,11 @@ class AgentConfig {
                   $0.name.localizedCaseInsensitiveCompare(trimmed) == .orderedSame
               })
         else { return nil }
-        let entry = AgentEntry(id: UUID(), name: trimmed)
+        let entry = AgentEntry(
+            id: UUID(),
+            name: trimmed,
+            provider: provider,
+            launchProfile: launchProfile)
         guard commitMutation({ projects[pi].tasks[ti].agents.append(entry) }) else { return nil }
         return entry
     }
@@ -400,6 +500,29 @@ class AgentConfig {
         return false
     }
 
+    /// Restores the immutable provider identity after an external edit attempts
+    /// to retarget an agent that already has runtime or session identity.
+    @discardableResult
+    func restoreProvider(id: UUID, provider: AgentProviderID) -> Bool {
+        for pi in projects.indices {
+            for ti in projects[pi].tasks.indices {
+                guard let ai = projects[pi].tasks[ti].agents.firstIndex(where: {
+                    $0.id == id
+                }) else { continue }
+                let entry = projects[pi].tasks[ti].agents[ai]
+                guard entry.provider != provider else { return true }
+                return commitMutation {
+                    projects[pi].tasks[ti].agents[ai] = AgentEntry(
+                        id: entry.id,
+                        name: entry.name,
+                        provider: provider,
+                        launchProfile: entry.launchProfile)
+                }
+            }
+        }
+        return false
+    }
+
     @discardableResult
     func setWorkingDirectory(_ path: String, forProject id: UUID) -> Bool {
         guard let index = projects.firstIndex(where: { $0.id == id }) else { return false }
@@ -414,125 +537,11 @@ class AgentConfig {
     /// Find the task containing this agent.
     func task(forAgent id: UUID) -> AgentTask? {
         for p in projects {
-            for t in p.tasks {
-                if t.agents.contains(where: { $0.id == id }) { return t }
+            for t in p.tasks where t.agents.contains(where: { $0.id == id }) {
+                return t
             }
         }
         return nil
-    }
-
-    // MARK: - Universal Hook Script
-
-    static let hookScript = """
-        #!/bin/sh
-        [ -z "$GHOSTTY_AGENT_NAME" ] && cat > /dev/null && exit 0
-        DIR="${GHOSTTY_AGENT_STATUS_DIR:-$HOME/.config/ghostty-agents/status}"
-        mkdir -p "$DIR" 2>/dev/null
-        INPUT_FLAT=$(cat | tr -d '\\n')
-        SID=$(echo "$INPUT_FLAT" | sed -n 's/.*"session_id" *: *"\\([^"]*\\)".*/\\1/p')
-        EVENT=$(echo "$INPUT_FLAT" | sed -n 's/.*"hook_event_name" *: *"\\([^"]*\\)".*/\\1/p')
-        if [ -n "$SID" ]; then
-            echo "$SID" > "$DIR/$GHOSTTY_AGENT_NAME.session.$$"
-            mv "$DIR/$GHOSTTY_AGENT_NAME.session.$$" "$DIR/$GHOSTTY_AGENT_NAME.session"
-        fi
-        LOCK="$DIR/$GHOSTTY_AGENT_NAME.events.lock"
-        EVENTS="$DIR/$GHOSTTY_AGENT_NAME.events"
-        EVENT_LINE="{\\"hook_event_name\\":\\"$EVENT\\",\\"session_id\\":\\"$SID\\"}"
-        export EVENTS EVENT_LINE
-        /usr/bin/lockf -s -t 5 -k "$LOCK" /bin/sh -c 'printf "%s\\n" "$EVENT_LINE" >> "$EVENTS"'
-        """
-
-    private static let hookedEvents = [
-        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-        "PostToolUseFailure", "PermissionRequest", "Stop", "StopFailure",
-        "PreCompact", "PostCompact", "SubagentStart", "SubagentStop", "SessionEnd",
-    ]
-
-    private func ensureHookScript() throws {
-        let fm = FileManager.default
-        try fm.createDirectory(at: Self.hooksDir, withIntermediateDirectories: true)
-
-        let url = Self.hooksDir.appendingPathComponent("clawddy-hook.sh")
-        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        if existing == Self.hookScript { return }
-
-        try Self.hookScript.write(to: url, atomically: true, encoding: .utf8)
-        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
-
-        // Clean old per-event scripts
-        for old in ["on-session-start.sh", "on-prompt.sh", "on-tool.sh",
-                     "on-permission.sh", "on-stop.sh", "on-error.sh"] {
-            try? fm.removeItem(at: Self.hooksDir.appendingPathComponent(old))
-        }
-    }
-
-    private static var claudeSettingsURL: URL {
-        claudeConfigDir.appendingPathComponent("settings.json")
-    }
-
-    static func hooksInstalled() -> Bool {
-        guard let data = try? Data(contentsOf: claudeSettingsURL),
-              let settings = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let hooks = settings["hooks"] as? [String: Any]
-        else { return false }
-        let expectedPath = hooksDir.appendingPathComponent("clawddy-hook.sh").path
-        return hookedEvents.allSatisfy { event in
-            guard let groups = hooks[event] as? [[String: Any]] else { return false }
-            return groups.contains { group in
-                guard let commands = group["hooks"] as? [[String: Any]] else { return false }
-                return commands.contains { ($0["command"] as? String) == expectedPath }
-            }
-        }
-    }
-
-    private func installHooks() throws {
-        let fm = FileManager.default
-        let url = Self.claudeSettingsURL
-
-        // Ensure .claude directory exists
-        try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-
-        var settings: [String: Any] = [:]
-        if fm.fileExists(atPath: url.path) {
-            let data = try Data(contentsOf: url)
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else {
-                throw CocoaError(.fileReadCorruptFile)
-            }
-            settings = json
-        }
-
-        // Backup
-        let backupURL = url.deletingLastPathComponent().appendingPathComponent("settings.json.clawddy-backup")
-        if fm.fileExists(atPath: url.path) {
-            try? fm.removeItem(at: backupURL)
-            try fm.copyItem(at: url, to: backupURL)
-        }
-
-        var hooks = settings["hooks"] as? [String: Any] ?? [:]
-
-        // Remove ALL old clawddy/ghostty-agents hooks
-        for key in hooks.keys {
-            if var eventArray = hooks[key] as? [[String: Any]] {
-                eventArray.removeAll { group in
-                    guard let innerHooks = group["hooks"] as? [[String: Any]] else { return false }
-                    return innerHooks.contains { ($0["command"] as? String)?.contains("ghostty-agents/hooks/") == true }
-                }
-                hooks[key] = eventArray.isEmpty ? nil : eventArray
-            }
-        }
-
-        // Install universal hook for all events
-        let scriptPath = Self.hooksDir.appendingPathComponent("clawddy-hook.sh").path
-        for event in Self.hookedEvents {
-            var eventArray = hooks[event] as? [[String: Any]] ?? []
-            eventArray.append(["hooks": [["type": "command", "command": scriptPath, "timeout": 5]]])
-            hooks[event] = eventArray
-        }
-
-        settings["hooks"] = hooks
-        let data = try JSONSerialization.data(withJSONObject: settings, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url, options: .atomic)
     }
 
     // MARK: - Private

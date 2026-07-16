@@ -143,9 +143,12 @@ final class AgentDetailViewController: NSViewController {
         projectName: String,
         agent: AgentInstance,
         focusTerminal: Bool = true,
+        select: Bool = true,
         createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
     ) -> Bool {
-        selectAgent(agent, projectName: projectName)
+        if select {
+            selectAgent(agent, projectName: projectName)
+        }
 
         var isNew = false
 
@@ -169,15 +172,19 @@ final class AgentDetailViewController: NSViewController {
             hostsByID[id] = host
             hostingViewsByID[id] = container
             surfacesByID[id] = surface
-            attachContainer(id: id)
             isNew = true
-            headerModel.hasSurface = true
+            if select {
+                attachContainer(id: id)
+                headerModel.hasSurface = true
+            }
             logger.info("created host for agent \(id)")
         }
 
-        attachContainer(id: id)
-        placeholderView?.isHidden = true
-        if let host = hostsByID[id], let surface = surfacesByID[id] {
+        if select {
+            attachContainer(id: id)
+            placeholderView?.isHidden = true
+        }
+        if select, let host = hostsByID[id], let surface = surfacesByID[id] {
             // The window can change between creation and show (rare); re-anchor.
             host.hostingWindow = view.window
             host.focusedSurface = surface
@@ -187,7 +194,9 @@ final class AgentDetailViewController: NSViewController {
                 Ghostty.moveFocus(to: surface)
             }
         }
-        activeID = id
+        if select {
+            activeID = id
+        }
 
         installWindowKeyObserversIfNeeded()
 
@@ -292,22 +301,34 @@ private struct AgentDetailHeaderView: View {
                         Text(agent.name)
                             .font(.headline)
                             .lineLimit(1)
-                        Text(model.projectName)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        HStack(spacing: 5) {
+                            Label(agent.provider.displayName, systemImage: agent.provider.symbolName)
+                            Text("·")
+                            Text(model.projectName)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                     }
 
                     Spacer(minLength: 16)
 
-                    Label(agent.displayState.label, systemImage: agent.displayState.iconName ?? "circle")
+                    HStack(spacing: 5) {
+                        Image(systemName: agent.displayState.iconName ?? "circle")
+                            .foregroundStyle(agent.displayState.color)
+                        Text(agent.displayState.label)
+                            .foregroundStyle(.secondary)
+                    }
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(agent.displayState.color)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(agent.displayState.color.opacity(0.1), in: Capsule())
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Agent status")
+                        .accessibilityValue(agent.displayState.label)
+                        .accessibilityAddTraits(.updatesFrequently)
 
-                    if model.hasSurface {
+                    if model.hasSurface && agent.processState != .exited {
                         Button("Focus Terminal", systemImage: "terminal") {
                             model.onFocusTerminal?()
                         }
@@ -341,11 +362,10 @@ private struct AgentDetailHeaderView: View {
     }
 
     private func primaryActionTitle(for agent: AgentInstance) -> String {
-        switch agent.processState {
-        case .failed: return "Retry"
-        case .dead: return "Restart"
-        default: return "Start"
-        }
+        if agent.interactionState == .authentication { return "Open Terminal to Sign In" }
+        if agent.surfaceState == .failed { return "Retry" }
+        if agent.processState == .exited { return "Restart" }
+        return "Start"
     }
 }
 
@@ -357,21 +377,20 @@ private struct AgentPlaceholderView: View {
     var body: some View {
         VStack(spacing: 12) {
             if let agent = model.agent {
-                Image(systemName: agent.processState == .failed
-                    ? "exclamationmark.triangle" : "terminal")
+                Image(systemName: placeholderIcon(for: agent))
                     .font(.system(size: 36, weight: .light))
-                    .foregroundStyle(agent.processState == .failed ? .red : .secondary)
+                    .foregroundStyle(placeholderColor(for: agent))
 
-                Text(agent.processState == .failed ? "Couldn't Start Agent" : "Ready to Start")
+                Text(placeholderTitle(for: agent))
                     .font(.title3.weight(.semibold))
 
-                Text(agent.failureMessage ?? "Start this agent when you're ready.")
+                Text(placeholderMessage(for: agent))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 360)
 
-                Button(agent.processState == .failed ? "Retry" : "Start Agent") {
+                Button(placeholderButtonTitle(for: agent)) {
                     model.onStart?()
                 }
                 .buttonStyle(.borderedProminent)
@@ -392,5 +411,46 @@ private struct AgentPlaceholderView: View {
         }
         .padding(32)
         .accessibilityElement(children: .contain)
+    }
+
+    private func placeholderIcon(for agent: AgentInstance) -> String {
+        if agent.surfaceState == .failed || agent.runtimeErrorMessage != nil {
+            return "exclamationmark.triangle"
+        }
+        if agent.interactionState == .authentication {
+            return "person.crop.circle.badge.exclamationmark"
+        }
+        return "terminal"
+    }
+
+    private func placeholderColor(for agent: AgentInstance) -> Color {
+        if agent.surfaceState == .failed || agent.runtimeErrorMessage != nil { return .red }
+        if agent.interactionState == .authentication { return .orange }
+        return .secondary
+    }
+
+    private func placeholderTitle(for agent: AgentInstance) -> String {
+        if agent.surfaceState == .failed { return "Couldn't Start Agent" }
+        if agent.runtimeErrorMessage != nil { return "Agent Needs Attention" }
+        if agent.interactionState == .authentication {
+            return "Sign In to \(agent.provider.displayName)"
+        }
+        return "Ready to Start"
+    }
+
+    private func placeholderMessage(for agent: AgentInstance) -> String {
+        if let failure = agent.failureMessage { return failure }
+        if let runtimeError = agent.runtimeErrorMessage { return runtimeError }
+        if agent.interactionState == .authentication {
+            return "Open the terminal and complete \(agent.provider.displayName) sign-in there."
+        }
+        return "Start this agent when you're ready."
+    }
+
+    private func placeholderButtonTitle(for agent: AgentInstance) -> String {
+        if agent.interactionState == .authentication { return "Open Terminal to Sign In" }
+        if agent.surfaceState == .failed { return "Retry" }
+        if agent.runtimeErrorMessage != nil { return "Restart Agent" }
+        return "Start Agent"
     }
 }

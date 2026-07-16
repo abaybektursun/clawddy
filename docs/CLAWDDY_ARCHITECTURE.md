@@ -10,20 +10,23 @@ and compatibility work, see [`MACOS_DEVELOPMENT.md`](MACOS_DEVELOPMENT.md).
 
 ## Scope
 
-Clawddy adds a native macOS workspace to Ghostty for organizing Claude Code
-sessions by project and task. Each agent owns a Ghostty terminal surface, a
-stable UUID, and independently derived process and Claude state.
+Clawddy adds a native macOS workspace to Ghostty for organizing Claude Code and
+Codex sessions by project and task. Each agent owns a stable UUID, an immutable
+provider identity, a real Ghostty terminal surface while active, and
+independently derived runtime state.
 
-The feature has five boundaries:
+The feature has six boundaries:
 
 1. **Configuration:** projects, tasks, agent identities, and working directories.
-2. **Event ingestion:** Claude hooks append minimal lifecycle records; the app
-   consumes them in order from persisted byte offsets.
-3. **Session metadata:** Claude Code's official status-line payload reports the
-   effective model, reasoning effort, context use, and session totals.
-4. **Terminal ownership:** each live agent has one Ghostty surface hosted through
+2. **Provider adapters:** each provider owns command construction, auth probing,
+   hook registration, capabilities, and normalization into shared domain events.
+3. **Event ingestion:** provider hooks append minimal, provider-tagged lifecycle
+   records; the app consumes them in order from persisted byte offsets.
+4. **Session metadata:** the UI presents provider-reported or explicitly
+   configured values and labels unavailable capabilities instead of inferring them.
+5. **Terminal ownership:** each live agent has one Ghostty surface hosted through
    Ghostty's normal terminal view model and focus path.
-5. **Presentation:** navigation, the agent list, terminal detail, command palette,
+6. **Presentation:** navigation, the agent list, terminal detail, command palette,
    status item, badge, and notifications render derived state.
 
 Clawddy does not replace Ghostty's terminal renderer, input stack, configuration,
@@ -33,13 +36,18 @@ or process model.
 
 | Component                         | Responsibility                                                                                                    |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `AgentConfig.swift`               | Versioned JSON model, atomic persistence, migration, and Claude hook installation                                 |
+| `AgentConfig.swift`               | Versioned JSON model, atomic persistence, schema migration, and provider-identity recovery                        |
+| `AgentProvider.swift`             | Provider protocol, capability matrix, health/auth state, launch records, and provider event vocabulary           |
+| `ClaudeCodeProvider.swift`        | Claude Code command construction, hook installation, auth probe, and event normalization                         |
+| `CodexProvider.swift`             | Codex command construction, hook installation, auth probe, and event normalization                               |
+| `AgentHookRuntime.swift`          | Provider-tagged POSIX hook, safe shell quoting, and provider-exit journaling                                      |
+| `AgentSessionStore.swift`         | Validated provider-tagged session and fork persistence plus legacy Claude migration                              |
 | `AgentEnvironmentResolver.swift`  | Asynchronous login-shell PATH discovery with timeout and deterministic fallback                                   |
 | `AgentEventJournal.swift`         | Complete-record parsing across append bursts, partial writes, and journal replacement                             |
 | `AgentMetadataRuntime.swift`      | Per-agent Claude settings overlay, status-line forwarding, and atomic metadata publication                        |
-| `AgentSessionMetadata.swift`      | Strict decoding and presentation-safe normalization of official Claude status-line fields                         |
+| `AgentSessionMetadata.swift`      | Provider-neutral metadata plus strict decoding and presentation-safe normalization of official telemetry fields   |
 | `AgentMetadataViews.swift`        | Compact list summary, persistent detail disclosure, exact inspector, freshness, and accessibility                 |
-| `AgentStateReducer.swift`         | Pure process/Claude/unread transition logic and semantic effects                                                  |
+| `AgentStateReducer.swift`         | Pure surface/process/activity/interaction/telemetry transitions and ordered semantic effects                     |
 | `AgentStateAggregation.swift`     | Deterministic severity-first descendant-state propagation to tasks and projects                                   |
 | `AgentTerminalBridge.swift`       | Ordered event ingestion, runtime state, surface lifecycle, notifications, persistence, and aggregate state        |
 | `AgentTerminalHost.swift`         | `TerminalViewModel` and `TerminalViewDelegate` adapter for one agent surface tree                                 |
@@ -55,9 +63,9 @@ The composition is deliberately one-way:
 
 ```text
 AppDelegate
- ├─ AgentConfig ───────────────► agents.json + Claude hook settings
+ ├─ AgentConfig ───────────────► agents.json + provider identity migration
  ├─ AgentEnvironmentResolver ──► per-surface PATH
- ├─ AgentBridge ───────────────► event journal + metadata snapshots + AgentStateReducer
+ ├─ AgentBridge ───────────────► adapters + event journal + metadata + AgentStateReducer
  │    └─ callbacks ────────────► AppDelegate / AgentDetailViewController
  ├─ AgentWorkspaceController
  │    ├─ AgentNavigationView ──► projects, tasks, smart scopes
@@ -109,6 +117,8 @@ labels and must never be used as runtime keys.
 struct AgentEntry: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
+    let provider: AgentProviderID
+    var launchProfile: AgentLaunchProfile
 }
 ```
 
@@ -122,6 +132,7 @@ Current encoded shape:
 
 ```json
 {
+  "schemaVersion": 4,
   "projects": [
     {
       "id": "B150F75F-55CD-44BE-8994-3B8A840D71B5",
@@ -134,7 +145,12 @@ Current encoded shape:
           "agents": [
             {
               "id": "534A7DB8-4623-4C40-A3C6-DF5914D1302B",
-              "name": "implementation"
+              "name": "implementation",
+              "provider": "codex",
+              "launchProfile": {
+                "modelID": null,
+                "reasoningEffort": "high"
+              }
             }
           ]
         }
@@ -145,8 +161,11 @@ Current encoded shape:
 ```
 
 The decoder accepts older project/task records without IDs and the original
-string-only agent array. It generates UUIDs and writes the migrated form back.
-Legacy name-keyed status files are moved to UUID-keyed names when possible.
+string-only agent array. It generates UUIDs, assigns pre-provider agents to
+Claude Code, and writes the migrated form back. Legacy name-keyed status files
+are moved to UUID-keyed names when possible. Once a tagged session or pending
+fork exists, its provider is authoritative; an external config edit cannot make
+another provider consume that identity.
 
 Configuration writes are atomic and UI mutations are transactional: a failed
 replacement restores the previous observable model and surfaces a configuration
@@ -157,82 +176,88 @@ edits.
 
 ## State Model
 
-Runtime state separates facts owned by Ghostty from facts reported by Claude.
+Runtime state is provider-neutral and separates facts that have different
+owners. `AgentRuntimeSnapshot` contains five orthogonal dimensions:
 
-### Process state
+| Dimension     | States                                                        | Owner                         |
+| ------------- | ------------------------------------------------------------- | ----------------------------- |
+| Surface       | inactive, opening, open, failed, closed                      | Ghostty/AppKit                |
+| Process       | not started, launching, running, exited                      | launcher plus provider events |
+| Activity      | unknown, idle, reasoning, executing, compacting              | normalized provider events    |
+| Interaction   | none, permission, input, authentication                      | normalized provider events    |
+| Telemetry     | not started, awaiting, live, unavailable with an explanation | lifecycle transport           |
 
-`ProcessState` is app-controlled:
+Every launch receives a new generation UUID. Surface callbacks, timeout events,
+and hook records carry that generation; the reducer rejects stale events from a
+previous process. Provider-specific adapters normalize raw hook names into the
+shared domain vocabulary before reduction.
 
-| State         | Meaning                                                       |
-| ------------- | ------------------------------------------------------------- |
-| `inactive`    | No terminal surface exists for the agent                      |
-| `launching`   | A surface exists, but no valid Claude hook has arrived        |
-| `alive`       | A valid Claude hook confirmed the session                     |
-| `unconfirmed` | The terminal is running, but lifecycle status is unavailable |
-| `failed`      | The surface or launch script could not be created             |
-| `dead`        | The surface was destroyed or its child process exited         |
-
-### Claude state
-
-`ClaudeState` is hook-controlled:
-
-| State        | Hook interpretation                                    |
-| ------------ | ------------------------------------------------------ |
-| `unknown`    | No usable event                                        |
-| `idle`       | Session start/end, stop, or post-compact               |
-| `thinking`   | User prompt submitted                                  |
-| `working`    | Tool use began or completed                            |
-| `permission` | Permission request                                     |
-| `error`      | Stop or tool-use failure                               |
-| `compacting` | Pre-compact; expires if no matching completion arrives |
-
-### Display and aggregate state
+Launch failures and runtime failures are separate facts. A provider executable
+that cannot start produces **Couldn't Start**; a failure reported by an already
+running agent produces **Needs Attention** without pretending its Ghostty surface
+failed. Signed-out and input-required states are likewise distinct interaction
+states and propagate through task/project attention.
 
 `AgentStateReducer` is the only definition of runtime transitions. It accepts an
-immutable snapshot and an event, then returns the next snapshot plus semantic
-effects such as completion, waiting for user, failure, or unread change. The
-bridge performs side effects only after reducing state.
+immutable snapshot and an event, then returns the next snapshot plus an ordered
+effect list such as completion, waiting for user, failure, unread change, or
+provider exit. The bridge performs notifications, cleanup, and persistence only
+after reducing state.
 
-`DisplayState` is computed from process state, Claude state, and the unread bit;
-it is never persisted. For example, `alive + idle + unread` becomes `finished`.
+Completion identity includes provider, session, turn when available, launch
+generation, and journal event ID. Unread completion is durable attention state:
+it remains visible even if the provider or surface exits and clears only after
+the user actually exposes that agent's terminal in the key workspace window.
 
-`AggregateState` is then derived across all agents:
+`DisplayState` and parent state are computed rather than stored. `AggregateState`
+is then derived across all agents:
 
-- `attention` if any agent is finished, needs permission, or has an error.
-- `running(count)` when one or more agents are thinking or working.
+- `attention` if any agent has unread work, needs permission, or has an error.
+- `running(count)` when one or more agents are reasoning or executing.
 - `idle` otherwise.
 
-The status item and Dock badge consume aggregate state. They must not maintain a
-second state machine.
+The status item, task/project icons, smart scopes, and Dock badge consume those
+same derived states. They must not maintain a second state machine.
 
 ## Hook and Event Pipeline
 
-`AgentConfig` installs one POSIX shell hook at:
+The selected provider adapter lazily installs one shared POSIX hook when an
+agent is first launched:
 
 ```text
-~/.config/ghostty-agents/hooks/clawddy-hook.sh
+~/.config/ghostty-agents/hooks/clawddy-provider-hook.sh
 ```
 
-The hook is registered in `<CLAUDE_CONFIG_DIR>/settings.json` for the Claude
-lifecycle and tool events Clawddy observes. When `CLAUDE_CONFIG_DIR` is unset,
-Claude's normal `~/.claude` default applies. It has no dependency on `jq`,
-Python, or Homebrew.
-For each invocation it:
+Claude Code registers it in `<CLAUDE_CONFIG_DIR>/settings.json`; Codex registers
+it in `<CODEX_HOME>/hooks.json`. Each adapter removes only older Clawddy-owned
+handlers, preserves unrelated groups and settings, writes mode `0600`, and keeps
+one backup of the original user file. Integration is not performed at app
+startup, so merely opening Clawddy never changes a provider configuration.
 
-1. Reads the hook payload from standard input.
-2. Extracts only `session_id` and `hook_event_name`.
-3. Updates the UUID-keyed session file and appends one newline-delimited event
-   while holding a bounded macOS `lockf` lock for that agent.
+Codex hashes non-managed command hooks and will skip a new or changed definition
+until the user reviews it with `/hooks`. Clawddy does not bypass that trust flow.
+A skipped or disabled hook degrades activity telemetry without turning a working
+interactive terminal into a launch failure.
+
+The hook depends only on macOS system tools. For each invocation it:
+
+1. Reads the official hook payload from standard input into a private temporary file.
+2. Uses `plutil` to extract only session, event, turn, model, and permission identifiers.
+3. Adds a stable event ID plus the provider and launch generation supplied by
+   the launcher.
+4. Atomically updates the provider-tagged session binding and appends one JSONL
+   record while holding a bounded macOS `lockf` lock for that agent.
 
 ```text
-~/.config/ghostty-agents/status/<agent-uuid>.session
+~/.config/ghostty-agents/status/<agent-uuid>.session.json
 ~/.config/ghostty-agents/status/<agent-uuid>.events
-~/.config/ghostty-agents/status/<agent-uuid>.forkFrom
+~/.config/ghostty-agents/status/<agent-uuid>.fork.json
 ```
 
-The hook intentionally stores a minimal event instead of the complete tool
-payload. Tool results can contain large command output, file contents, or other
-sensitive material that the UI does not need.
+Legacy `.session` and `.forkFrom` inputs are accepted only as Claude Code state
+and are migrated to tagged records. A session or fork tagged for one provider is
+never passed to another provider. The journal intentionally excludes prompts,
+tool inputs, tool results, and transcript content.
 
 `AgentBridge` watches the status directory. Filesystem events are throttled into
 one nonoverlapping poll per 200-millisecond window. Reads seek directly to the
@@ -245,15 +270,30 @@ concurrent suffix, resets the offset, and immediately repolls. A 30-second
 heartbeat checks for process exits that surface notifications missed; it is not
 the primary ingestion path.
 
+Tagged records must use the supported event schema. Unknown schema versions and
+provider/generation mismatches are logged and skipped while their complete byte
+range is acknowledged, preventing an incompatible record from poisoning every
+later poll.
+
 Legacy `.lastEvent` files are migration inputs only. New hooks never use the
 lossy single-value register.
 
 ## Session Metadata Pipeline
 
-Claude Code supplies the effective model, reasoning effort, context-window use,
-token totals, version, and cost data to a configured `statusLine` command. This
-is the authoritative source: Clawddy does not scrape terminal output or infer
-these values from requested launch options.
+Metadata is capability-driven. Both providers report the active model and
+permission mode through official hook fields, and Clawddy knows any model or
+reasoning effort explicitly configured in the launch profile. Runtime version
+comes from the provider health probe.
+
+Configured and observed values retain their provenance. The inspector labels a
+launch-profile value as **Requested model** or **Requested effort** until the
+provider independently reports an effective value; configured input is never
+presented as observed telemetry.
+
+Claude Code additionally supplies effective reasoning effort, context-window
+use, token totals, duration, and cost data to a configured `statusLine` command.
+That payload is the authoritative source for Claude telemetry: Clawddy does not
+scrape terminal output or read transcript contents.
 
 Before starting or resuming an agent, `AgentMetadataRuntime` creates a private,
 per-agent settings overlay and passes it with Claude's `--settings` option. The
@@ -279,11 +319,19 @@ the UI reports that as metadata unavailable without treating the agent launch as
 a failure.
 
 The bridge reads only a changed snapshot on its serial I/O queue and decodes an
-allowlist into one `AgentSessionMetadata` value on the main thread. Metadata is
-not duplicated into `state.json`; the atomic snapshot is its sole on-disk source
+allowlist into one provider-neutral `AgentSessionMetadata` value on the main
+actor. Metadata is not duplicated into `state.json`; the atomic snapshot is its
+sole on-disk source
 of truth. Claude may report null context usage before the first API response and
 immediately after compaction. The UI distinguishes loading, recalculating,
 unavailable, and retained last-known values instead of displaying a false zero.
+
+Codex's stable interactive hook interface does not currently report context
+usage, session cost, or effective reasoning effort. Codex app-server provides a
+richer client protocol, but Clawddy does not currently run a second control
+channel alongside the real interactive TUI. The inspector labels each missing
+field as unavailable or unsupported and explains the integration boundary; it
+never substitutes a fabricated value.
 
 The selected-agent header exposes a persistent summary button with an anchored
 inspector. Agent-list rows show a lower-priority scan summary. Both use the same
@@ -295,10 +343,14 @@ while keyboard focus is inside the terminal.
 
 ## Concurrency and Observation
 
-`AgentConfig`, `AgentBridge`, `AgentInstance`, and header models use the
-Observation framework. UI-visible mutations are performed on the main thread.
-The bridge's serial I/O queue is limited to file reads and writes over captured
-values; it returns results to the main queue before applying state.
+`AgentConfig`, `AgentBridge`, `AgentInstance`, and workspace models use the
+Observation framework. `AgentBridge`, `AgentInstance`, and workspace UI state
+are main-actor isolated. The bridge's serial I/O queue is limited to integration
+preparation, launch-script creation, and ordered file operations over sendable
+captured values. Provider health probes use a separate concurrent queue and
+generation-check results so a slow or stale probe cannot block launches or
+journal reads. Both paths return to the main actor before creating surfaces or
+applying state.
 
 Required invariants:
 
@@ -317,13 +369,18 @@ An agent has at most one live terminal surface.
 
 Activation proceeds as follows:
 
-1. Set the runtime instance to `launching` and start a one-shot launch timer.
-2. Ask `AgentDetailViewController` to show an existing host or create one.
-3. For a new host, create `Ghostty.SurfaceView`, wrap it in `SplitTree`, and host
+1. Assign a fresh launch generation, set the instance to opening/launching, and
+   start a one-shot telemetry timer.
+2. On the serial I/O queue, resolve provider-tagged resume/fork state, validate
+   the provider executable and arguments, install the selected adapter's
+   integration, and create a mode-0700 launch script.
+3. Back on the main actor, reject stale preparation and ask
+   `AgentDetailViewController` to show an existing host or create one.
+4. For a new host, create `Ghostty.SurfaceView`, wrap it in `SplitTree`, and host
    the normal `TerminalView` through `AgentTerminalHost`.
-4. Retain the surface, host, and container by agent UUID.
-5. Observe the surface-specific close notification.
-6. On explicit activation, move focus through `Ghostty.moveFocus(to:)` and mark
+5. Retain the surface, host, and container by agent UUID.
+6. Observe the surface-specific close notification.
+7. On explicit activation, move focus through `Ghostty.moveFocus(to:)` and mark
    the agent read.
 
 The terminal is never reparented into an unrelated custom view hierarchy. Using
@@ -336,45 +393,54 @@ terminal presentation is attached to the split view.
 Closing or deleting an agent removes the container, host, surface reference,
 observer, timer, and associated status files.
 
-If no hook arrives within ten seconds, the reducer moves the instance to
-`unconfirmed` and presents a non-fatal **Status Unavailable** state. The live
-terminal remains authoritative: missing telemetry is not reported as a failed
-launch. A later valid hook recovers the same instance to `alive`.
+If no hook arrives within ten seconds, the reducer marks telemetry unavailable
+and presents a non-fatal **Status Unavailable** state. The live terminal remains
+authoritative: missing telemetry is not reported as a failed launch. A later
+valid hook recovers the same process to running/live without recreating its
+surface.
 
 ## Command Construction, Resume, and Fork
 
 Each new terminal starts a unique, mode-0700 temporary login-shell script. It
-sets `HOME` to the macOS account home so Claude can resolve the user's login
-Keychain, while setting `CLAUDE_CONFIG_DIR` and `GHOSTTY_AGENT_STATUS_DIR`
-explicitly for alternate-home installations. Ordinary installations leave
-`CLAUDE_CONFIG_DIR` unset and retain Claude's default profile behavior. That
-separation lets an isolated installation use the user's normal login Keychain
-without reading or writing another installation's Claude configuration, hooks,
-session files, or metadata. `GHOSTTY_AGENT_NAME` is set to the agent UUID.
-Command selection is ordered:
+sets `HOME` to the macOS account home so provider authentication uses the user's
+normal Keychain and account context. It propagates an explicit
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME` only when the caller selected one, and always
+sets the isolated status directory, provider ID, agent UUID, and launch
+generation. Command selection is ordered:
 
-1. Resume the UUID's recorded session when a valid session file exists.
-2. Resume and fork the session recorded in `.forkFrom`.
-3. Start a fresh named Claude session.
+1. Resume the UUID's provider-matching tagged session when one exists.
+2. Fork the provider-matching source recorded in `.fork.json`.
+3. Start a fresh interactive provider TUI.
 
-After Claude exits, the script replaces itself with the user's login shell so
-the terminal remains useful. Launch scripts are tracked and removed after a
-confirmed hook, surface death, shutdown, or next-start stale cleanup.
+Claude Code uses its interactive `--resume` and `--fork-session` paths plus
+optional model, effort, and status-line settings. Codex uses the stable
+interactive `resume` and `fork` subcommands plus optional `--model` and
+`model_reasoning_effort` configuration. Clawddy does not use Codex's experimental
+app-server and does not pass Codex's approval, sandbox, or hook-trust bypass
+flags.
 
-Session IDs are accepted only when every character is alphanumeric, a hyphen, or
-an underscore. Agent names are shell-escaped before interpolation. PATH discovery
-runs away from the launch path, drains stdout and stderr concurrently, has a
-bounded timeout, and is injected per surface rather than mutating process-global
+Before the provider command yields to the fallback shell, the launcher appends a
+provider-exit event under the same journal lock. The script then replaces itself
+with the user's login shell so the terminal remains useful. A fallback shell is
+surface state, not evidence that the provider is still alive. Launch scripts are
+tracked and removed after a confirmed hook, provider exit, surface death,
+shutdown, or next-start stale cleanup.
+
+Session IDs are accepted only when every character is alphanumeric or one of
+`_`, `-`, `.`, `:`, and `/`. Agent names, paths, and arguments are shell-escaped
+before interpolation. PATH discovery runs away
+from the launch path, drains stdout and stderr concurrently, has a bounded
+timeout, and is injected per surface rather than mutating process-global
 environment.
 
 Forking creates a new UUID and configuration entry, then writes the source
-session ID to the new UUID's `.forkFrom` file. The marker is removed after the
-new agent's first valid hook confirms launch. The source and fork never share an
-identity.
+session ID and provider to the new UUID's `.fork.json` file. The marker is
+removed after the new agent's first valid hook confirms launch. The source and
+fork never share an identity or cross a provider boundary.
 
-Renaming updates the editable label immediately. `/rename` is sent to a terminal
-only in a display state that the bridge considers safe for input; otherwise the
-rename is persisted and delivered after a safe state arrives.
+Renaming always updates Clawddy's editable label. Both provider TUIs receive
+`/rename` only in a display state the bridge considers safe for input; otherwise
+the request is persisted and delivered after a safe state arrives.
 
 ## Persistence and Recovery
 
@@ -384,20 +450,24 @@ Only state that cannot be reconstructed is persisted in:
 ~/.config/ghostty-agents/state.json
 ```
 
-It contains unread agent IDs, pending renames, and per-agent event-journal byte
-offsets. Process, Claude, display, surface, and aggregate state are reconstructed
-from configuration, ordered hooks, and live surfaces.
+It contains provider-tagged unread and last-applied completion identities,
+pending provider renames, and per-agent event-journal byte offsets. The durable
+last-applied identity makes replay idempotent even after unread state is
+acknowledged. Surface, process, activity,
+interaction, telemetry, display, and aggregate state are reconstructed from
+configuration, ordered hooks, and live surfaces.
 
 Startup order:
 
 1. Ensure config, hook, and status directories exist.
-2. Install or update the universal hook without discarding unrelated Claude
-   settings; keep a settings backup.
-3. Load and migrate configuration.
-4. Load persisted unread and pending-rename state.
-5. Recreate inactive runtime instances.
-6. Start config and status directory watchers and consume unseen complete events.
+2. Load and migrate configuration, including legacy Claude identities.
+3. Load persisted unread/last-applied completion and pending-rename state.
+4. Recreate inactive, provider-specific runtime instances.
+5. Start config and status directory watchers and consume unseen complete events.
+6. Probe provider installation/auth health away from the main actor.
 7. Start the process-exit heartbeat and diagnostics.
+
+Provider hook installation remains a first-launch action, not a startup action.
 
 Shutdown cancels timers and watchers, removes surface observers, and flushes
 persisted state. Temporary `clawddy-<uuid>.sh` launch scripts are cleaned on the
@@ -441,6 +511,7 @@ is denied.
 | -------------------- | ------------------------------------------------------------------ |
 | Active to idle       | Passive completion notification; unread state only when not viewed |
 | Permission requested | Time-sensitive notification and attention state                    |
+| Sign-in/input needed | Actionable attention state with provider-specific text              |
 | Error                | Active notification and attention state                            |
 
 Notification authorization is requested only when the feature first needs to
@@ -470,16 +541,19 @@ testing, and accessible semantics must not depend on it.
 
 ## Security and Privacy Boundaries
 
-- Hook files contain only event and session identifiers, not complete Claude
-  prompts or tool results.
+- Hook files contain only event ID, provider, generation, event, session, turn,
+  model, and permission identifiers, not prompts, transcript content, or tool
+  results.
 - UUIDs, session IDs, and names are validated or escaped before entering shell
   commands and paths.
 - Writes that coordinate hook and app state are atomic.
-- Hook installation must preserve unrelated entries in Claude settings and keep
-  its backup behavior.
+- Hook installation must preserve unrelated entries in Claude and Codex settings,
+  serialize Clawddy writers, detect concurrent external changes, and keep its
+  backup behavior. Codex hook trust is never bypassed.
 - Keychain access uses the account home. Configuration and telemetry isolation
-  use `CLAUDE_CONFIG_DIR` and `GHOSTTY_AGENT_STATUS_DIR`; do not copy credentials
-  or create a second login Keychain for an alternate-home installation.
+  uses `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `GHOSTTY_AGENT_STATUS_DIR`; do not
+  copy credentials or create a second login Keychain for an alternate-home
+  installation.
 - The agent launcher currently passes Claude's
   `--dangerously-skip-permissions` flag. This is an explicit product behavior,
   not a macOS entitlement; changes to it require a product-level security review.
@@ -489,11 +563,12 @@ testing, and accessible semantics must not depend on it.
 
 ## Accepted Limitations
 
-### Claude-to-shell transition
+### Provider-to-shell transition
 
-Claude may exit while the login shell remains alive. Hooks do not reliably
-report every exit path, and the surface process has not exited, so the last
-Claude state may remain visible. The terminal content is authoritative.
+The provider may exit while the fallback login shell remains alive. The launch
+script journals provider exit before replacing itself, while a surface-close
+notification remains an independent fallback. The UI must never equate the
+shell's continued surface lifetime with a live provider process.
 
 ### Launch timeout
 
@@ -517,9 +592,10 @@ existing surface rather than opening another view.
 Changes to this feature require the general macOS matrix in
 [`MACOS_DEVELOPMENT.md`](MACOS_DEVELOPMENT.md#required-validation-matrix) plus:
 
-- Fresh agent, resumed agent, and forked agent launch.
+- Fresh, resumed, and forked launch for each provider, including mixed projects.
+- Signed-out first use, Codex hook review, disabled hooks, and late telemetry recovery.
 - Rename while idle and rename deferred during a blocking state.
-- External `agents.json` edit and legacy-schema migration.
+- External `agents.json` edit, provider-identity enforcement, and legacy-schema migration.
 - Burst hook traffic, duplicate file events, and malformed event JSON.
 - Agent process exit, deletion, app termination, and next-launch cleanup.
 - Switching among multiple surfaces without hidden-surface focus or input.

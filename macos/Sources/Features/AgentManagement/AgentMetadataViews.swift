@@ -26,6 +26,15 @@ struct AgentMetadataCompactLine: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
+        } else if !agent.launchProfile.searchTerms.isEmpty {
+            Text([
+                agent.launchProfile.modelID,
+                agent.launchProfile.displayReasoningEffort.map { "\($0) requested" },
+            ].compactMap { $0 }.joined(separator: " · "))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .accessibilityHidden(true)
         }
     }
 
@@ -37,6 +46,9 @@ struct AgentMetadataCompactLine: View {
         if let effort = metadata.displayEffort {
             Text("·")
             Text("\(effort) effort").lineLimit(1)
+        } else if let requested = agent.launchProfile.displayReasoningEffort {
+            Text("·")
+            Text("\(requested) requested").lineLimit(1)
         }
     }
 
@@ -54,7 +66,7 @@ struct AgentMetadataCompactLine: View {
                     .monospacedDigit()
                     .lineLimit(1)
             }
-        } else if agent.claudeState == .compacting {
+        } else if agent.activityState == .compacting {
             Text("Context updating").lineLimit(1)
         }
     }
@@ -90,15 +102,27 @@ struct AgentMetadataSummaryButton: View {
         if let metadata = agent.metadata {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 18) {
+                    summaryValue("Provider", value: agent.provider.displayName)
                     summaryValue("Model", value: metadata.displayModel ?? "Not reported")
-                    summaryValue("Effort", value: metadata.displayEffort ?? "Not reported")
+                    summaryValue(
+                        metadata.displayEffort == nil
+                            && agent.launchProfile.displayReasoningEffort != nil
+                            ? "Requested effort" : "Effort",
+                        value: metadata.displayEffort
+                            ?? agent.launchProfile.displayReasoningEffort
+                            ?? capabilityValue(
+                                agent.provider.capabilities.effortTelemetry,
+                                reported: nil))
                     contextSummary(metadata)
                     freshnessSummary(metadata)
                 }
                 HStack(spacing: 6) {
                     Text([
                         metadata.displayModel,
-                        metadata.displayEffort.map { "\($0) effort" },
+                        metadata.displayEffort.map { "\($0) effort" }
+                            ?? agent.launchProfile.displayReasoningEffort.map {
+                                "\($0) requested"
+                            },
                         metadata.contextPercentText.map { "\($0) context" },
                     ].compactMap { $0 }.joined(separator: " · "))
                         .lineLimit(1)
@@ -106,10 +130,29 @@ struct AgentMetadataSummaryButton: View {
                 }
             }
         } else {
-            Label(emptySummary, systemImage: emptySummaryIcon)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+            if agent.launchProfile.modelID != nil
+                || agent.launchProfile.displayReasoningEffort != nil {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 18) {
+                        summaryValue("Provider", value: agent.provider.displayName)
+                        if let model = agent.launchProfile.modelID {
+                            summaryValue("Requested model", value: model)
+                        }
+                        if let effort = agent.launchProfile.displayReasoningEffort {
+                            summaryValue("Requested effort", value: effort)
+                        }
+                    }
+                    Label(emptySummary, systemImage: emptySummaryIcon)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            } else {
+                Label(emptySummary, systemImage: emptySummaryIcon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
     }
 
@@ -136,12 +179,15 @@ struct AgentMetadataSummaryButton: View {
                 Text(percentage)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
-            } else if agent.claudeState == .compacting {
+            } else if agent.activityState == .compacting {
                 Text("Updating")
                     .foregroundStyle(.secondary)
             } else {
-                Text("Not reported")
+                Text(capabilityValue(
+                    agent.provider.capabilities.contextTelemetry,
+                    reported: nil))
                     .foregroundStyle(.secondary)
+                    .help(agent.provider.capabilities.contextTelemetry.explanation ?? "")
             }
         }
         .font(.caption)
@@ -149,7 +195,8 @@ struct AgentMetadataSummaryButton: View {
 
     @ViewBuilder
     private func freshnessSummary(_ metadata: AgentSessionMetadata) -> some View {
-        if agent.processState == .dead || agent.processState == .inactive || agent.metadataAvailability == .waiting {
+        if agent.processState == .exited || agent.surfaceState == .inactive
+            || agent.metadataAvailability == .waiting {
             Label("Last reported \(metadata.observedAt.formatted(.relative(presentation: .named)))", systemImage: "clock")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -160,11 +207,11 @@ struct AgentMetadataSummaryButton: View {
     private var emptySummary: String {
         switch agent.metadataAvailability {
         case .notStarted:
-            return "Model, effort, and context appear after the agent starts."
+            return "\(agent.provider.displayName) details appear after the agent starts."
         case .waiting:
             return "Loading agent details…"
         case .available:
-            return agent.claudeState == .compacting
+            return agent.activityState == .compacting
                 ? "Context estimate updating…"
                 : "Agent details have not been reported yet."
         case .unavailable(let reason):
@@ -177,6 +224,18 @@ struct AgentMetadataSummaryButton: View {
         case .waiting, .available: return "ellipsis"
         case .unavailable: return "exclamationmark.circle"
         case .notStarted: return "info.circle"
+        }
+    }
+
+    private func capabilityValue(
+        _ support: AgentCapabilitySupport,
+        reported: String?
+    ) -> String {
+        if let reported { return reported }
+        switch support {
+        case .supported: return "Not reported"
+        case .unavailable: return "Unavailable"
+        case .unsupported: return "Not supported"
         }
     }
 }
@@ -194,41 +253,79 @@ private struct AgentMetadataInspectorView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let metadata = agent.metadata {
-                Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 9) {
+            Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 9) {
+                detailRow("Provider", agent.provider.displayName)
+                if let metadata = agent.metadata {
                     detailRow("Model", metadata.displayModel ?? "Not reported")
                     detailRow("Model ID", metadata.modelID ?? "Not reported")
-                    detailRow("Reasoning effort", metadata.displayEffort ?? "Not reported")
-                    detailRow("Extended thinking", metadata.thinkingEnabled.map { $0 ? "On" : "Off" } ?? "Not reported")
-                    detailRow("Claude Code", metadata.claudeVersion ?? "Not reported")
+                    detailRow(
+                        "Reasoning effort",
+                        detailValue(
+                            agent.provider.capabilities.effortTelemetry,
+                            reported: metadata.displayEffort))
+                    if let requested = agent.launchProfile.displayReasoningEffort {
+                        detailRow("Requested effort", requested)
+                    }
+                    if agent.provider == .claudeCode {
+                        detailRow(
+                            "Extended thinking",
+                            metadata.thinkingEnabled.map { $0 ? "On" : "Off" }
+                                ?? "Not reported")
+                    }
+                    if let permission = metadata.permissionMode {
+                        detailRow("Permissions", permission)
+                    }
+                    detailRow("Runtime", metadata.runtimeVersion ?? "Not reported")
+                } else {
+                    detailRow("Model", "Not reported")
+                    if let requestedModel = agent.launchProfile.modelID {
+                        detailRow("Requested model", requestedModel)
+                    }
+                    detailRow(
+                        "Reasoning effort",
+                        detailValue(
+                            agent.provider.capabilities.effortTelemetry,
+                            reported: nil))
+                    if let requested = agent.launchProfile.displayReasoningEffort {
+                        detailRow("Requested effort", requested)
+                    }
+                    detailRow("Runtime", "Not reported")
                 }
+            }
 
-                Divider()
+            Divider()
 
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack {
-                        Text("Context window")
-                            .font(.subheadline.weight(.medium))
-                        Spacer()
+            VStack(alignment: .leading, spacing: 7) {
+                HStack {
+                    Text("Context window")
+                        .font(.subheadline.weight(.medium))
+                    Spacer()
+                    if let metadata = agent.metadata {
                         Text(contextDetail(metadata))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
-                    }
-                    if let fraction = metadata.contextFraction {
-                        ProgressView(value: fraction)
-                            .progressViewStyle(.linear)
-                            .accessibilityLabel("Context used")
-                            .accessibilityValue(contextAccessibilityValue(metadata))
                     } else {
-                        Text(agent.claudeState == .compacting
-                            ? "Context estimate updating…"
-                            : "Context use was not reported.")
-                            .font(.caption)
+                        Text(detailValue(
+                            agent.provider.capabilities.contextTelemetry,
+                            reported: nil))
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
                 }
+                if let metadata = agent.metadata, let fraction = metadata.contextFraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .accessibilityLabel("Context used")
+                        .accessibilityValue(contextAccessibilityValue(metadata))
+                } else if agent.activityState == .compacting {
+                    Text("Context estimate updating…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
 
+            if let metadata = agent.metadata {
                 if metadata.totalCostUSD != nil || metadata.durationMilliseconds != nil {
                     Divider()
                     Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 9) {
@@ -251,12 +348,10 @@ private struct AgentMetadataInspectorView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
-                ContentUnavailableView {
-                    Label("Details Unavailable", systemImage: "info.circle")
-                } description: {
-                    Text(agent.metadataAccessibilityValue)
-                }
-                .frame(width: 300, height: 150)
+                Label(agent.metadataAccessibilityValue, systemImage: emptyInspectorIcon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(18)
@@ -273,11 +368,22 @@ private struct AgentMetadataInspectorView: View {
         .font(.subheadline)
     }
 
+    private var emptyInspectorIcon: String {
+        if case .unavailable = agent.metadataAvailability {
+            return "exclamationmark.circle"
+        }
+        return "info.circle"
+    }
+
     private func contextDetail(_ metadata: AgentSessionMetadata) -> String {
         guard let used = metadata.contextUsedTokens,
               let limit = metadata.contextWindowSize,
               let percent = metadata.contextPercentText
-        else { return metadata.contextPercentText ?? "Not reported" }
+        else {
+            return detailValue(
+                agent.provider.capabilities.contextTelemetry,
+                reported: metadata.contextPercentText)
+        }
         return "\(AgentSessionMetadata.formatTokens(used)) of \(AgentSessionMetadata.formatTokens(limit)) · \(percent)"
     }
 
@@ -285,16 +391,31 @@ private struct AgentMetadataInspectorView: View {
         guard let used = metadata.contextUsedTokens,
               let limit = metadata.contextWindowSize,
               let percent = metadata.contextPercentText
-        else { return metadata.contextPercentText ?? "Not reported" }
+        else {
+            return detailValue(
+                agent.provider.capabilities.contextTelemetry,
+                reported: metadata.contextPercentText)
+        }
         return "\(percent), \(used.formatted()) of \(limit.formatted()) tokens"
     }
 
     private func freshnessDetail(_ metadata: AgentSessionMetadata) -> String {
         let relative = metadata.observedAt.formatted(.relative(presentation: .named))
         switch agent.processState {
-        case .dead: return "Session ended · Last reported \(relative)"
-        case .inactive: return "Last reported \(relative)"
+        case .exited: return "Session ended · Last reported \(relative)"
+        case .notStarted: return "Last reported \(relative)"
         default: return "Updated \(relative)"
+        }
+    }
+
+    private func detailValue(
+        _ support: AgentCapabilitySupport,
+        reported: String?
+    ) -> String {
+        if let reported { return reported }
+        switch support {
+        case .supported: return "Not reported"
+        case .unavailable(let reason), .unsupported(let reason): return reason
         }
     }
 }
@@ -302,31 +423,45 @@ private struct AgentMetadataInspectorView: View {
 extension AgentInstance {
     var metadataAccessibilityValue: String {
         guard let metadata else {
+            var configured = ["Provider: \(provider.displayName)"]
+            if let model = launchProfile.modelID {
+                configured.append("Requested model: \(model)")
+            }
+            if let effort = launchProfile.displayReasoningEffort {
+                configured.append("Requested effort: \(effort)")
+            }
+            let availability: String
             switch metadataAvailability {
             case .notStarted:
-                return "Model, reasoning effort, and context are available after the agent starts."
+                availability = "Reported model, reasoning effort, and context are available after the agent starts."
             case .waiting:
-                return "Loading agent details."
+                availability = "Loading reported agent details."
             case .available:
-                return claudeState == .compacting
+                availability = activityState == .compacting
                     ? "Context estimate is updating."
                     : "Agent details have not been reported."
             case .unavailable(let reason):
-                return reason
+                availability = reason
             }
+            configured.append(availability)
+            return configured.joined(separator: ". ")
         }
 
         var parts = [String]()
+        parts.append("Provider: \(provider.displayName)")
         parts.append("Model: \(metadata.displayModel ?? "not reported")")
         parts.append("Reasoning effort: \(metadata.displayEffort ?? "not reported")")
+        if let requested = launchProfile.displayReasoningEffort {
+            parts.append("Requested effort: \(requested)")
+        }
         if let percentage = metadata.contextPercentText {
             parts.append("Context used: \(percentage)")
-        } else if claudeState == .compacting {
+        } else if activityState == .compacting {
             parts.append("Context estimate is updating")
         } else {
             parts.append("Context use was not reported")
         }
-        if processState == .dead || processState == .inactive || metadataAvailability == .waiting {
+        if processState == .exited || surfaceState == .inactive || metadataAvailability == .waiting {
             parts.append("Last reported \(metadata.observedAt.formatted(.relative(presentation: .named)))")
         }
         return parts.joined(separator: ". ") + "."

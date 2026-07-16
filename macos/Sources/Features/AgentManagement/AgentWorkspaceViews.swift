@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 import Observation
 
 @Observable
+@MainActor
 final class AgentWorkspaceModel {
     enum Scope: Hashable {
         case all
@@ -332,10 +333,8 @@ struct AgentNavigationView: View {
             WorkspaceNameSheet(
                 title: target.title,
                 initialName: target.currentName,
-                failureMessage: { config.persistenceErrorMessage }
-            ) { name in
-                rename(target, to: name)
-            }
+                failureMessage: { config.persistenceErrorMessage },
+                commit: { name in rename(target, to: name) })
         }
         .confirmationDialog(
             deletion?.title ?? "",
@@ -381,11 +380,27 @@ struct AgentNavigationView: View {
         icon: String,
         state: DisplayState?
     ) -> some View {
-        Label {
-            Text(title)
-        } icon: {
-            Image(systemName: icon)
-                .foregroundStyle(state?.color ?? Color.secondary)
+        HStack(spacing: 6) {
+            Label {
+                Text(title)
+            } icon: {
+                Image(systemName: icon)
+                    .foregroundStyle(state?.color ?? Color.secondary)
+            }
+            Spacer(minLength: 4)
+            if let state, state != .inactive, state != .idle {
+                HStack(spacing: 3) {
+                    if let iconName = state.iconName {
+                        Image(systemName: iconName)
+                            .foregroundStyle(state.color)
+                    }
+                    Text(state.label)
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption2)
+                .lineLimit(1)
+                .accessibilityHidden(true)
+            }
         }
         .help(state.map { "\(title): \($0.label)" } ?? "\(title): No agents")
         .accessibilityValue(state.map { "Aggregated status: \($0.label)" } ?? "No agents")
@@ -575,6 +590,7 @@ struct AgentListView: View {
                                 Button("Fork", systemImage: "arrow.triangle.branch") {
                                     onForkAgent(entry.id, project, task.name)
                                 }
+                                .disabled(!bridge.providerCapabilities(for: entry.provider).fork.isSupported)
                                 Divider()
                                 Button("Delete", systemImage: "trash", role: .destructive) {
                                     pendingDelete = entry
@@ -597,6 +613,28 @@ struct AgentListView: View {
                 Button("New Agent", systemImage: "plus") { showingNewAgent = true }
                     .disabled(selectedTask == nil)
                 Spacer()
+                if let item = selectedVisibleAgent {
+                    Menu("Agent Actions", systemImage: "ellipsis.circle") {
+                        Button("Start or Focus", systemImage: "terminal") {
+                            onActivateAgent(item.id, item.project)
+                        }
+                        Button("Rename", systemImage: "pencil") {
+                            renameTarget = .agent(item.id, item.entry.name)
+                        }
+                        Button("Fork", systemImage: "arrow.triangle.branch") {
+                            onForkAgent(item.id, item.project, item.task.name)
+                        }
+                        .disabled(!bridge.providerCapabilities(
+                            for: item.entry.provider).fork.isSupported)
+                        Divider()
+                        Button("Delete", systemImage: "trash", role: .destructive) {
+                            pendingDelete = item.entry
+                        }
+                    }
+                    .labelStyle(.iconOnly)
+                    .menuStyle(.borderlessButton)
+                    .help("Agent Actions")
+                }
                 Text("\(visibleAgents.count) agent\(visibleAgents.count == 1 ? "" : "s")")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -623,31 +661,32 @@ struct AgentListView: View {
             WorkspaceNameSheet(
                 title: "Rename Agent",
                 initialName: target.currentName,
-                failureMessage: { config.persistenceErrorMessage }
-            ) { name in
-                guard case .agent(let id, _) = target,
-                      config.renameAgent(id: id, newName: name)
-                else { return false }
-                bridge.requestRename(id: id, newName: name)
-                return true
-            }
+                failureMessage: { config.persistenceErrorMessage },
+                commit: { name in
+                    guard case .agent(let id, _) = target,
+                          config.renameAgent(id: id, newName: name)
+                    else { return false }
+                    bridge.requestRename(id: id, newName: name)
+                    return true
+                })
         }
         .sheet(isPresented: $showingNewAgent) {
-            WorkspaceNameSheet(
-                title: "New Agent",
-                initialName: "",
-                failureMessage: { config.persistenceErrorMessage }
-            ) { name in
-                guard let (project, task) = selectedTask,
-                      let entry = bridge.createAgent(
-                        name: name,
-                        config: config,
-                        project: project.name,
-                        task: task.name)
-                else { return false }
-                model.selectedAgentID = entry.id
-                return true
-            }
+            NewAgentSheet(
+                bridge: bridge,
+                failureMessage: { config.persistenceErrorMessage },
+                commit: { name, provider, launchProfile in
+                    guard let (project, task) = selectedTask,
+                          let entry = bridge.createAgent(
+                            name: name,
+                            provider: provider,
+                            launchProfile: launchProfile,
+                            config: config,
+                            project: project.name,
+                            task: task.name)
+                    else { return false }
+                    model.selectedAgentID = entry.id
+                    return true
+                })
         }
         .confirmationDialog(
             pendingDelete.map { "Delete agent “\($0.name)”?" } ?? "",
@@ -673,6 +712,11 @@ struct AgentListView: View {
               let task = project.tasks.first(where: { $0.id == taskID })
         else { return nil }
         return (project, task)
+    }
+
+    private var selectedVisibleAgent: AgentListItem? {
+        guard let id = model.selectedAgentID else { return nil }
+        return visibleAgents.first(where: { $0.id == id })
     }
 
     private var emptyTitle: String {
@@ -703,7 +747,11 @@ struct AgentListView: View {
     ) -> Bool {
         let query = model.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return true }
-        return ([entry.name, project.name, task.name, instance.displayState.label]
+        return ([
+            entry.name, project.name, task.name, instance.displayState.label,
+            entry.provider.displayName,
+        ]
+            + entry.launchProfile.searchTerms
             + (instance.metadata?.searchTerms ?? []))
             .contains(where: { $0.localizedCaseInsensitiveContains(query) })
     }
@@ -739,10 +787,10 @@ private struct AgentListRow: View {
                     Spacer(minLength: 4)
                     Text(agent.displayState.label)
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(agent.displayState.color)
+                        .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                Text("\(project) · \(task)")
+                Text("\(agent.provider.displayName) · \(project) · \(task)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -752,8 +800,234 @@ private struct AgentListRow: View {
         .padding(.vertical, 4)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(agent.name)
-        .accessibilityValue("\(agent.displayState.label). \(project), \(task). \(agent.metadataAccessibilityValue)")
+        .accessibilityValue("\(agent.provider.displayName). \(agent.displayState.label). \(project), \(task). \(agent.metadataAccessibilityValue)")
         .accessibilityHint("Selects this agent. Press Return to start or focus.")
+    }
+}
+
+private struct NewAgentSheet: View {
+    private struct EffortOption: Identifiable {
+        let id: String
+        let title: String
+        let value: String?
+    }
+
+    var bridge: AgentBridge
+    let failureMessage: () -> String?
+    let commit: (String, AgentProviderID, AgentLaunchProfile) -> Bool
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var provider = Self.restoredProvider
+    @State private var model = ""
+    @State private var effort: String?
+    @State private var error: String?
+    @State private var showsRunSettings = false
+    @FocusState private var focused: Bool
+
+    private static var restoredProvider: AgentProviderID {
+        guard let raw = UserDefaults.standard.string(forKey: "clawddy.newAgent.provider"),
+              let provider = AgentProviderID(rawValue: raw)
+        else { return .claudeCode }
+        return provider
+    }
+
+    private var health: AgentProviderHealth {
+        bridge.providerHealth[provider] ?? AgentProviderHealth()
+    }
+
+    private var canCreate: Bool {
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && health.isReadyToLaunch
+    }
+
+    private var effortOptions: [EffortOption] {
+        var options = [EffortOption(
+            id: "default",
+            title: "Provider Default",
+            value: nil)]
+        if provider == .codex {
+            options.append(EffortOption(id: "minimal", title: "Minimal", value: "minimal"))
+        }
+        options += [
+            EffortOption(id: "low", title: "Low", value: "low"),
+            EffortOption(id: "medium", title: "Medium", value: "medium"),
+            EffortOption(id: "high", title: "High", value: "high"),
+            EffortOption(id: "xhigh", title: "Extra High", value: "xhigh"),
+        ]
+        if provider == .claudeCode {
+            options.append(EffortOption(id: "max", title: "Maximum", value: "max"))
+        }
+        return options
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("New Agent")
+                    .font(.title3.weight(.semibold))
+                Text("Choose the coding agent for this conversation.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+
+            TextField("Agent Name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($focused)
+                .onSubmit(create)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Provider")
+                    .font(.headline)
+                Picker("Provider", selection: $provider) {
+                    ForEach(AgentProviderID.allCases) { option in
+                        Label(option.displayName, systemImage: option.symbolName)
+                            .tag(option)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.radioGroup)
+
+                providerStatus
+            }
+
+            DisclosureGroup("Run Settings", isExpanded: $showsRunSettings) {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
+                    GridRow {
+                        Text("Model")
+                        TextField("Provider default", text: $model)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Model")
+                    }
+                    GridRow {
+                        Text("Reasoning")
+                        Picker("Reasoning", selection: $effort) {
+                            ForEach(effortOptions) { option in
+                                Text(option.title).tag(option.value)
+                            }
+                        }
+                        .labelsHidden()
+                    }
+                }
+                .padding(.top, 10)
+            }
+
+            if let error {
+                Label(error, systemImage: "exclamationmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .accessibilityLabel("Error: \(error)")
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Create Agent", action: create)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canCreate)
+            }
+        }
+        .padding(22)
+        .frame(width: 440)
+        .onAppear {
+            focused = true
+            bridge.refreshProviderHealth()
+        }
+        .onChange(of: provider) { _, _ in
+            model = ""
+            effort = nil
+            error = nil
+        }
+    }
+
+    @ViewBuilder
+    private var providerStatus: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: providerStatusIcon)
+                .foregroundStyle(providerStatusColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(health.conciseStatus)
+                    .font(.callout.weight(.medium))
+                if let detail = providerStatusDetail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(provider.displayName): \(health.conciseStatus)")
+        .accessibilityValue(providerStatusDetail ?? "No additional details")
+    }
+
+    private var providerStatusIcon: String {
+        switch health.installation {
+        case .checking: return "ellipsis.circle"
+        case .ready:
+            switch health.authentication {
+            case .checking: return "ellipsis.circle"
+            case .signedIn:
+                return health.integrationIssue == nil
+                    ? "checkmark.circle.fill" : "exclamationmark.circle.fill"
+            case .signedOut: return "person.crop.circle.badge.exclamationmark"
+            case .unavailable: return "questionmark.circle.fill"
+            }
+        case .missing, .unavailable: return "exclamationmark.triangle.fill"
+        }
+    }
+
+    private var providerStatusColor: Color {
+        switch health.installation {
+        case .checking: return .secondary
+        case .ready:
+            switch health.authentication {
+            case .signedIn: return health.integrationIssue == nil ? .green : .orange
+            case .checking, .unavailable: return .secondary
+            case .signedOut: return .orange
+            }
+        case .missing, .unavailable: return .red
+        }
+    }
+
+    private var providerStatusDetail: String? {
+        if let issue = health.integrationIssue {
+            return "Activity status may be limited: \(issue)"
+        }
+        switch health.installation {
+        case .checking:
+            return "Checking the login-shell PATH and sign-in status."
+        case .missing:
+            return "Install the \(provider.displayName) CLI before creating this agent."
+        case .unavailable(let reason):
+            return reason
+        case .ready(_, let version):
+            if health.authentication == .signedOut {
+                return "You can complete sign-in when the terminal opens."
+            }
+            if provider == .codex {
+                let prefix = version.map { "\($0). " } ?? ""
+                return "\(prefix)On first use, Codex may ask you to review Clawddy’s activity hook with /hooks."
+            }
+            return version
+        }
+    }
+
+    private func create() {
+        guard canCreate else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selectedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let profile = AgentLaunchProfile(
+            modelID: selectedModel.isEmpty ? nil : selectedModel,
+            reasoningEffort: effort)
+        if commit(trimmed, provider, profile) {
+            UserDefaults.standard.set(provider.rawValue, forKey: "clawddy.newAgent.provider")
+            dismiss()
+        } else {
+            error = failureMessage() ?? "That name is already in use."
+            focused = true
+        }
     }
 }
 

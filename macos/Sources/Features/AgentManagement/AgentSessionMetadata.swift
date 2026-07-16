@@ -1,9 +1,11 @@
 import Foundation
 
-/// A last-known snapshot reported by Claude Code's official status-line input.
-/// The raw identifiers are retained for diagnostics while the UI uses the
-/// presentation helpers below.
+/// A provider-neutral last-known metadata snapshot. Claude Code's official
+/// status-line payload fills the richer usage fields; provider hook fields fill
+/// the shared identity and permission fields. The UI uses the presentation
+/// helpers below without inferring unsupported telemetry.
 struct AgentSessionMetadata: Codable, Equatable, Sendable {
+    var provider: AgentProviderID?
     var modelID: String?
     var modelDisplayName: String?
     var effortLevel: String?
@@ -24,9 +26,28 @@ struct AgentSessionMetadata: Codable, Equatable, Sendable {
     var sessionID: String?
     var sessionName: String?
     var transcriptPath: String?
-    var claudeVersion: String?
+    var runtimeVersion: String?
+    var permissionMode: String?
     var thinkingEnabled: Bool?
     var observedAt: Date
+
+    init(
+        provider: AgentProviderID,
+        modelID: String? = nil,
+        effortLevel: String? = nil,
+        sessionID: String? = nil,
+        runtimeVersion: String? = nil,
+        permissionMode: String? = nil,
+        observedAt: Date = Date()
+    ) {
+        self.provider = provider
+        self.modelID = modelID
+        self.effortLevel = effortLevel
+        self.sessionID = sessionID
+        self.runtimeVersion = runtimeVersion
+        self.permissionMode = permissionMode
+        self.observedAt = observedAt
+    }
 
     var displayModel: String? {
         nonempty(modelDisplayName) ?? nonempty(modelID)
@@ -67,30 +88,33 @@ struct AgentSessionMetadata: Codable, Equatable, Sendable {
 
     static func decodeStatusLinePayload(_ data: Data, observedAt: Date = Date()) throws -> Self {
         let payload = try JSONDecoder().decode(StatusLinePayload.self, from: data)
-        return Self(
+        var snapshot = Self(
+            provider: .claudeCode,
             modelID: payload.model?.id,
-            modelDisplayName: payload.model?.displayName,
             effortLevel: payload.effort?.level,
-            contextWindowSize: payload.contextWindow?.contextWindowSize,
-            contextUsedPercentage: payload.contextWindow?.usedPercentage,
-            contextRemainingPercentage: payload.contextWindow?.remainingPercentage,
-            currentInputTokens: payload.contextWindow?.currentUsage?.inputTokens,
-            currentOutputTokens: payload.contextWindow?.currentUsage?.outputTokens,
-            cacheCreationInputTokens: payload.contextWindow?.currentUsage?.cacheCreationInputTokens,
-            cacheReadInputTokens: payload.contextWindow?.currentUsage?.cacheReadInputTokens,
-            totalInputTokens: payload.contextWindow?.totalInputTokens,
-            totalOutputTokens: payload.contextWindow?.totalOutputTokens,
-            totalCostUSD: payload.cost?.totalCostUSD,
-            durationMilliseconds: payload.cost?.totalDurationMS,
-            apiDurationMilliseconds: payload.cost?.totalAPIDurationMS,
-            linesAdded: payload.cost?.totalLinesAdded,
-            linesRemoved: payload.cost?.totalLinesRemoved,
             sessionID: payload.sessionID,
-            sessionName: payload.sessionName,
-            transcriptPath: payload.transcriptPath,
-            claudeVersion: payload.version,
-            thinkingEnabled: payload.thinking?.enabled,
+            runtimeVersion: payload.version,
+            permissionMode: nil,
             observedAt: observedAt)
+        snapshot.modelDisplayName = payload.model?.displayName
+        snapshot.contextWindowSize = payload.contextWindow?.contextWindowSize
+        snapshot.contextUsedPercentage = payload.contextWindow?.usedPercentage
+        snapshot.contextRemainingPercentage = payload.contextWindow?.remainingPercentage
+        snapshot.currentInputTokens = payload.contextWindow?.currentUsage?.inputTokens
+        snapshot.currentOutputTokens = payload.contextWindow?.currentUsage?.outputTokens
+        snapshot.cacheCreationInputTokens = payload.contextWindow?.currentUsage?.cacheCreationInputTokens
+        snapshot.cacheReadInputTokens = payload.contextWindow?.currentUsage?.cacheReadInputTokens
+        snapshot.totalInputTokens = payload.contextWindow?.totalInputTokens
+        snapshot.totalOutputTokens = payload.contextWindow?.totalOutputTokens
+        snapshot.totalCostUSD = payload.cost?.totalCostUSD
+        snapshot.durationMilliseconds = payload.cost?.totalDurationMS
+        snapshot.apiDurationMilliseconds = payload.cost?.totalAPIDurationMS
+        snapshot.linesAdded = payload.cost?.totalLinesAdded
+        snapshot.linesRemoved = payload.cost?.totalLinesRemoved
+        snapshot.sessionName = payload.sessionName
+        snapshot.transcriptPath = payload.transcriptPath
+        snapshot.thinkingEnabled = payload.thinking?.enabled
+        return snapshot
     }
 
     static func formatTokens(_ value: Int) -> String {
@@ -112,7 +136,7 @@ struct AgentSessionMetadata: Codable, Equatable, Sendable {
     }
 }
 
-enum AgentMetadataAvailability: Equatable {
+enum AgentMetadataAvailability: Equatable, Sendable {
     case notStarted
     case waiting
     case available

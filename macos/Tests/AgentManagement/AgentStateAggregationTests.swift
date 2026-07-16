@@ -13,6 +13,8 @@ struct AgentStateAggregationTests {
             of: [.permission, .finished, .thinking]) == .permission)
         #expect(AgentStateAggregation.representative(
             of: [.working, .failed, .permission]) == .failed)
+        #expect(AgentStateAggregation.representative(
+            of: [.finished, .input, .authentication]) == .authentication)
     }
 
     @Test func activeAndTransitionalPrecedenceIsDeterministic() {

@@ -1,10 +1,18 @@
 import AppKit
 import SwiftUI
-import UserNotifications
+@preconcurrency import UserNotifications
 import OSLog
 import Sparkle
 import Carbon
 import GhosttyKit
+
+private final class AppDelegateReference: @unchecked Sendable {
+    weak var value: AppDelegate?
+
+    init(_ value: AppDelegate) {
+        self.value = value
+    }
+}
 
 class AppDelegate: NSObject,
                     ObservableObject,
@@ -109,8 +117,8 @@ class AppDelegate: NSObject,
     private var agentSearchHotKeyRef: EventHotKeyRef?
     private var agentEventHandlerRef: EventHandlerRef?
     private let agentConfig = AgentConfig()
-    private let agentBridge = AgentBridge()
-    private let agentWorkspaceModel = AgentWorkspaceModel()
+    @MainActor private lazy var agentBridge = AgentBridge()
+    @MainActor private lazy var agentWorkspaceModel = AgentWorkspaceModel()
 
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
@@ -209,6 +217,7 @@ class AppDelegate: NSObject,
         ])
     }
 
+    @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
         // System settings overrides
         UserDefaults.ghostty.register(defaults: [
@@ -356,6 +365,7 @@ class AppDelegate: NSObject,
         self.hiddenState = .init()
     }
 
+    @MainActor
     func applicationDidBecomeActive(_ notification: Notification) {
         // If we're back manually then clear the hidden state because macOS handles it.
         self.hiddenState = nil
@@ -443,6 +453,7 @@ class AppDelegate: NSObject,
         }
     }
 
+    @MainActor
     func applicationWillTerminate(_ notification: Notification) {
         shutdownClawddy()
     }
@@ -760,6 +771,7 @@ class AppDelegate: NSObject,
         _ = TerminalController.newTab(ghostty, from: window, withBaseConfig: config)
     }
 
+    @MainActor
     private func setDockBadge() {
         BridgeMetrics.shared.recordDockBadgeUpdate()
         let bellCount = NSApp.windows
@@ -919,49 +931,69 @@ class AppDelegate: NSObject,
 
     // MARK: - UNUserNotificationCenterDelegate
 
+    nonisolated
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         didReceive: UNNotificationResponse,
-        withCompletionHandler: () -> Void
+        withCompletionHandler: @escaping () -> Void
     ) {
-        // Clawddy: tap on an agent notification opens the workspace
-        if didReceive.notification.request.identifier.hasPrefix("clawddy."),
-           let rawID = didReceive.notification.request.content.userInfo["clawddy_agent_id"] as? String,
-           let id = UUID(uuidString: rawID),
-            let project = agentConfig.project(forAgent: id) {
-            showAgentWorkspace()
-            revealAgent(id: id, project: project)
-            if agentDetailVC?.hasSurface(id: id) == true {
-                activateAgent(id: id, project: project)
+        Task { @MainActor [weak self] in
+            guard let self else {
+                withCompletionHandler()
+                return
             }
+            // Clawddy: tap on an agent notification opens the workspace.
+            if didReceive.notification.request.identifier.hasPrefix("clawddy."),
+               let rawID = didReceive.notification.request.content
+                .userInfo["clawddy_agent_id"] as? String,
+               let id = UUID(uuidString: rawID),
+               let project = self.agentConfig.project(forAgent: id) {
+                self.showAgentWorkspace()
+                self.revealAgent(id: id, project: project)
+                if self.agentDetailVC?.hasSurface(id: id) == true {
+                    self.activateAgent(id: id, project: project)
+                }
+                withCompletionHandler()
+                return
+            }
+            self.ghostty.handleUserNotification(response: didReceive)
             withCompletionHandler()
-            return
         }
-        ghostty.handleUserNotification(response: didReceive)
-        withCompletionHandler()
     }
 
+    nonisolated
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent: UNNotification,
-        withCompletionHandler: (UNNotificationPresentationOptions) -> Void
+        withCompletionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        // Keep foreground presentation aligned with the notification's urgency.
-        if willPresent.request.identifier.hasPrefix("clawddy.") {
-            let rawID = willPresent.request.content.userInfo["clawddy_agent_id"] as? String
-            let id = rawID.flatMap(UUID.init(uuidString:))
-            if id == agentBridge.currentlyViewedAgentId, agentWorkspaceWindow?.isVisible == true {
+        Task { @MainActor [weak self] in
+            guard let self else {
                 withCompletionHandler([])
-            } else if willPresent.request.identifier.hasSuffix(".completed") {
-                withCompletionHandler([.badge, .list])
-            } else {
-                withCompletionHandler([.banner, .sound, .badge, .list])
+                return
             }
-            return
+            // Keep foreground presentation aligned with the notification's urgency.
+            if willPresent.request.identifier.hasPrefix("clawddy.") {
+                let rawID = willPresent.request.content
+                    .userInfo["clawddy_agent_id"] as? String
+                let id = rawID.flatMap(UUID.init(uuidString:))
+                if id == self.agentBridge.currentlyViewedAgentId,
+                   self.agentWorkspaceWindow?.isVisible == true {
+                    withCompletionHandler([])
+                } else if willPresent.request.identifier.hasSuffix(".completed") {
+                    withCompletionHandler([.badge, .list])
+                } else {
+                    withCompletionHandler([.banner, .sound, .badge, .list])
+                }
+            } else {
+                let shouldPresent = self.ghostty.shouldPresentNotification(
+                    notification: willPresent)
+                let options: UNNotificationPresentationOptions = shouldPresent
+                    ? [.banner, .sound]
+                    : []
+                withCompletionHandler(options)
+            }
         }
-        let shouldPresent = ghostty.shouldPresentNotification(notification: willPresent)
-        let options: UNNotificationPresentationOptions = shouldPresent ? [.banner, .sound] : []
-        withCompletionHandler(options)
     }
 
     // MARK: - GhosttyAppDelegate
@@ -1155,9 +1187,10 @@ extension AppDelegate {
         dockMenu.addItem(newTab)
     }
 
-    /// Setup all the images for our menu items.
+    // Setup all the images for our menu items.
     // MARK: - Clawddy
 
+    @MainActor
     private func setupClawddy() {
         agentBridge.environmentPath = AgentEnvironmentResolver.fallbackPath
         AgentEnvironmentResolver.resolve { [weak self] path in
@@ -1203,6 +1236,7 @@ extension AppDelegate {
         registerAgentSearchHotKey()
     }
 
+    @MainActor
     private func shutdownClawddy() {
         agentBridge.shutdown()
         agentWorkspaceObservers.forEach(NotificationCenter.default.removeObserver)
@@ -1215,6 +1249,7 @@ extension AppDelegate {
         }
     }
 
+    @MainActor
     private func updateAgentStatusIcon(_ state: AggregateState) {
         guard let button = agentStatusItem?.button else { return }
         switch state {
@@ -1244,6 +1279,7 @@ extension AppDelegate {
         }
     }
 
+    @MainActor
     private func registerAgentSearchHotKey() {
         let hotKeyID = EventHotKeyID(signature: 0x4147_4E54, id: 1) // "AGNT"
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -1277,19 +1313,19 @@ extension AppDelegate {
         }
     }
 
-    @objc private func agentStatusItemClicked() {
+    @MainActor @objc private func agentStatusItemClicked() {
         showAgentWorkspace()
     }
 
-    @objc private func showAgentWorkspaceCommand() {
+    @MainActor @objc private func showAgentWorkspaceCommand() {
         showAgentWorkspace()
     }
 
-    @objc private func searchAgentsCommand() {
+    @MainActor @objc private func searchAgentsCommand() {
         toggleAgentSearch()
     }
 
-    @objc private func startSelectedAgentCommand() {
+    @MainActor @objc private func startSelectedAgentCommand() {
         showAgentWorkspace()
         guard let id = agentWorkspaceModel.selectedAgentID,
               let project = agentConfig.project(forAgent: id)
@@ -1297,15 +1333,16 @@ extension AppDelegate {
         activateAgent(id: id, project: project)
     }
 
-    @objc private func focusAgentTerminalCommand() {
+    @MainActor @objc private func focusAgentTerminalCommand() {
         agentDetailVC?.focusTerminal()
     }
 
-    @objc private func showSelectedAgentDetailsCommand() {
+    @MainActor @objc private func showSelectedAgentDetailsCommand() {
         showAgentWorkspace()
         agentDetailVC?.showAgentDetails()
     }
 
+    @MainActor
     private func setupClawddyMenu() {
         guard let mainMenu = NSApp.mainMenu,
               !mainMenu.items.contains(where: { $0.title == "Agent" })
@@ -1360,6 +1397,7 @@ extension AppDelegate {
     }
 
     @discardableResult
+    @MainActor
     private func showAgentWorkspace(activate: Bool = true) -> NSWindow? {
         if agentWorkspaceWindow == nil {
             let detailVC = AgentDetailViewController(ghostty: ghostty)
@@ -1441,12 +1479,14 @@ extension AppDelegate {
         return agentWorkspaceWindow
     }
 
+    @MainActor
     func restoreAgentWorkspaceWindow(
         completionHandler: @escaping (NSWindow?, Error?) -> Void
     ) {
         completionHandler(showAgentWorkspace(activate: false), nil)
     }
 
+    @MainActor
     private func selectAgent(
         id: UUID,
         project: AgentProject,
@@ -1468,6 +1508,7 @@ extension AppDelegate {
         agentWorkspaceWindow?.title = "\(project.name) — \(agent.name)"
     }
 
+    @MainActor
     private func clearAgentSelection() {
         explicitlyViewedAgentID = nil
         agentWorkspaceModel.selectedAgentID = nil
@@ -1476,6 +1517,7 @@ extension AppDelegate {
         agentWorkspaceWindow?.title = "Clawddy"
     }
 
+    @MainActor
     private func revealAgent(id: UUID, project: AgentProject) {
         if let task = agentConfig.task(forAgent: id) {
             agentWorkspaceModel.scope = .task(projectID: project.id, taskID: task.id)
@@ -1483,14 +1525,10 @@ extension AppDelegate {
         selectAgent(id: id, project: project)
     }
 
+    @MainActor
     private func installAgentWorkspaceObservers(for window: NSWindow) {
         let center = NotificationCenter.default
-        let stopViewing: (Notification) -> Void = { [weak self] _ in
-            self?.agentBridge.setCurrentlyViewedAgent(nil)
-        }
-        let resumeViewing: (Notification) -> Void = { [weak self] _ in
-            self?.updateAgentViewingState()
-        }
+        let reference = AppDelegateReference(self)
         for name in [
             NSWindow.willCloseNotification,
             NSWindow.didResignKeyNotification,
@@ -1500,17 +1538,26 @@ extension AppDelegate {
                 forName: name,
                 object: window,
                 queue: .main,
-                using: stopViewing))
+                using: { [reference] _ in
+                    Task { @MainActor in
+                        reference.value?.agentBridge.setCurrentlyViewedAgent(nil)
+                    }
+                }))
         }
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didDeminiaturizeNotification] {
             agentWorkspaceObservers.append(center.addObserver(
                 forName: name,
                 object: window,
                 queue: .main,
-                using: resumeViewing))
+                using: { [reference] _ in
+                    Task { @MainActor in
+                        reference.value?.updateAgentViewingState()
+                    }
+                }))
         }
     }
 
+    @MainActor
     private func updateAgentViewingState() {
         guard let window = agentWorkspaceWindow,
               window.isVisible,
@@ -1526,6 +1573,7 @@ extension AppDelegate {
         agentBridge.setCurrentlyViewedAgent(id)
     }
 
+    @MainActor
     private func activateAgent(id: UUID, project: AgentProject) {
         guard let app = ghostty.app, let detailVC = agentDetailVC else { return }
         selectAgent(id: id, project: project)
@@ -1537,6 +1585,7 @@ extension AppDelegate {
         }
     }
 
+    @MainActor
     private func toggleAgentSearch() {
         if let panel = agentSearchPanel, panel.isVisible {
             panel.hide()

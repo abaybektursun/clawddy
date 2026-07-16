@@ -1,108 +1,268 @@
+import Foundation
 import Testing
 @testable import Ghostty
 
 struct AgentStateReducerTests {
-    @Test func completionBecomesUnreadWhenAgentIsNotViewed() {
-        let working = AgentRuntimeSnapshot(
-            processState: .alive,
-            claudeState: .working,
-            isUnread: false)
+    @Test func launchSeparatesSurfaceFromProviderProcess() {
+        let generation = UUID()
+        var state = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
 
-        let result = AgentStateReducer.reduce(
-            working,
-            event: .hook(.idle, isViewed: false))
-
-        #expect(result.state.claudeState == .idle)
-        #expect(result.state.isUnread)
-        #expect(result.effects.contains(.completed))
-        #expect(result.effects.contains(.unreadChanged))
-    }
-
-    @Test func viewedCompletionDoesNotBecomeUnread() {
-        let working = AgentRuntimeSnapshot(
-            processState: .alive,
-            claudeState: .thinking,
-            isUnread: false)
-
-        let result = AgentStateReducer.reduce(
-            working,
-            event: .hook(.idle, isViewed: true))
-
-        #expect(!result.state.isUnread)
-        #expect(result.effects.contains(.completed))
-        #expect(!result.effects.contains(.unreadChanged))
-    }
-
-    @Test func viewingCompletedAgentAcknowledgesOnlyThatCompletion() {
-        var state = AgentRuntimeSnapshot(
-            processState: .alive,
-            claudeState: .idle,
-            isUnread: true)
-
-        let acknowledged = AgentStateReducer.reduce(state, event: .completionViewed)
-        state = acknowledged.state
-        #expect(!state.isUnread)
-        #expect(acknowledged.effects == [.unreadChanged])
-
-        let repeated = AgentStateReducer.reduce(state, event: .completionViewed)
-        #expect(repeated.state == state)
-        #expect(repeated.effects.isEmpty)
+        #expect(state.surfaceState == .opening)
+        #expect(state.processState == .launching)
+        #expect(state.telemetryHealth == .awaiting)
 
         state = AgentStateReducer.reduce(
             state,
-            event: .hook(.working, isViewed: false)).state
-        let nextCompletion = AgentStateReducer.reduce(
+            event: .surfaceOpened(generation: generation)).state
+        #expect(state.surfaceState == .open)
+        #expect(state.processState == .launching)
+
+        let exited = AgentStateReducer.reduce(
             state,
-            event: .hook(.idle, isViewed: false))
-        #expect(nextCompletion.state.isUnread)
-        #expect(nextCompletion.effects.contains(.completed))
-        #expect(nextCompletion.effects.contains(.unreadChanged))
+            event: providerEvent(
+                generation,
+                id: "exit",
+                event: .providerExited(status: 0)))
+        #expect(exited.state.surfaceState == .open)
+        #expect(exited.state.processState == .exited)
+        #expect(exited.effects == [.providerExited(0)])
     }
 
-    @Test func orderedBurstPreservesCompletionTransition() {
-        var state = AgentRuntimeSnapshot(processState: .launching)
-        var effects = Set<AgentRuntimeEffect>()
+    @Test func nonzeroExitBeforeFirstLifecycleEventIsAStartFailure() {
+        let generation = UUID()
+        let launching = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
+        let failed = AgentStateReducer.reduce(
+            launching,
+            event: providerEvent(
+                generation,
+                id: "exit",
+                event: .providerExited(status: 127)))
 
-        for hook in [ClaudeState.thinking, .working, .idle] {
-            let result = AgentStateReducer.reduce(
-                state,
-                event: .hook(hook, isViewed: false))
-            state = result.state
-            effects.formUnion(result.effects)
+        #expect(failed.state.processState == .exited)
+        #expect(failed.state.failureMessage?.contains("status 127") == true)
+        #expect(failed.effects == [.failed, .providerExited(127)])
+    }
+
+    @Test func staleEventsCannotMutateANewerLaunch() {
+        let oldGeneration = UUID()
+        let currentGeneration = UUID()
+        let state = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: currentGeneration)).state
+
+        let staleHook = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                oldGeneration,
+                id: "stale",
+                event: .turnStarted(turnID: "turn-old")))
+        #expect(staleHook.state == state)
+        #expect(staleHook.effects.isEmpty)
+
+        let staleFailure = AgentStateReducer.reduce(
+            state,
+            event: .launchFailed(generation: oldGeneration, message: "old failure"))
+        #expect(staleFailure.state == state)
+        #expect(staleFailure.effects.isEmpty)
+    }
+
+    @Test func completionIsUnreadOnlyWhenNotViewed() {
+        let generation = UUID()
+        var state = runningState(generation)
+        state = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "turn-start",
+                event: .turnStarted(turnID: "turn-1"))).state
+
+        let unread = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "turn-complete",
+                event: .turnCompleted(turnID: "turn-1")))
+        #expect(unread.state.activityState == .idle)
+        #expect(unread.state.unreadCompletion?.turnID == "turn-1")
+        #expect(unread.effects == [.completed, .unreadChanged])
+
+        let viewed = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "viewed-complete",
+                event: .turnCompleted(turnID: "turn-1"),
+                viewed: true))
+        #expect(viewed.state.unreadCompletion == nil)
+        #expect(viewed.effects == [.completed])
+    }
+
+    @Test func distinctCompletionEventsDoNotCollapseWithoutTurnIDs() {
+        let generation = UUID()
+        var state = runningState(generation)
+        state = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "first",
+                event: .turnCompleted(turnID: nil))).state
+        let first = state.unreadCompletion
+
+        state = AgentStateReducer.reduce(state, event: .completionViewed).state
+        let secondResult = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "second",
+                event: .turnCompleted(turnID: nil)))
+        #expect(secondResult.state.unreadCompletion != first)
+        #expect(secondResult.state.unreadCompletion?.eventID == "second")
+        #expect(secondResult.effects == [.completed, .unreadChanged])
+    }
+
+    @Test func orderedEffectsPreserveAliveBeforePermission() {
+        let generation = UUID()
+        let launching = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
+        let result = AgentStateReducer.reduce(
+            launching,
+            event: providerEvent(
+                generation,
+                id: "permission",
+                event: .interactionChanged(.permission)))
+
+        #expect(result.state.processState == .running)
+        #expect(result.state.interactionState == .permission)
+        #expect(result.effects == [.becameAlive, .waitingForUser])
+    }
+
+    @Test func authenticationAndInputAreFirstClassAttentionStates() {
+        let generation = UUID()
+        let launching = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
+        let authentication = AgentStateReducer.reduce(
+            launching,
+            event: .interactionRequired(
+                generation: generation,
+                interaction: .authentication))
+        #expect(authentication.state.interactionState == .authentication)
+        #expect(authentication.effects == [.waitingForUser])
+
+        let input = AgentStateReducer.reduce(
+            runningState(generation),
+            event: providerEvent(
+                generation,
+                id: "input",
+                event: .interactionChanged(.input)))
+        #expect(input.state.interactionState == .input)
+        #expect(input.effects == [.waitingForUser])
+    }
+
+    @Test func runtimeFailureDoesNotMasqueradeAsLaunchFailure() {
+        let generation = UUID()
+        let result = AgentStateReducer.reduce(
+            runningState(generation),
+            event: providerEvent(
+                generation,
+                id: "runtime-error",
+                event: .turnFailed(nil)))
+
+        #expect(result.state.surfaceState == .open)
+        #expect(result.state.processState == .running)
+        #expect(result.state.failureMessage == nil)
+        #expect(result.state.runtimeErrorMessage == "The agent reported a runtime error.")
+        #expect(result.effects == [.failed])
+    }
+
+    @Test func replayedCompletionIsIdempotentAfterItWasViewed() {
+        let generation = UUID()
+        let event = providerEvent(
+            generation,
+            id: "stable-event-id",
+            event: .turnCompleted(turnID: "turn-1"))
+        var state = AgentStateReducer.reduce(runningState(generation), event: event).state
+        state = AgentStateReducer.reduce(state, event: .completionViewed).state
+
+        let replay = AgentStateReducer.reduce(state, event: event)
+        #expect(replay.state.unreadCompletion == nil)
+        #expect(replay.state.lastAppliedCompletion?.eventID == "stable-event-id")
+        #expect(replay.effects.isEmpty)
+    }
+
+    @Test func timeoutDegradesTelemetryAndFirstEventRecovers() {
+        let generation = UUID()
+        var state = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
+        state = AgentStateReducer.reduce(
+            state,
+            event: .launchTimedOut(generation: generation)).state
+
+        #expect(state.processState == .launching)
+        guard case .unavailable = state.telemetryHealth else {
+            Issue.record("Expected unavailable telemetry")
+            return
         }
-
-        #expect(state.processState == .alive)
-        #expect(state.claudeState == .idle)
-        #expect(state.isUnread)
-        #expect(effects.contains(.becameAlive))
-        #expect(effects.contains(.completed))
-    }
-
-    @Test func launchTimeoutReportsUnavailableStatusAndRecovers() {
-        var state = AgentRuntimeSnapshot(processState: .launching)
-        state = AgentStateReducer.reduce(state, event: .launchTimedOut).state
-        #expect(state.processState == .unconfirmed)
-        #expect(state.failureMessage == "The terminal is running, but agent activity status is unavailable.")
 
         let recovered = AgentStateReducer.reduce(
             state,
-            event: .hook(.idle, isViewed: true))
-        #expect(recovered.state.processState == .alive)
-        #expect(recovered.state.failureMessage == nil)
-        #expect(recovered.effects.contains(.becameAlive))
+            event: providerEvent(
+                generation,
+                id: "session",
+                event: .sessionStarted(
+                    sessionID: "session-1",
+                    model: "model",
+                    permissionMode: "default"),
+                viewed: true))
+        #expect(recovered.state.processState == .running)
+        #expect(recovered.state.telemetryHealth == .live)
+        #expect(recovered.state.sessionID == "session-1")
+        #expect(recovered.effects == [.becameAlive])
     }
 
-    @Test func compactionExpiryOnlyChangesCompactingState() {
-        let compacting = AgentRuntimeSnapshot(
-            processState: .alive,
-            claudeState: .compacting)
-        let expired = AgentStateReducer.reduce(compacting, event: .compactionExpired)
-        #expect(expired.state.claudeState == .idle)
+    @Test func compactionExpiryOnlyChangesMatchingLaunch() {
+        let generation = UUID()
+        var compacting = runningState(generation)
+        compacting.activityState = .compacting
 
-        let working = AgentRuntimeSnapshot(
-            processState: .alive,
-            claudeState: .working)
-        let unchanged = AgentStateReducer.reduce(working, event: .compactionExpired)
-        #expect(unchanged.state == working)
+        let stale = AgentStateReducer.reduce(
+            compacting,
+            event: .compactionExpired(generation: UUID()))
+        #expect(stale.state == compacting)
+
+        let expired = AgentStateReducer.reduce(
+            compacting,
+            event: .compactionExpired(generation: generation))
+        #expect(expired.state.activityState == .idle)
+    }
+
+    private func runningState(_ generation: UUID) -> AgentRuntimeSnapshot {
+        AgentRuntimeSnapshot(
+            surfaceState: .open,
+            processState: .running,
+            activityState: .idle,
+            interactionState: .none,
+            telemetryHealth: .live,
+            launchGeneration: generation)
+    }
+
+    private func providerEvent(
+        _ generation: UUID,
+        id: String,
+        event: AgentDomainEvent,
+        viewed: Bool = false
+    ) -> AgentRuntimeEvent {
+        .provider(
+            generation: generation,
+            provider: .codex,
+            eventID: id,
+            event: event,
+            isViewed: viewed)
     }
 }

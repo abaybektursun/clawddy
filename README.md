@@ -5,26 +5,27 @@
 <p align="center">
   Multi-agent terminal workspace built on <a href="https://github.com/ghostty-org/ghostty">Ghostty</a>.
   <br />
-  Manage, monitor, and switch between Claude Code agents from a native macOS interface.
+  Manage, monitor, and switch between Claude Code and Codex agents from a native macOS interface.
 </p>
 
 ## About
 
-Clawddy is a fork of [Ghostty](https://github.com/ghostty-org/ghostty) that adds a built-in agent workspace for managing multiple Claude Code terminal sessions. It inherits Ghostty's speed, native feel, and rendering quality while adding project/task/agent organization on top.
+Clawddy is a fork of [Ghostty](https://github.com/ghostty-org/ghostty) that adds a built-in workspace for managing multiple coding-agent terminal sessions. Each agent can use Claude Code or Codex while retaining Ghostty's speed, native feel, and rendering quality.
 
 **What it does:**
 
 - Organize agents into **projects** and **tasks** in a native three-column workspace
-- Each agent runs Claude Code in its own terminal surface with session resume
-- Effective model, reasoning effort, and context use are visible in every agent
-  row and in a persistent, accessible detail inspector
+- Each agent chooses Claude Code or Codex and runs its real interactive TUI in
+  a dedicated terminal surface, with provider-safe resume and fork
+- Model, configured reasoning effort, permissions, and provider-supported
+  telemetry are available through an accessible detail inspector
 - **Option+Space** opens a Spotlight-style search to jump between agents
 - Selecting an agent previews it; explicit Start/Focus actions preserve keyboard intent
 - Menu bar icon shows aggregate state (idle / running / needs attention)
 - Lossless ordered lifecycle-event ingestion with bounded tail reads and compaction
 - Targeted macOS notifications that reopen the exact agent
 - System-standard workspace chrome with the terminal retaining its configured theme
-- Agents drop to a shell when Claude exits so you never lose a terminal
+- Agents drop to a shell when their provider exits so you never lose a terminal
 
 ## Architecture
 
@@ -34,7 +35,12 @@ integration points in `AppDelegate.swift` and the shared command palette. The
 
 ```
 macos/Sources/Features/AgentManagement/
-  AgentConfig.swift                — Config persistence, migration, and Claude hooks
+  AgentConfig.swift                — Config persistence and provider migration
+  AgentProvider.swift              — Provider protocol, capabilities, health, and launch types
+  ClaudeCodeProvider.swift         — Claude Code launch, hooks, auth, and event normalization
+  CodexProvider.swift              — Codex launch, hooks, auth, and event normalization
+  AgentHookRuntime.swift           — Minimal provider-tagged lifecycle journal hook
+  AgentSessionStore.swift          — Provider-tagged resume and fork identity
   AgentEnvironmentResolver.swift   — Nonblocking login-shell PATH discovery
   AgentEventJournal.swift          — Complete-record parsing and persisted offsets
   AgentMetadataRuntime.swift       — Claude status-line capture and forwarding
@@ -69,8 +75,8 @@ The built application itself has a macOS 14 deployment target.
 ### Build
 
 ```sh
-macos/build.nu --scheme Ghostty --configuration Debug --action build
-open macos/build/Debug/Ghostty.app
+macos/build.nu --scheme Ghostty --configuration ReleaseLocal --action build
+open macos/build/ReleaseLocal/Ghostty.app
 ```
 
 When shared Zig code outside `macos/` changes, run
@@ -83,6 +89,7 @@ Agents are defined in `~/.config/ghostty-agents/agents.json`:
 
 ```json
 {
+  "schemaVersion": 4,
   "projects": [
     {
       "id": "B150F75F-55CD-44BE-8994-3B8A840D71B5",
@@ -95,7 +102,12 @@ Agents are defined in `~/.config/ghostty-agents/agents.json`:
           "agents": [
             {
               "id": "534A7DB8-4623-4C40-A3C6-DF5914D1302B",
-              "name": "agent-1"
+              "name": "agent-1",
+              "provider": "codex",
+              "launchProfile": {
+                "modelID": null,
+                "reasoningEffort": "high"
+              }
             }
           ]
         }
@@ -105,9 +117,11 @@ Agents are defined in `~/.config/ghostty-agents/agents.json`:
 }
 ```
 
-IDs are stable identities; names may change. Older name-only configuration is
-migrated automatically. Claude Code hooks are installed automatically to track
-session and lifecycle events.
+IDs and providers are stable identities; names may change. Older name-only
+configuration is migrated automatically and defaults to Claude Code. Hooks are
+installed lazily for the selected provider without replacing unrelated user
+hooks. Codex requires the user to review a newly installed command hook with
+`/hooks` before Codex will run it.
 
 ## Syncing with upstream Ghostty
 

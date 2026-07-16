@@ -14,6 +14,8 @@ enum AgentStateAggregation {
         switch state {
         case .failed: return 110
         case .error: return 100
+        case .authentication: return 96
+        case .input: return 94
         case .permission: return 90
         case .finished: return 80
         case .statusUnavailable: return 70
