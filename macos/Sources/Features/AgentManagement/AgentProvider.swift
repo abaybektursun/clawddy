@@ -339,8 +339,8 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
 enum AgentDomainEvent: Equatable, Sendable {
     case sessionStarted(sessionID: String?, model: String?, permissionMode: String?)
     case turnStarted(turnID: String?)
-    case activityChanged(AgentActivityState)
-    case interactionChanged(AgentInteractionState)
+    case turnActivityChanged(AgentActivityState)
+    case turnInteractionChanged(AgentInteractionState)
     case turnCompleted(turnID: String?)
     case turnFailed(String?)
     case sessionEnded

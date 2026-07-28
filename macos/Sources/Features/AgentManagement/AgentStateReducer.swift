@@ -41,6 +41,11 @@ enum AgentTelemetryHealth: Equatable, Sendable {
     case unavailable(String)
 }
 
+enum AgentTurnState: Equatable, Sendable {
+    case inactive
+    case active(turnID: String?)
+}
+
 struct AgentCompletionID: Codable, Equatable, Hashable, Sendable {
     var provider: AgentProviderID
     var sessionID: String?
@@ -61,6 +66,7 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     var runtimeErrorMessage: String?
     var launchGeneration: UUID?
     var sessionID: String?
+    var turnState: AgentTurnState = .inactive
 }
 
 enum AgentRuntimeEvent: Equatable, Sendable {
@@ -110,7 +116,8 @@ enum AgentStateReducer {
                 failureMessage: nil,
                 runtimeErrorMessage: nil,
                 launchGeneration: generation,
-                sessionID: current.sessionID)
+                sessionID: current.sessionID,
+                turnState: .inactive)
 
         case .surfaceOpened(let generation):
             guard state.launchGeneration == generation else { break }
@@ -129,6 +136,7 @@ enum AgentStateReducer {
             state.processState = .exited
             state.activityState = .unknown
             state.interactionState = .none
+            state.turnState = .inactive
             state.failureMessage = message
             state.runtimeErrorMessage = nil
             effects.append(.failed)
@@ -149,6 +157,7 @@ enum AgentStateReducer {
                 state.processState = .exited
                 state.activityState = .unknown
                 state.interactionState = .none
+                state.turnState = .inactive
                 if !wasRunning && status != 0 {
                     state.failureMessage = "The provider exited before the agent session started (status \(status))."
                     effects.append(.failed)
@@ -156,11 +165,17 @@ enum AgentStateReducer {
                 effects.append(.providerExited(status))
                 break
             }
-            let wasConfirmed = state.processState == .running
-            if !wasConfirmed {
-                state.processState = .running
-                state.failureMessage = nil
-                effects.append(.becameAlive)
+
+            switch domainEvent {
+            case .sessionStarted, .turnStarted:
+                confirmProviderAlive(&state, effects: &effects)
+            case .turnCompleted, .turnFailed:
+                if state.processState != .exited {
+                    confirmProviderAlive(&state, effects: &effects)
+                }
+            case .turnActivityChanged, .turnInteractionChanged,
+                    .sessionEnded, .providerExited:
+                break
             }
             state.telemetryHealth = .live
 
@@ -169,24 +184,29 @@ enum AgentStateReducer {
                 state.sessionID = sessionID ?? state.sessionID
                 state.activityState = .idle
                 state.interactionState = .none
+                state.turnState = .inactive
                 state.runtimeErrorMessage = nil
 
-            case .turnStarted:
+            case .turnStarted(let turnID):
+                state.turnState = .active(turnID: turnID)
                 state.activityState = .reasoning
                 state.interactionState = .none
                 state.runtimeErrorMessage = nil
                 clearUnread(&state, effects: &effects)
 
-            case .activityChanged(let activity):
+            case .turnActivityChanged(let activity):
+                guard case .active = state.turnState else { break }
                 state.activityState = activity
 
-            case .interactionChanged(let interaction):
+            case .turnInteractionChanged(let interaction):
+                guard case .active = state.turnState else { break }
                 if interaction != .none && state.interactionState != interaction {
                     effects.append(.waitingForUser)
                 }
                 state.interactionState = interaction
 
             case .turnCompleted(let turnID):
+                state.turnState = .inactive
                 state.activityState = .idle
                 state.interactionState = .none
                 let completion = AgentCompletionID(
@@ -206,6 +226,7 @@ enum AgentStateReducer {
                 }
 
             case .turnFailed(let message):
+                state.turnState = .inactive
                 state.activityState = .idle
                 state.interactionState = .none
                 state.runtimeErrorMessage = message?.trimmingCharacters(
@@ -215,6 +236,7 @@ enum AgentStateReducer {
 
             case .sessionEnded:
                 state.processState = .exited
+                state.turnState = .inactive
                 state.activityState = .idle
                 state.interactionState = .none
 
@@ -227,7 +249,11 @@ enum AgentStateReducer {
         case .compactionExpired(let generation):
             guard state.launchGeneration == generation else { break }
             if state.activityState == .compacting {
-                state.activityState = .idle
+                if case .active = state.turnState {
+                    state.activityState = .reasoning
+                } else {
+                    state.activityState = .idle
+                }
             }
 
         case .surfaceDied(let generation):
@@ -236,6 +262,7 @@ enum AgentStateReducer {
             state.processState = .exited
             state.activityState = .unknown
             state.interactionState = .none
+            state.turnState = .inactive
             state.failureMessage = nil
 
         case .completionViewed:
@@ -252,6 +279,16 @@ enum AgentStateReducer {
         guard state.unreadCompletion != nil else { return }
         state.unreadCompletion = nil
         effects.append(.unreadChanged)
+    }
+
+    private static func confirmProviderAlive(
+        _ state: inout AgentRuntimeSnapshot,
+        effects: inout [AgentRuntimeEffect]
+    ) {
+        guard state.processState != .running else { return }
+        state.processState = .running
+        state.failureMessage = nil
+        effects.append(.becameAlive)
     }
 }
 

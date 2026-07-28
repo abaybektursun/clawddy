@@ -350,12 +350,22 @@ struct AgentProviderTests {
 
     @Test func adaptersNormalizeProviderSpecificHooksToSharedEvents() throws {
         let event = try rawEvent(name: "PermissionRequest")
-        #expect(CodexProvider().normalize(event) == [.interactionChanged(.permission)])
-        #expect(ClaudeCodeProvider().normalize(event) == [.interactionChanged(.permission)])
+        #expect(CodexProvider().normalize(event) == [.turnInteractionChanged(.permission)])
+        #expect(ClaudeCodeProvider().normalize(event) == [.turnInteractionChanged(.permission)])
 
         let codexFailure = try rawEvent(name: "PostToolUseFailure")
         #expect(CodexProvider().normalize(codexFailure).isEmpty)
         #expect(ClaudeCodeProvider().normalize(codexFailure) == [.turnFailed(nil)])
+
+        let childCompleted = try rawEvent(name: "SubagentStop")
+        #expect(CodexProvider().normalize(childCompleted) == [
+            .turnInteractionChanged(.none),
+            .turnActivityChanged(.reasoning),
+        ])
+        #expect(ClaudeCodeProvider().normalize(childCompleted) == [
+            .turnInteractionChanged(.none),
+            .turnActivityChanged(.reasoning),
+        ])
     }
 
     @Test func capabilityMatrixDoesNotPretendUnavailableCodexTelemetryExists() {

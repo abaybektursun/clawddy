@@ -126,6 +126,7 @@ final class AgentInstance: Identifiable {
     var runtimeErrorMessage: String?
     var launchGeneration: UUID?
     var sessionID: String?
+    var turnState: AgentTurnState = .inactive
     var metadata: AgentSessionMetadata?
     var metadataAvailability: AgentMetadataAvailability = .notStarted
     @ObservationIgnored var lastHookTime: Date?
@@ -184,7 +185,8 @@ final class AgentInstance: Identifiable {
                 failureMessage: failureMessage,
                 runtimeErrorMessage: runtimeErrorMessage,
                 launchGeneration: launchGeneration,
-                sessionID: sessionID)
+                sessionID: sessionID,
+                turnState: turnState)
         }
         set {
             surfaceState = newValue.surfaceState
@@ -198,6 +200,7 @@ final class AgentInstance: Identifiable {
             runtimeErrorMessage = newValue.runtimeErrorMessage
             launchGeneration = newValue.launchGeneration
             sessionID = newValue.sessionID
+            turnState = newValue.turnState
         }
     }
 }

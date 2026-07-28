@@ -1463,7 +1463,6 @@ extension AppDelegate {
                     self?.agentWorkspaceModel.selectedAgentID != nil
                 })
             let window = makeAgentWorkspaceWindow(controller: controller)
-            window.firstMouseSafeViews = [navigationView, agentListView]
             window.onFirstResponderChanged = { [weak detailVC] in
                 detailVC?.workspaceFirstResponderDidChange()
             }

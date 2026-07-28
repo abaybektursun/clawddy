@@ -124,21 +124,29 @@ struct AgentStateReducerTests {
         #expect(secondResult.effects == [.completed, .unreadChanged])
     }
 
-    @Test func orderedEffectsPreserveAliveBeforePermission() {
+    @Test func turnConfirmationPrecedesPermissionAttention() {
         let generation = UUID()
         let launching = AgentStateReducer.reduce(
             AgentRuntimeSnapshot(),
             event: .launchRequested(generation: generation)).state
-        let result = AgentStateReducer.reduce(
+        let started = AgentStateReducer.reduce(
             launching,
             event: providerEvent(
                 generation,
+                id: "turn-start",
+                event: .turnStarted(turnID: "turn-1")))
+        #expect(started.effects == [.becameAlive])
+
+        let result = AgentStateReducer.reduce(
+            started.state,
+            event: providerEvent(
+                generation,
                 id: "permission",
-                event: .interactionChanged(.permission)))
+                event: .turnInteractionChanged(.permission)))
 
         #expect(result.state.processState == .running)
         #expect(result.state.interactionState == .permission)
-        #expect(result.effects == [.becameAlive, .waitingForUser])
+        #expect(result.effects == [.waitingForUser])
     }
 
     @Test func authenticationAndInputAreFirstClassAttentionStates() {
@@ -154,12 +162,18 @@ struct AgentStateReducerTests {
         #expect(authentication.state.interactionState == .authentication)
         #expect(authentication.effects == [.waitingForUser])
 
-        let input = AgentStateReducer.reduce(
+        let started = AgentStateReducer.reduce(
             runningState(generation),
             event: providerEvent(
                 generation,
+                id: "turn-start",
+                event: .turnStarted(turnID: "turn-1"))).state
+        let input = AgentStateReducer.reduce(
+            started,
+            event: providerEvent(
+                generation,
                 id: "input",
-                event: .interactionChanged(.input)))
+                event: .turnInteractionChanged(.input)))
         #expect(input.state.interactionState == .input)
         #expect(input.effects == [.waitingForUser])
     }
@@ -240,6 +254,88 @@ struct AgentStateReducerTests {
             compacting,
             event: .compactionExpired(generation: generation))
         #expect(expired.state.activityState == .idle)
+
+        compacting.turnState = .active(turnID: "turn-1")
+        let activeTurnExpired = AgentStateReducer.reduce(
+            compacting,
+            event: .compactionExpired(generation: generation))
+        #expect(activeTurnExpired.state.activityState == .reasoning)
+    }
+
+    @Test func completionIsATerminalBarrierUntilTheNextTurnStarts() {
+        let generation = UUID()
+        var state = AgentStateReducer.reduce(
+            runningState(generation),
+            event: providerEvent(
+                generation,
+                id: "turn-start",
+                event: .turnStarted(turnID: "turn-1"))).state
+        state = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "tool-start",
+                event: .turnActivityChanged(.executing))).state
+        state = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "turn-complete",
+                event: .turnCompleted(turnID: "turn-1"),
+                viewed: true)).state
+
+        let lateChildEvent = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "late-subagent-stop",
+                event: .turnActivityChanged(.reasoning),
+                viewed: true))
+        #expect(lateChildEvent.state.activityState == .idle)
+        #expect(lateChildEvent.state.turnState == .inactive)
+        #expect(lateChildEvent.effects.isEmpty)
+
+        let nextTurn = AgentStateReducer.reduce(
+            lateChildEvent.state,
+            event: providerEvent(
+                generation,
+                id: "next-turn",
+                event: .turnStarted(turnID: "turn-2"),
+                viewed: true))
+        #expect(nextTurn.state.activityState == .reasoning)
+        #expect(nextTurn.state.turnState == .active(turnID: "turn-2"))
+    }
+
+    @Test func subordinateHooksCannotConfirmOrResurrectAProviderProcess() {
+        let generation = UUID()
+        let launching = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
+        let prematureChildEvent = AgentStateReducer.reduce(
+            launching,
+            event: providerEvent(
+                generation,
+                id: "tool-before-turn",
+                event: .turnActivityChanged(.executing)))
+        #expect(prematureChildEvent.state.processState == .launching)
+        #expect(prematureChildEvent.state.activityState == .unknown)
+        #expect(prematureChildEvent.effects.isEmpty)
+
+        let exited = AgentStateReducer.reduce(
+            launching,
+            event: providerEvent(
+                generation,
+                id: "exit",
+                event: .providerExited(status: 0))).state
+        let lateChildEvent = AgentStateReducer.reduce(
+            exited,
+            event: providerEvent(
+                generation,
+                id: "tool-after-exit",
+                event: .turnActivityChanged(.executing)))
+        #expect(lateChildEvent.state.processState == .exited)
+        #expect(lateChildEvent.state.turnState == .inactive)
+        #expect(lateChildEvent.effects.isEmpty)
     }
 
     private func runningState(_ generation: UUID) -> AgentRuntimeSnapshot {

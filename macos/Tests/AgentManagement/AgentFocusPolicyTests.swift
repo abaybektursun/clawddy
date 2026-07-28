@@ -43,6 +43,19 @@ struct AgentFocusPolicyTests {
             targetsSafeRegion: true))
     }
 
+    @Test @MainActor func safeActivationRegionsOwnTheirEntireViewHierarchy() {
+        final class SafeRegion: NSView, AgentActivationClickSafeRegion {}
+
+        let safeRegion = SafeRegion()
+        let control = NSView()
+        safeRegion.addSubview(control)
+        let terminal = NSView()
+
+        #expect(AgentFirstMousePolicy.targetsSafeRegion(startingAt: control))
+        #expect(AgentFirstMousePolicy.targetsSafeRegion(startingAt: safeRegion))
+        #expect(!AgentFirstMousePolicy.targetsSafeRegion(startingAt: terminal))
+    }
+
     @Test func clickingAnAlreadySelectedAgentStillMeansInspect() {
         let id = UUID()
         #expect(AgentSelectionIntent.rowClick(

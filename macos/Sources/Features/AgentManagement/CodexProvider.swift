@@ -73,25 +73,24 @@ struct CodexProvider: AgentProviderAdapter {
     func normalize(_ event: AgentRawProviderEvent) -> [AgentDomainEvent] {
         switch event.hookEventName {
         case "SessionStart":
-            return [
-                .sessionStarted(
-                    sessionID: event.sessionID,
-                    model: event.model,
-                    permissionMode: event.permissionMode),
-                .activityChanged(.idle),
-            ]
+            return [.sessionStarted(
+                sessionID: event.sessionID,
+                model: event.model,
+                permissionMode: event.permissionMode)]
         case "UserPromptSubmit":
-            return [.interactionChanged(.none), .turnStarted(turnID: event.turnID)]
-        case "PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop":
-            return [.interactionChanged(.none), .activityChanged(.executing)]
+            return [.turnStarted(turnID: event.turnID)]
+        case "PreToolUse", "SubagentStart":
+            return [.turnInteractionChanged(.none), .turnActivityChanged(.executing)]
+        case "PostToolUse", "SubagentStop":
+            return [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)]
         case "PermissionRequest":
-            return [.interactionChanged(.permission)]
+            return [.turnInteractionChanged(.permission)]
         case "Stop":
-            return [.interactionChanged(.none), .turnCompleted(turnID: event.turnID)]
+            return [.turnCompleted(turnID: event.turnID)]
         case "PreCompact":
-            return [.activityChanged(.compacting)]
+            return [.turnActivityChanged(.compacting)]
         case "PostCompact":
-            return [.activityChanged(.idle)]
+            return [.turnActivityChanged(.reasoning)]
         case "ProviderExited":
             return [.providerExited(status: event.exitStatus ?? -1)]
         default:

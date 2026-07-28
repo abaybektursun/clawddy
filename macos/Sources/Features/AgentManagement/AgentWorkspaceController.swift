@@ -1,11 +1,14 @@
 import AppKit
 import SwiftUI
 
+protocol AgentActivationClickSafeRegion: AnyObject {}
+
 /// The navigation and list panes contain safe, reversible controls, so they
 /// opt into receiving the click that activates an inactive window. The
 /// terminal pane deliberately does not use this host: its first activation
 /// click must never be encoded as terminal input.
-final class AgentInteractiveHostingView<Content: View>: NSHostingView<Content> {
+final class AgentInteractiveHostingView<Content: View>: NSHostingView<Content>,
+    AgentActivationClickSafeRegion {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
@@ -15,11 +18,6 @@ final class AgentInteractiveHostingView<Content: View>: NSHostingView<Content> {
 final class AgentWorkspaceWindow: NSWindow {
     var onFirstResponderChanged: (() -> Void)?
 
-    /// Regions whose controls are safe to operate with the click that makes
-    /// this window key. The terminal is intentionally never registered: an
-    /// activation click must not become terminal input.
-    var firstMouseSafeViews: [NSView] = []
-
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
         let accepted = super.makeFirstResponder(responder)
         if accepted { onFirstResponderChanged?() }
@@ -27,10 +25,11 @@ final class AgentWorkspaceWindow: NSWindow {
     }
 
     override func sendEvent(_ event: NSEvent) {
-        let targetsSafeRegion = firstMouseSafeViews.contains { view in
-            guard view.window === self, !view.isHiddenOrHasHiddenAncestor else { return false }
-            return view.bounds.contains(view.convert(event.locationInWindow, from: nil))
-        }
+        let targetsSafeRegion = contentView.map { contentView in
+            let location = contentView.convert(event.locationInWindow, from: nil)
+            return AgentFirstMousePolicy.targetsSafeRegion(
+                startingAt: contentView.hitTest(location))
+        } ?? false
         if AgentFirstMousePolicy.shouldPromoteWindow(
             eventType: event.type,
             windowIsKey: isKeyWindow,
@@ -47,6 +46,17 @@ final class AgentWorkspaceWindow: NSWindow {
 }
 
 enum AgentFirstMousePolicy {
+    static func targetsSafeRegion(startingAt view: NSView?) -> Bool {
+        var candidate = view
+        while let view = candidate {
+            if view is AgentActivationClickSafeRegion {
+                return true
+            }
+            candidate = view.superview
+        }
+        return false
+    }
+
     static func shouldPromoteWindow(
         eventType: NSEvent.EventType,
         windowIsKey: Bool,

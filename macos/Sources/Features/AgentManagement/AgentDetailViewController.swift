@@ -44,7 +44,8 @@ final class AgentDetailViewController: NSViewController {
         view = NSView()
         view.wantsLayer = true
 
-        let headerView = NSHostingView(rootView: AgentDetailHeaderView(model: headerModel))
+        let headerView = AgentInteractiveHostingView(
+            rootView: AgentDetailHeaderView(model: headerModel))
         headerView.translatesAutoresizingMaskIntoConstraints = false
         headerView.setContentHuggingPriority(.required, for: .vertical)
         headerView.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -56,7 +57,8 @@ final class AgentDetailViewController: NSViewController {
         ])
         headerHosting = headerView
 
-        let placeholder = NSHostingView(rootView: AgentPlaceholderView(model: headerModel))
+        let placeholder = AgentInteractiveHostingView(
+            rootView: AgentPlaceholderView(model: headerModel))
         placeholder.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(placeholder)
         NSLayoutConstraint.activate([
