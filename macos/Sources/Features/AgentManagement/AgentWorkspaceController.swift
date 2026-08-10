@@ -66,6 +66,16 @@ enum AgentFirstMousePolicy {
     }
 }
 
+enum AgentKeyEventRoutingPolicy {
+    /// A field editor is an NSTextView temporarily owned by NSWindow, not the
+    /// visible NSTextField. These events must stay in AppKit's responder chain
+    /// even when a sheet or auxiliary panel temporarily leaves mainWindow nil.
+    static func isTextEditingResponder(_ responder: NSResponder?) -> Bool {
+        guard let textView = responder as? NSTextView else { return false }
+        return textView.isFieldEditor || textView.isEditable
+    }
+}
+
 /// Three-column workspace: navigation, agent list, and terminal detail.
 final class AgentWorkspaceController: NSSplitViewController {
 

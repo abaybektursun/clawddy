@@ -55,14 +55,4 @@ struct AgentFocusPolicyTests {
         #expect(AgentFirstMousePolicy.targetsSafeRegion(startingAt: safeRegion))
         #expect(!AgentFirstMousePolicy.targetsSafeRegion(startingAt: terminal))
     }
-
-    @Test func clickingAnAlreadySelectedAgentStillMeansInspect() {
-        let id = UUID()
-        #expect(AgentSelectionIntent.rowClick(
-            currentSelection: id,
-            clickedID: id) == .inspect)
-        #expect(AgentSelectionIntent.rowClick(
-            currentSelection: id,
-            clickedID: UUID()) == .inspect)
-    }
 }

@@ -45,11 +45,13 @@ or process model.
 | `AgentSessionStore.swift`         | Validated provider-tagged session and fork persistence plus legacy Claude migration                              |
 | `AgentEnvironmentResolver.swift`  | Asynchronous login-shell PATH discovery with timeout and deterministic fallback                                   |
 | `AgentEventJournal.swift`         | Complete-record parsing across append bursts, partial writes, and journal replacement                             |
+| `AgentProviderEventLedger.swift`  | Exact-once provider-fact delivery within one launch generation                                                     |
 | `AgentMetadataRuntime.swift`      | Per-agent Claude settings overlay, status-line forwarding, and atomic metadata publication                        |
 | `AgentSessionMetadata.swift`      | Provider-neutral metadata plus strict decoding and presentation-safe normalization of official telemetry fields   |
 | `AgentMetadataViews.swift`        | Compact list summary, persistent detail disclosure, exact inspector, freshness, and accessibility                 |
 | `AgentStateReducer.swift`         | Pure surface/process/activity/interaction/telemetry transitions and ordered semantic effects                     |
 | `AgentStateAggregation.swift`     | Deterministic severity-first descendant-state propagation to tasks and projects                                   |
+| `AgentWorkspacePolicies.swift`    | Shared urgency, focus, drop-index, hierarchy-move, drag payload, and undo transaction policies                    |
 | `AgentTerminalBridge.swift`       | Ordered event ingestion, runtime state, surface lifecycle, notifications, persistence, and aggregate state        |
 | `AgentTerminalHost.swift`         | `TerminalViewModel` and `TerminalViewDelegate` adapter for one agent surface tree                                 |
 | `AgentDetailViewController.swift` | Creates, retains, switches, focuses, and removes per-agent terminal hosts and surfaces                            |
@@ -57,7 +59,8 @@ or process model.
 | `AgentWorkspaceViews.swift`       | Project/task navigation, filtered agent list, editing, empty states, and accessibility                            |
 | `AgentCommandPaletteView.swift`   | Converts agents into stable, semantically searchable shared-palette commands                                      |
 | `AgentSearchPanel.swift`          | Floating AppKit panel, compatibility material, positioning, and reduced-motion behavior                           |
-| `BridgeMetrics.swift`             | Snapshot-based, low-overhead counters and main-thread stall diagnostics                                           |
+| `NativeTextField.swift`           | AppKit field-editor boundary for native editing, paste, undo, IME, and keyboard commands                          |
+| `BridgeMetrics.swift`             | Opt-in snapshot counters and main-thread stall diagnostics for the production binary                              |
 | `AppDelegate.swift`               | Composition root, menus, status item, global shortcut, workspace ownership, routing, and Dock badge               |
 
 The composition is deliberately one-way:
@@ -79,10 +82,38 @@ AppDelegate
 Views issue user actions through configuration and bridge methods. They do not
 read hook files, create Ghostty surfaces directly, or persist derived state.
 
+Interactive provider surfaces inherit the account environment needed for
+authentication, proxies, and provider configuration. At the PTY boundary,
+`AgentTerminalEnvironmentPolicy` removes presentation opt-outs such as
+`NO_COLOR` before the provider starts. Ghostty remains authoritative for
+terminal capability variables such as `TERM` and `COLORTERM`; an automation
+environment inherited by the app must not silently downgrade terminal output.
+
 Agent presentation order is configuration order: project order, then task
 order, then agent insertion order. Filtering preserves that relative order.
 Runtime state, unread state, metadata, activation, and renaming never change a
 row's position; urgency is communicated through status styling and smart scopes.
+Projects, tasks, and agents move through one pure hierarchy command. A move
+validates destination identity and duplicate-name constraints, mutates a copy,
+then atomically persists the replacement. It returns the exact inverse command
+for AppKit Undo/Redo. Drag views never maintain a parallel temporary order.
+
+A deliberate project or task selection reveals one descendant through the
+shared importance policy: attention severity first, then the user's last
+explicitly inspected descendant, latest authoritative display transition,
+configuration rank, and UUID fallback. Runtime transitions never invoke this
+policy on their own, so an urgent agent cannot steal focus. Reveal selection
+does not start work or acknowledge completion.
+
+Workspace selection is one transaction, not a collection of independently
+observed view properties. `AgentWorkspaceSelectionState` owns scope and agent
+identity together, and `AgentWorkspaceSelectionReducer` is the only boundary
+that commits a user selection, reveal, or visibility reconciliation. Each
+action returns at most one presentation intent for AppKit to execute after the
+state commit. SwiftUI bindings forward actions to that boundary; `onChange`
+observers and row gestures must not infer duplicate selection or focus work.
+This keeps project, task, and agent switching ordered even when filtering,
+configuration reloads, or window activation occur in the same run-loop turn.
 
 Completion acknowledgment is reducer-owned persisted state, not a visual badge
 override. A completion becomes unread only while its agent is not being viewed.
@@ -96,8 +127,10 @@ Keyboard focus has a matching three-part invariant: the workspace window must
 be key, the surface must be the selected surface, and that surface must be the
 actual AppKit first responder. `AgentWorkspaceWindow` reconciles Ghostty's
 logical focus after every accepted responder transition, including transitions
-to an `NSTextView` field editor created for a SwiftUI `TextField`. This prevents
-terminal key equivalents such as Command-V from bypassing native text editing.
+to the window-owned `NSTextView` field editor behind `NSTextField` and
+`NSSearchField`. Application-level key routing exempts an active field editor
+even while a sheet or panel has no main window. This preserves Command-V,
+selection, Undo/Redo, input methods, and the standard Cocoa command selectors.
 Only the safe navigation and agent-list hosting views accept the inactive
 window's first mouse event; the terminal intentionally retains Ghostty's
 suppression behavior so an activation click cannot become PTY input.
@@ -178,7 +211,9 @@ forks retain the source agent's mode.
 
 Configuration writes are atomic and UI mutations are transactional: a failed
 replacement restores the previous observable model and surfaces a configuration
-error. Project/task deletion is persisted before related runtimes are torn down.
+error. Reordering and cross-parent moves use the same transaction boundary and
+register their returned inverse with `UndoManager`. Project/task deletion is
+persisted before related runtimes are torn down.
 The directory watcher compares raw file data with the last successfully written
 or loaded snapshot so it ignores the app's own writes and reloads actual external
 edits.
@@ -194,12 +229,23 @@ owners. `AgentRuntimeSnapshot` contains five orthogonal dimensions:
 | Process       | not started, launching, running, exited                      | launcher plus provider events |
 | Activity      | unknown, idle, reasoning, executing, compacting              | normalized provider events    |
 | Interaction   | none, permission, input, authentication                      | normalized provider events    |
-| Telemetry     | not started, awaiting, live, unavailable with an explanation | lifecycle transport           |
+| Telemetry     | not started, awaiting, live, delayed, unavailable with an explanation | lifecycle transport    |
 
 Every launch receives a new generation UUID. Surface callbacks, timeout events,
 and hook records carry that generation; the reducer rejects stale events from a
 previous process. Provider-specific adapters normalize raw hook names into the
 shared domain vocabulary before reduction.
+
+The provider-event ledger is the exact-once ingress barrier for the current
+generation. Persisted byte offsets make normal reads efficient, while stable
+event IDs prevent a truncated or replaced journal from replaying an older start
+fact after a completion. The ledger resets only when the launch generation
+changes and is intentionally not copied through reducer snapshots.
+
+Telemetry freshness is confidence, not guessed activity. If an active turn has
+no provider fact for two minutes, presentation becomes **Status Delayed** while
+the reducer retains the last confirmed activity. A later provider fact restores
+live confidence. The timeout never manufactures idle or completion.
 
 Launch failures and runtime failures are separate facts. A provider executable
 that cannot start produces **Couldn't Start**; a failure reported by an already
@@ -255,7 +301,9 @@ The hook depends only on macOS system tools. For each invocation it:
 3. Adds a stable event ID plus the provider and launch generation supplied by
    the launcher.
 4. Atomically updates the provider-tagged session binding and appends one JSONL
-   record while holding a bounded macOS `lockf` lock for that agent.
+   record while holding the macOS `lockf` lock for that agent. The append waits
+   for the short kernel-managed critical section instead of timing out and
+   silently dropping a lifecycle fact.
 
 ```text
 ~/.config/ghostty-agents/status/<agent-uuid>.session.json
@@ -274,10 +322,11 @@ persisted byte offset and stop at the last complete newline, so cost follows new
 events rather than total history and a concurrent partial write is never decoded.
 Every complete record is applied sequentially on the main thread and the
 resulting offset is persisted. Once an acknowledged prefix reaches one MiB, the
-bridge compacts it under the same kernel-managed per-agent lock used by hooks, retains any
-concurrent suffix, resets the offset, and immediately repolls. A 30-second
-heartbeat checks for process exits that surface notifications missed; it is not
-the primary ingestion path.
+bridge compacts it under the same kernel-managed per-agent lock used by hooks,
+retains any concurrent suffix, resets the offset, and immediately repolls. A
+10-second reconciliation heartbeat also polls journals and checks process exits,
+so filesystem notifications accelerate state changes but do not own correctness.
+This fallback reads authoritative records; it never infers a completion.
 
 Tagged records must use the supported event schema. Unknown schema versions and
 provider/generation mismatches are logged and skipped while their complete byte
@@ -482,7 +531,8 @@ Startup order:
 4. Recreate inactive, provider-specific runtime instances.
 5. Start config and status directory watchers and consume unseen complete events.
 6. Probe provider installation/auth health away from the main actor.
-7. Start the process-exit heartbeat and diagnostics.
+7. Start journal/process reconciliation; diagnostics start only when
+   `GHOSTTY_AGENT_METRICS=1` is present in the production process environment.
 
 Provider hook installation remains a first-launch action, not a startup action.
 
@@ -501,6 +551,8 @@ hosting Ghostty's terminal view.
 - System-standard chrome follows the application appearance; terminal content
   retains the configured terminal appearance.
 - Navigation, search, editing, and terminal controls participate in the key-view loop.
+- Editable fields use AppKit's shared field editor; drag payloads resolve into
+  durable hierarchy commands with Undo/Redo rather than view-local reordering.
 - Selection changes detail context but never launches a process or steals focus.
 - Double-click, Return, Start/Retry, Focus Terminal, and Command-Return are
   explicit activation paths.

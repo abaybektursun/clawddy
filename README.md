@@ -77,11 +77,11 @@ The built application itself has a macOS 14 deployment target.
 
 ```sh
 macos/build.nu --scheme Ghostty --configuration ReleaseLocal --action build
-open macos/build/ReleaseLocal/Ghostty.app
+open /Volumes/Xcode/GhosttyBuilds/ghostty/macos/products/ReleaseLocal/Ghostty.app
 ```
 
 When shared Zig code outside `macos/` changes, run
-`zig build -Demit-macos-app=false` before the macOS build. See
+`./build.nu -Demit-macos-app=false` before the macOS build. See
 [Developing Ghostty](HACKING.md) for tests, linting, and toolchain setup.
 
 ### Agent config

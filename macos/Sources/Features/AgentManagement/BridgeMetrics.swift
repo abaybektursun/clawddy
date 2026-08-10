@@ -12,6 +12,7 @@ final class BridgeMetrics {
 
     private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "Metrics")
     private let queue = DispatchQueue(label: "clawddy.metrics", qos: .utility)
+    private let isEnabled = ProcessInfo.processInfo.environment["GHOSTTY_AGENT_METRICS"] == "1"
 
     // Atomic counters (touched from any thread, mutated under queue)
     private var watcherFires = 0
@@ -58,30 +59,36 @@ final class BridgeMetrics {
 
     // MARK: - Public recording API (call from any thread; cheap)
 
-    func recordWatcherFire() { queue.async { self.watcherFires += 1 } }
-    func recordPollFired() { queue.async { self.pollsFired += 1 } }
-    func recordPollThrottled() { queue.async { self.pollsThrottled += 1 } }
-    func recordConfigWatcherFire() { queue.async { self.configWatcherFires += 1 } }
-    func recordConfigReload() { queue.async { self.configReloads += 1 } }
-    func recordConfigReloadDeduped() { queue.async { self.configReloadsDeduped += 1 } }
-    func recordProcessExitNotif() { queue.async { self.processExitNotifs += 1 } }
-    func recordHeartbeat() { queue.async { self.heartbeats += 1 } }
-    func recordAggregateChange() { queue.async { self.aggregateChanges += 1 } }
-    func recordDockBadgeUpdate() { queue.async { self.dockBadgeUpdates += 1 } }
+    func recordWatcherFire() { record { $0.watcherFires += 1 } }
+    func recordPollFired() { record { $0.pollsFired += 1 } }
+    func recordPollThrottled() { record { $0.pollsThrottled += 1 } }
+    func recordConfigWatcherFire() { record { $0.configWatcherFires += 1 } }
+    func recordConfigReload() { record { $0.configReloads += 1 } }
+    func recordConfigReloadDeduped() { record { $0.configReloadsDeduped += 1 } }
+    func recordProcessExitNotif() { record { $0.processExitNotifs += 1 } }
+    func recordHeartbeat() { record { $0.heartbeats += 1 } }
+    func recordAggregateChange() { record { $0.aggregateChanges += 1 } }
+    func recordDockBadgeUpdate() { record { $0.dockBadgeUpdates += 1 } }
 
-    func recordMutActivityState() { queue.async { self.mutActivityState += 1 } }
-    func recordMutProcessState() { queue.async { self.mutProcessState += 1 } }
-    func recordMutIsUnread() { queue.async { self.mutIsUnread += 1 } }
-    func recordMutAgentName() { queue.async { self.mutAgentName += 1 } }
-    func recordMutLastEventContent() { queue.async { self.mutLastEventContent += 1 } }
-    func recordMutLastAggregateState() { queue.async { self.mutLastAggregateState += 1 } }
-    func recordMutAgentsDict() { queue.async { self.mutAgentsDict += 1 } }
+    func recordMutActivityState() { record { $0.mutActivityState += 1 } }
+    func recordMutProcessState() { record { $0.mutProcessState += 1 } }
+    func recordMutIsUnread() { record { $0.mutIsUnread += 1 } }
+    func recordMutAgentName() { record { $0.mutAgentName += 1 } }
+    func recordMutLastEventContent() { record { $0.mutLastEventContent += 1 } }
+    func recordMutLastAggregateState() { record { $0.mutLastAggregateState += 1 } }
+    func recordMutAgentsDict() { record { $0.mutAgentsDict += 1 } }
 
-    func recordSurfaceCreated() { queue.async { self.surfacesCreated += 1 } }
-    func recordSurfaceDestroyedExit() { queue.async { self.surfacesDestroyedExit += 1 } }
-    func recordSurfaceDestroyedDelete() { queue.async { self.surfacesDestroyedDelete += 1 } }
+    func recordSurfaceCreated() { record { $0.surfacesCreated += 1 } }
+    func recordSurfaceDestroyedExit() { record { $0.surfacesDestroyedExit += 1 } }
+    func recordSurfaceDestroyedDelete() { record { $0.surfacesDestroyedDelete += 1 } }
+
+    private func record(_ mutation: @escaping (BridgeMetrics) -> Void) {
+        guard isEnabled else { return }
+        queue.async { mutation(self) }
+    }
 
     func recordApplyRawEvents(durationMs: Double) {
+        guard isEnabled else { return }
         queue.async {
             self.applyRawEventsCalls += 1
             self.applyRawEventsTotalMs += durationMs
@@ -91,6 +98,7 @@ final class BridgeMetrics {
 
     /// Called only from main thread (by ping handler).
     func recordMainThreadPing() {
+        guard isEnabled else { return }
         let now = Date()
         queue.async {
             let delta = now.timeIntervalSince(self.lastMainPing)
@@ -102,6 +110,7 @@ final class BridgeMetrics {
     // MARK: - Lifecycle
 
     func start() {
+        guard isEnabled else { return }
         guard flushTimer == nil, pingTimer == nil else { return }
 
         // Periodic flush every 5s
@@ -131,6 +140,7 @@ final class BridgeMetrics {
     /// Update values owned by the bridge. Callers pass immutable snapshots so
     /// the metrics queue never reaches into main-thread-owned dictionaries.
     func updateSnapshot(agentCount: Int, surfaceCount: Int) {
+        guard isEnabled else { return }
         queue.async {
             self.snapshotAgentCount = agentCount
             self.snapshotSurfaceCount = surfaceCount
@@ -138,6 +148,7 @@ final class BridgeMetrics {
     }
 
     func stop() {
+        guard isEnabled else { return }
         flushTimer?.cancel()
         flushTimer = nil
         pingTimer?.cancel()

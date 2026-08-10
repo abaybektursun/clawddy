@@ -5,12 +5,14 @@
   build settings. It is the source of truth for platform policy and validation.
 - Use `swiftlint` for formatting and linting Swift code.
 - If code outside of `macos/` directory is modified, use
-  `zig build -Demit-macos-app=false` before building the macOS app to update
+  `./build.nu -Demit-macos-app=false` before building the macOS app to update
   the underlying Ghostty library.
 - Use `macos/build.nu` to build the macOS app, do not use `zig build`
   (except to build the underlying library as mentioned above).
-  - Build: `macos/build.nu [--scheme Ghostty] [--configuration Debug] [--action build]`
-  - Output: `macos/build/<configuration>/Ghostty.app` (e.g. `macos/build/Debug/Ghostty.app`)
+  - Build: `macos/build.nu [--scheme Ghostty] [--configuration Release] [--action build]`
+  - Output: `/Volumes/Xcode/GhosttyBuilds/ghostty/macos/products/<configuration>/Ghostty.app`
+  - All products, intermediates, packages, caches, and temporary files are
+    external. The wrapper must fail rather than fall back when the SSD is absent.
 - Run unit tests directly with `macos/build.nu --action test`
 - For Clawddy validation in this workspace, build and run `Release` only. Never
   launch the Debug, ReleaseLocal, preview, or development-mode app.

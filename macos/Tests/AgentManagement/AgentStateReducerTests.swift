@@ -209,6 +209,53 @@ struct AgentStateReducerTests {
         #expect(replay.effects.isEmpty)
     }
 
+    @Test func delayedTelemetryChangesConfidenceWithoutInventingActivity() {
+        let generation = UUID()
+        var state = runningState(generation)
+        state = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "turn-start",
+                event: .turnStarted(turnID: "turn-1"))).state
+        state.activityState = .executing
+
+        let delayed = AgentStateReducer.reduce(
+            state,
+            event: .telemetryDelayed(generation: generation)).state
+        #expect(delayed.telemetryHealth == .delayed)
+        #expect(delayed.activityState == .executing)
+        #expect(delayed.turnState == .active(turnID: "turn-1"))
+
+        let recovered = AgentStateReducer.reduce(
+            delayed,
+            event: providerEvent(
+                generation,
+                id: "tool-finished",
+                event: .turnActivityChanged(.reasoning))).state
+        #expect(recovered.telemetryHealth == .live)
+        #expect(recovered.activityState == .reasoning)
+    }
+
+    @Test func freshnessPolicyRequiresAnActiveTurnAndElapsedThreshold() {
+        let now = Date()
+        #expect(AgentTelemetryFreshnessPolicy.isDelayed(
+            turnState: .active(turnID: "turn"),
+            lastProviderEventAt: now.addingTimeInterval(-120),
+            now: now,
+            threshold: 120))
+        #expect(!AgentTelemetryFreshnessPolicy.isDelayed(
+            turnState: .active(turnID: "turn"),
+            lastProviderEventAt: now.addingTimeInterval(-119),
+            now: now,
+            threshold: 120))
+        #expect(!AgentTelemetryFreshnessPolicy.isDelayed(
+            turnState: .inactive,
+            lastProviderEventAt: now.addingTimeInterval(-1_000),
+            now: now,
+            threshold: 120))
+    }
+
     @Test func timeoutDegradesTelemetryAndFirstEventRecovers() {
         let generation = UUID()
         var state = AgentStateReducer.reduce(

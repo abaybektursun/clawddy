@@ -43,7 +43,7 @@ struct AgentEntry: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
-struct AgentProject: Codable, Identifiable, Sendable {
+struct AgentProject: Codable, Identifiable, Equatable, Sendable {
     let id: UUID
     var name: String
     var tasks: [AgentTask]
@@ -68,7 +68,7 @@ struct AgentProject: Codable, Identifiable, Sendable {
     }
 }
 
-struct AgentTask: Codable, Identifiable, Sendable {
+struct AgentTask: Codable, Identifiable, Equatable, Sendable {
     let id: UUID
     var name: String
     var agents: [AgentEntry]
@@ -534,6 +534,23 @@ class AgentConfig {
             }
         }
         return false
+    }
+
+    /// Applies one hierarchy move as a durable transaction. The returned
+    /// command restores the exact pre-move location and is suitable for undo.
+    @discardableResult
+    func move(_ move: AgentWorkspaceMove) -> AgentWorkspaceMove? {
+        let previous = projects
+        let result = AgentWorkspaceMutation.apply(move, to: &projects)
+        guard case .success(let inverse) = result else {
+            projects = previous
+            return nil
+        }
+        guard save() else {
+            projects = previous
+            return nil
+        }
+        return inverse
     }
 
     /// Restores the immutable provider identity after an external edit attempts

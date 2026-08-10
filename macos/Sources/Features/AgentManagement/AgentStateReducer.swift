@@ -38,6 +38,7 @@ enum AgentTelemetryHealth: Equatable, Sendable {
     case notStarted
     case awaiting
     case live
+    case delayed
     case unavailable(String)
 }
 
@@ -82,6 +83,7 @@ enum AgentRuntimeEvent: Equatable, Sendable {
         event: AgentDomainEvent,
         isViewed: Bool)
     case compactionExpired(generation: UUID)
+    case telemetryDelayed(generation: UUID)
     case surfaceDied(generation: UUID?)
     case completionViewed
 }
@@ -256,6 +258,15 @@ enum AgentStateReducer {
                 }
             }
 
+        case .telemetryDelayed(let generation):
+            guard state.launchGeneration == generation,
+                  state.processState == .running,
+                  case .active = state.turnState,
+                  state.telemetryHealth == .live
+            else { break }
+            // Confidence changed; the last confirmed activity fact did not.
+            state.telemetryHealth = .delayed
+
         case .surfaceDied(let generation):
             if let generation, state.launchGeneration != generation { break }
             state.surfaceState = .closed
@@ -289,6 +300,20 @@ enum AgentStateReducer {
         state.processState = .running
         state.failureMessage = nil
         effects.append(.becameAlive)
+    }
+}
+
+enum AgentTelemetryFreshnessPolicy {
+    static func isDelayed(
+        turnState: AgentTurnState,
+        lastProviderEventAt: Date?,
+        now: Date,
+        threshold: TimeInterval
+    ) -> Bool {
+        guard case .active = turnState,
+              let lastProviderEventAt
+        else { return false }
+        return now.timeIntervalSince(lastProviderEventAt) >= threshold
     }
 }
 

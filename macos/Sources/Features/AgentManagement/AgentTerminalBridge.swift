@@ -9,7 +9,7 @@ private let agentPollThrottle: TimeInterval = 0.2
 
 // MARK: - Display State (derived, never stored)
 
-enum DisplayState: Equatable {
+enum DisplayState: Equatable, Sendable {
     case inactive
     case launching
     case idle
@@ -21,6 +21,7 @@ enum DisplayState: Equatable {
     case authentication
     case error
     case compacting
+    case statusDelayed
     case statusUnavailable
     case failed
     case dead
@@ -33,7 +34,8 @@ enum DisplayState: Equatable {
         case .finished:     return .yellow
         case .thinking:     return .blue
         case .working:      return .green
-        case .permission, .input, .authentication, .statusUnavailable: return .orange
+        case .permission, .input, .authentication, .statusDelayed,
+                .statusUnavailable: return .orange
         case .error, .failed: return .red
         case .compacting:   return .purple
         case .dead:         return .secondary.opacity(0.3)
@@ -46,7 +48,7 @@ enum DisplayState: Equatable {
         case .thinking:     return .blue
         case .working:      return .green
         case .permission, .input, .authentication: return .orange
-        case .statusUnavailable: return .orange
+        case .statusDelayed, .statusUnavailable: return .orange
         case .error, .failed: return .red
         case .compacting:   return .purple
         default:            return .accentColor
@@ -66,6 +68,7 @@ enum DisplayState: Equatable {
         case .authentication: return "Sign In Required"
         case .error:        return "Needs Attention"
         case .compacting:   return "Optimizing Context"
+        case .statusDelayed: return "Status Delayed"
         case .statusUnavailable: return "Status Unavailable"
         case .failed:       return "Couldn't Start"
         case .dead:         return "Exited"
@@ -85,6 +88,7 @@ enum DisplayState: Equatable {
         case .authentication: return "person.crop.circle.badge.exclamationmark"
         case .error:        return "xmark.circle.fill"
         case .compacting:   return "arrow.triangle.2.circlepath"
+        case .statusDelayed: return "clock.badge.exclamationmark"
         case .statusUnavailable: return "exclamationmark.circle"
         case .failed:       return "exclamationmark.triangle.fill"
         case .dead:         return "xmark"
@@ -131,6 +135,11 @@ final class AgentInstance: Identifiable {
     var metadataAvailability: AgentMetadataAvailability = .notStarted
     @ObservationIgnored var lastHookTime: Date?
     @ObservationIgnored var launchTime: Date?
+    /// Monotonic presentation evidence used only when the user deliberately
+    /// asks the workspace to choose among equally urgent agents. It never
+    /// changes list order or steals focus as runtime state evolves.
+    @ObservationIgnored var lastAuthoritativeChange: Date?
+    @ObservationIgnored var providerEventLedger = AgentProviderEventLedger()
 
     var displayState: DisplayState {
         if failureMessage != nil { return .failed }
@@ -152,6 +161,7 @@ final class AgentInstance: Identifiable {
         case .open: break
         }
         if processState == .exited { return .dead }
+        if telemetryHealth == .delayed { return .statusDelayed }
         switch activityState {
         case .unknown:
             if case .unavailable = telemetryHealth { return .statusUnavailable }
@@ -171,6 +181,9 @@ final class AgentInstance: Identifiable {
     }
 
     var isUnread: Bool { unreadCompletion != nil }
+    var isStarting: Bool {
+        surfaceState == .opening && processState == .launching
+    }
 
     var runtimeSnapshot: AgentRuntimeSnapshot {
         get {
@@ -322,7 +335,8 @@ private struct AgentLaunchCoordinator: Sendable {
         case .failure(let issue): integrationIssue = issue.localizedDescription
         }
 
-        var environment = prepared.environment
+        var environment = AgentTerminalEnvironmentPolicy.explicitEnvironment(
+            from: prepared.environment)
         environment["HOME"] = AgentConfig.accountHomeDirectory.path
         environment["PATH"] = request.environmentPath
         environment["GHOSTTY_AGENT_STATUS_DIR"] = AgentConfig.statusDir.path
@@ -337,6 +351,7 @@ private struct AgentLaunchCoordinator: Sendable {
         }.joined(separator: "\n")
         let script = """
             #!/bin/zsh -l
+            \(AgentTerminalEnvironmentPolicy.shellPrelude)
             \(exports)
             printf '\\033]2;%s\\007' \(AgentHookRuntime.shellQuote(name))
             clear
@@ -475,17 +490,16 @@ final class AgentBridge {
         startStatusDirWatcher()
 
         // Heartbeat timer: infrequent fallback for edge cases (crashes without notification)
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.heartbeat()
             }
         }
 
-        // Surgical metrics for diagnosing freezes
-        #if DEBUG
+        // Opt-in diagnostics are available in the exact Release binary without
+        // imposing queue traffic on ordinary production runs.
         BridgeMetrics.shared.start()
         updateMetricsSnapshot()
-        #endif
 
         // Consume any events that landed after the last persisted offset.
         requestStatusPoll(after: 0)
@@ -986,16 +1000,41 @@ final class AgentBridge {
         }
     }
 
-    // MARK: - Heartbeat (infrequent fallback)
+    // MARK: - Heartbeat (infrequent correctness fallback)
 
     private func heartbeat() {
         guard !isTerminating else { return }
         BridgeMetrics.shared.recordHeartbeat()
 
+        // Directory notifications accelerate updates but do not own
+        // correctness. This heals dropped/coalesced FSEvents without
+        // manufacturing any lifecycle state.
+        requestStatusPoll(after: 0)
+
         // Check for process exits that the notification might have missed (e.g., crashes)
         for (id, surface) in surfaceViews where surface.processExited {
             handleSurfaceDeath(id: id)
         }
+    }
+
+    /// Evaluates telemetry confidence only after a complete journal
+    /// reconciliation. This prevents a stale heartbeat from briefly replacing a
+    /// completion event that is already on disk but has not been applied yet.
+    private func updateTelemetryFreshness(now: Date = Date()) {
+        var confidenceChanged = false
+        for agent in agents.values {
+            guard let generation = agent.launchGeneration,
+                  AgentTelemetryFreshnessPolicy.isDelayed(
+                    turnState: agent.turnState,
+                    lastProviderEventAt: agent.lastHookTime,
+                    now: now,
+                    threshold: 120)
+            else { continue }
+            let oldHealth = agent.telemetryHealth
+            apply(.telemetryDelayed(generation: generation), to: agent)
+            confidenceChanged = confidenceChanged || oldHealth != agent.telemetryHealth
+        }
+        if confidenceChanged { updateAggregate() }
     }
 
     // MARK: - Event-Driven Polling (triggered by file watcher only)
@@ -1149,13 +1188,21 @@ final class AgentBridge {
 
                 let oldSnapshot = agent.runtimeSnapshot
                 var effects: [AgentRuntimeEffect] = []
+                var appliedNewProviderFact = false
                 for (domainIndex, domainEvent) in domainEvents.enumerated() {
+                    let providerEventID = rawEvent.eventID
+                        .map { "\($0):\(domainIndex)" }
+                        ?? "\(eventGeneration.uuidString):\(batch.endOffset):\(recordIndex):\(domainIndex)"
+                    guard agent.providerEventLedger.shouldApply(
+                        eventID: providerEventID,
+                        generation: eventGeneration)
+                    else { continue }
+                    appliedNewProviderFact = true
                     effects += apply(
                         .provider(
                             generation: eventGeneration,
                             provider: eventProvider,
-                            eventID: rawEvent.eventID
-                                ?? "\(eventGeneration.uuidString):\(batch.endOffset):\(recordIndex):\(domainIndex)",
+                            eventID: providerEventID,
                             event: domainEvent,
                             isViewed: currentlyViewedAgentId == id),
                         to: agent)
@@ -1191,7 +1238,9 @@ final class AgentBridge {
                     launchTimers.removeValue(forKey: id)
                     removeLaunchScript(for: id)
                 }
-                agent.lastHookTime = Date()
+                if appliedNewProviderFact {
+                    agent.lastHookTime = Date()
+                }
                 updateCompactingTimer(for: agent)
 
                 let newDisplay = agent.displayState
@@ -1245,6 +1294,7 @@ final class AgentBridge {
 
     private func finishStatusPoll() {
         pollInFlight = false
+        updateTelemetryFreshness()
         guard pollAgainNeeded else { return }
         pollAgainNeeded = false
         requestStatusPoll(after: 0)
@@ -1334,8 +1384,12 @@ final class AgentBridge {
         to agent: AgentInstance
     ) -> [AgentRuntimeEffect] {
         let old = agent.runtimeSnapshot
+        let oldDisplayState = agent.displayState
         let result = AgentStateReducer.reduce(old, event: event)
         agent.runtimeSnapshot = result.state
+        if agent.displayState != oldDisplayState {
+            agent.lastAuthoritativeChange = Date()
+        }
         if old.processState != result.state.processState {
             BridgeMetrics.shared.recordMutProcessState()
         }

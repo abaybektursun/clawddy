@@ -24,19 +24,19 @@ cd ghostty
 
 When you're developing Ghostty, it's very likely that you will want to build a
 _debug_ build to diagnose issues more easily. This is already the default for
-Zig builds, so simply run `zig build` **without any `-Doptimize` flags**.
+Zig builds, so simply run `./build.nu` **without any `-Doptimize` flags**.
 
 There are many more build steps than just `zig build`, some of which are listed
 here:
 
 | Command                         | Description                                                                                                            |
 | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `zig build run`                 | Runs Ghostty                                                                                                           |
-| `zig build run-valgrind`        | Runs Ghostty under Valgrind to [check for memory leaks](#checking-for-memory-leaks)                                    |
-| `zig build test`                | Runs unit tests (accepts `-Dtest-filter=<filter>` to only run tests whose name matches the filter)                     |
-| `zig build update-translations` | Updates Ghostty's translation strings (see the [Contributor's Guide on Localizing Ghostty](po/README_CONTRIBUTORS.md)) |
-| `zig build dist`                | Builds a source tarball                                                                                                |
-| `zig build distcheck`           | Builds and validates a source tarball                                                                                  |
+| `./build.nu run`                 | Runs Ghostty                                                                                                           |
+| `./build.nu run-valgrind`        | Runs Ghostty under Valgrind to [check for memory leaks](#checking-for-memory-leaks)                                    |
+| `./build.nu test`                | Runs unit tests (accepts `-Dtest-filter=<filter>` to only run tests whose name matches the filter)                     |
+| `./build.nu update-translations` | Updates Ghostty's translation strings (see the [Contributor's Guide on Localizing Ghostty](po/README_CONTRIBUTORS.md)) |
+| `./build.nu dist`                | Builds a source tarball                                                                                                |
+| `./build.nu distcheck`           | Builds and validates a source tarball                                                                                  |
 
 ## Extra Dependencies
 
@@ -79,7 +79,7 @@ If you changed code outside `macos/`, update the underlying Ghostty library
 before invoking the wrapper:
 
 ```shell
-zig build -Demit-macos-app=false
+./build.nu -Demit-macos-app=false
 ```
 
 See [macOS Development](docs/MACOS_DEVELOPMENT.md) for the platform architecture,
@@ -266,7 +266,7 @@ On Linux the recommended tool to check for memory leaks is Valgrind. The
 recommended way to run Valgrind is via `zig build`:
 
 ```sh
-zig build run-valgrind
+./build.nu run-valgrind
 ```
 
 This builds a Ghostty executable with Valgrind support and runs Valgrind

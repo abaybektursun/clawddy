@@ -56,7 +56,7 @@ enum AgentHookRuntime {
           '{"schemaVersion":1,"eventID":"%s","provider":"%s","launchGeneration":"%s","hookEventName":"%s","sessionID":"%s","turnID":"%s","model":"%s","permissionMode":"%s"}' \
           "$EVENT_ID" "$PROVIDER" "$GENERATION" "$EVENT" "$SID" "$TURN" "$MODEL" "$PERMISSION")
         export EVENTS EVENT_LINE
-        /usr/bin/lockf -s -t 5 -k "$LOCK" /bin/sh -c \
+        /usr/bin/lockf -s -k "$LOCK" /bin/sh -c \
           'printf "%s\n" "$EVENT_LINE" >> "$EVENTS"' 2>/dev/null || true
         exit 0
         """
@@ -93,7 +93,7 @@ enum AgentHookRuntime {
         let lock = shellQuote(
             statusDirectory.appendingPathComponent("\(agentID.uuidString).events.lock").path)
         return "mkdir -p \(directory); EVENT_LINE=$(printf \(shellQuote(eventFormat)) \"$command_status\"); "
-            + "export EVENT_LINE; /usr/bin/lockf -s -t 5 -k \(lock) /bin/sh -c "
+            + "export EVENT_LINE; /usr/bin/lockf -s -k \(lock) /bin/sh -c "
             + shellQuote("printf '%s\\n' \"$EVENT_LINE\" >> \(events)")
     }
 

@@ -64,24 +64,44 @@ xcrun --sdk macosx --show-sdk-version
 ```
 
 If a change touches code outside `macos/`, rebuild the underlying Ghostty
-library first:
+library first. The repository wrapper keeps the Zig prefix and both caches on
+external storage:
 
 ```sh
-zig build -Demit-macos-app=false
+./build.nu -Demit-macos-app=false
 ```
 
 Build the app through the repository wrapper. It removes environment variables
-that commonly leak from Nix shells and writes products under `macos/build/`:
+that commonly leak from Nix shells and writes products, DerivedData, object
+files, Swift packages, module and compilation caches, Zig caches, and temporary
+files beneath `/Volumes/Xcode/GhosttyBuilds/ghostty/macos/`:
 
 ```sh
-macos/build.nu --scheme Ghostty --configuration Debug --action build
+macos/build.nu --scheme Ghostty --configuration Release --action build
 ```
+
+Package resolution uses Xcode's noninteractive `netrc` authorization provider.
+This repository's package dependencies are public, and avoiding an unnecessary
+Keychain query prevents unattended builds from blocking indefinitely.
 
 Run the macOS unit tests with:
 
 ```sh
-macos/build.nu --scheme Ghostty --configuration Debug --action test
+macos/build.nu --scheme Ghostty --configuration Release --action test
 ```
+
+Production builds and unit tests use separate external build graphs. Unit tests
+need an `@testable` app module and may inject XCTest support into their host;
+their products, objects, DerivedData, module cache, and temporary directory live
+under the wrapper's `tests/` subtree. The production Release graph remains
+optimized with `ENABLE_TESTABILITY=NO` and never serves as a test host. The
+wrapper also marks its dedicated `SYMROOT`, `OBJROOT`, and `DSTROOT` directories
+as Xcode-owned so `--action clean` can remove stale generated products safely.
+
+Both wrappers fail closed if the external volume is not mounted. Use
+`GHOSTTY_BUILD_ROOT`, `GHOSTTY_MACOS_BUILD_ROOT`, or `--build-root` only for an
+alternate path under `/Volumes`. Run either wrapper with `--show-paths` to audit
+its resolved locations without starting a build.
 
 The wrapper skips UI tests because they require interactive permissions. Run
 the `GhosttyUITests` target from the `Ghostty` scheme in Xcode when the change affects input,

@@ -22,6 +22,10 @@ struct AgentStateAggregationTests {
             of: [.inactive, .idle, .launching]) == .launching)
         #expect(AgentStateAggregation.representative(
             of: [.thinking, .working, .compacting]) == .compacting)
+        #expect(AgentStateAggregation.representative(
+            of: [.working, .compacting, .statusDelayed]) == .statusDelayed)
+        #expect(AgentStateAggregation.representative(
+            of: [.statusDelayed, .statusUnavailable]) == .statusUnavailable)
     }
 
     @Test func resultDoesNotDependOnDescendantOrder() {

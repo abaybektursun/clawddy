@@ -213,7 +213,7 @@ private struct CommandPaletteQuery: View {
     @Binding var query: String
     var placeholder: String
     var onEvent: ((KeyboardEvent) -> Void)?
-    @FocusState private var isTextFieldFocused: Bool
+    @State private var isTextFieldFocused = false
 
     init(query: Binding<String>, placeholder: String = "Execute a command…", onEvent: ((KeyboardEvent) -> Void)? = nil) {
         _query = query
@@ -228,54 +228,40 @@ private struct CommandPaletteQuery: View {
     }
 
     var body: some View {
-        ZStack {
-            Group {
-                Button { onEvent?(.move(.up)) } label: { Color.clear }
-                    .buttonStyle(PlainButtonStyle())
-                    .keyboardShortcut(.upArrow, modifiers: [])
-                Button { onEvent?(.move(.down)) } label: { Color.clear }
-                    .buttonStyle(PlainButtonStyle())
-                    .keyboardShortcut(.downArrow, modifiers: [])
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
 
-                Button { onEvent?(.move(.up)) } label: { Color.clear }
-                    .buttonStyle(PlainButtonStyle())
-                    .keyboardShortcut(.init("p"), modifiers: [.control])
-                Button { onEvent?(.move(.down)) } label: { Color.clear }
-                    .buttonStyle(PlainButtonStyle())
-                    .keyboardShortcut(.init("n"), modifiers: [.control])
-            }
-            .frame(width: 0, height: 0)
-            .accessibilityHidden(true)
-
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-
-                TextField(placeholder, text: $query)
-                    .font(.system(size: 18))
-                    .textFieldStyle(.plain)
-                    .focused($isTextFieldFocused)
-                    .accessibilityLabel("Search")
-                    .onExitCommand { onEvent?(.exit) }
-                    .onMoveCommand { onEvent?(.move($0)) }
-                    .onSubmit { onEvent?(.submit) }
-
-                if !query.isEmpty {
-                    Button("Clear Search", systemImage: "xmark.circle.fill") {
-                        query = ""
+            NativeTextField(
+                placeholder: placeholder,
+                text: $query,
+                style: .plain,
+                font: .systemFont(ofSize: 18),
+                accessibilityLabel: "Search",
+                isFocused: $isTextFieldFocused,
+                onSubmit: { onEvent?(.submit) },
+                onCommand: { command in
+                    switch command {
+                    case .cancel: onEvent?(.exit)
+                    case .moveUp: onEvent?(.move(.up))
+                    case .moveDown: onEvent?(.move(.down))
                     }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+                })
+                .frame(height: 24)
+
+            if !query.isEmpty {
+                Button("Clear Search", systemImage: "xmark.circle.fill") {
+                    query = ""
                 }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 16)
-            .frame(height: 52)
-            .onAppear {
-                DispatchQueue.main.async {
-                    isTextFieldFocused = true
-                }
-            }
+        }
+        .padding(.horizontal, 16)
+        .frame(height: 52)
+        .onAppear {
+            DispatchQueue.main.async { isTextFieldFocused = true }
         }
     }
 }

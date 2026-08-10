@@ -611,6 +611,13 @@ class AppDelegate: NSObject,
             return nil
         }
 
+        // AppKit's field editor must own standard editing commands (including
+        // Command-V) regardless of transient main-window status.
+        if AgentKeyEventRoutingPolicy.isTextEditingResponder(
+            event.window?.firstResponder ?? NSApp.keyWindow?.firstResponder) {
+            return event
+        }
+
         // If we have a main window then we don't process any of the keys
         // because we let it capture and propagate.
         guard NSApp.mainWindow == nil else { return event }
@@ -1410,7 +1417,10 @@ extension AppDelegate {
             let navigationView = AgentInteractiveHostingView(rootView: AgentNavigationView(
                 config: agentConfig,
                 bridge: agentBridge,
-                model: agentWorkspaceModel
+                model: agentWorkspaceModel,
+                onSelectScope: { [weak self] scope in
+                    self?.selectAgentScope(scope)
+                }
             ))
 
             let agentListView = AgentInteractiveHostingView(rootView: AgentListView(
@@ -1420,8 +1430,10 @@ extension AppDelegate {
                 onSelectAgent: { [weak self] id, project, intent in
                     self?.selectAgent(id: id, project: project, intent: intent)
                 },
-                onClearSelection: { [weak self] in
-                    self?.clearAgentSelection()
+                onReconcileSelection: { [weak self] visibleIDs, fallbackID in
+                    self?.reconcileAgentSelection(
+                        visibleAgentIDs: visibleIDs,
+                        fallbackAgentID: fallbackID)
                 },
                 onActivateAgent: { [weak self] id, project in
                     self?.activateAgent(id: id, project: project)
@@ -1431,20 +1443,19 @@ extension AppDelegate {
                     if let entry = self.agentBridge.forkAgent(
                         sourceId: sourceId, config: self.agentConfig,
                         project: project.name, task: taskName) {
-                        if let task = self.agentConfig.task(forAgent: entry.id) {
-                            self.agentWorkspaceModel.scope = .task(
+                        let scope = self.agentConfig.task(forAgent: entry.id).map {
+                            AgentWorkspaceModel.Scope.task(
                                 projectID: project.id,
-                                taskID: task.id)
+                                taskID: $0.id)
                         }
-                        self.agentWorkspaceModel.selectedAgentID = entry.id
-                        self.activateAgent(id: entry.id, project: project)
+                        self.activateAgent(id: entry.id, project: project, scope: scope)
                     }
                 },
                 onDeleteAgent: { [weak self] id in
                     guard let self else { return }
                     self.agentBridge.deleteAgent(id: id, config: self.agentConfig)
                     if self.agentWorkspaceModel.selectedAgentID == id {
-                        self.agentWorkspaceModel.selectedAgentID = nil
+                        self.applyAgentSelection(.reveal(scope: nil, agentID: nil))
                     }
                 }
             ))
@@ -1493,15 +1504,74 @@ extension AppDelegate {
     @MainActor
     private func selectAgent(
         id: UUID,
-        project: AgentProject,
+        project _: AgentProject,
         intent: AgentSelectionIntent = .reveal
     ) {
-        guard let agent = agentBridge.agents[id], let detailVC = agentDetailVC else { return }
+        let action: AgentWorkspaceSelectionAction = intent == .inspect
+            ? .userSelectedAgent(id)
+            : .reveal(scope: nil, agentID: id)
+        applyAgentSelection(action)
+    }
+
+    @MainActor
+    private func selectAgentScope(_ scope: AgentWorkspaceModel.Scope) {
+        applyAgentSelection(.userSelectedScope(
+            scope,
+            agentID: mostImportantAgentID(for: scope)))
+    }
+
+    @MainActor
+    private func reconcileAgentSelection(
+        visibleAgentIDs: [UUID],
+        fallbackAgentID: UUID?
+    ) {
+        applyAgentSelection(.reconcile(
+            visibleAgentIDs: Set(visibleAgentIDs),
+            fallbackAgentID: fallbackAgentID))
+    }
+
+    @MainActor
+    private func applyAgentSelection(_ action: AgentWorkspaceSelectionAction) {
+        switch agentWorkspaceModel.apply(action) {
+        case .none:
+            return
+        case .present(nil, _):
+            renderAgentPlaceholder()
+        case .present(let id?, let intent):
+            guard let project = agentConfig.project(forAgent: id),
+                  let agent = agentBridge.agents[id],
+                  let detailVC = agentDetailVC
+            else {
+                renderAgentPlaceholder()
+                return
+            }
+            renderAgentSelection(
+                id: id,
+                agent: agent,
+                project: project,
+                detailVC: detailVC,
+                intent: intent)
+        }
+    }
+
+    @MainActor
+    private func renderAgentSelection(
+        id: UUID,
+        agent: AgentInstance,
+        project: AgentProject,
+        detailVC: AgentDetailViewController,
+        intent: AgentSelectionIntent
+    ) {
         if explicitlyViewedAgentID != id {
             explicitlyViewedAgentID = nil
             agentBridge.setCurrentlyViewedAgent(nil)
         }
-        agentWorkspaceModel.selectedAgentID = id
+        if intent == .inspect, let task = agentConfig.task(forAgent: id) {
+            agentWorkspaceModel.recordExplicitSelection(
+                agentID: id,
+                projectID: project.id,
+                taskID: task.id)
+        }
         detailVC.selectAgent(agent, projectName: project.name) { [weak self] in
             self?.activateAgent(id: id, project: project)
         }
@@ -1513,9 +1583,8 @@ extension AppDelegate {
     }
 
     @MainActor
-    private func clearAgentSelection() {
+    private func renderAgentPlaceholder() {
         explicitlyViewedAgentID = nil
-        agentWorkspaceModel.selectedAgentID = nil
         agentBridge.setCurrentlyViewedAgent(nil)
         agentDetailVC?.showPlaceholder()
         agentWorkspaceWindow?.title = "Clawddy"
@@ -1523,10 +1592,44 @@ extension AppDelegate {
 
     @MainActor
     private func revealAgent(id: UUID, project: AgentProject) {
-        if let task = agentConfig.task(forAgent: id) {
-            agentWorkspaceModel.scope = .task(projectID: project.id, taskID: task.id)
+        let scope = agentConfig.task(forAgent: id).map {
+            AgentWorkspaceModel.Scope.task(projectID: project.id, taskID: $0.id)
         }
-        selectAgent(id: id, project: project)
+        applyAgentSelection(.reveal(scope: scope, agentID: id))
+    }
+
+    @MainActor
+    private func mostImportantAgentID(for scope: AgentWorkspaceModel.Scope) -> UUID? {
+        var candidates: [AgentImportanceCandidate] = []
+        var configurationRank = 0
+        for project in agentConfig.projects {
+            for task in project.tasks {
+                for entry in task.agents {
+                    defer { configurationRank += 1 }
+                    guard let instance = agentBridge.agents[entry.id],
+                          AgentWorkspaceProjection.includes(
+                            instance,
+                            project: project,
+                            task: task,
+                            scope: scope),
+                          AgentWorkspaceProjection.matchesSearch(
+                            entry,
+                            project: project,
+                            task: task,
+                            instance: instance,
+                            query: agentWorkspaceModel.searchQuery)
+                    else { continue }
+                    candidates.append(AgentImportanceCandidate(
+                        id: entry.id,
+                        state: instance.displayState,
+                        lastAuthoritativeChange: instance.lastAuthoritativeChange,
+                        configurationRank: configurationRank))
+                }
+            }
+        }
+        return AgentImportance.mostImportant(
+            in: candidates,
+            preferredID: agentWorkspaceModel.preferredAgentID(for: scope))
     }
 
     @MainActor
@@ -1578,9 +1681,13 @@ extension AppDelegate {
     }
 
     @MainActor
-    private func activateAgent(id: UUID, project: AgentProject) {
+    private func activateAgent(
+        id: UUID,
+        project: AgentProject,
+        scope: AgentWorkspaceModel.Scope? = nil
+    ) {
         guard let app = ghostty.app, let detailVC = agentDetailVC else { return }
-        selectAgent(id: id, project: project)
+        applyAgentSelection(.reveal(scope: scope, agentID: id))
         agentBridge.activateAgent(id: id, app: app, detailVC: detailVC, project: project)
         explicitlyViewedAgentID = id
         updateAgentViewingState()

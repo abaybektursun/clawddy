@@ -337,10 +337,20 @@ private struct AgentDetailHeaderView: View {
                         .buttonStyle(.bordered)
                         .accessibilitySortPriority(1)
                     } else {
-                        Button(primaryActionTitle(for: agent), systemImage: "play.fill") {
+                        Button {
                             model.onStart?()
+                        } label: {
+                            if agent.isStarting {
+                                HStack(spacing: 6) {
+                                    ProgressView().controlSize(.small)
+                                    Text("Starting…")
+                                }
+                            } else {
+                                Label(primaryActionTitle(for: agent), systemImage: "play.fill")
+                            }
                         }
                         .buttonStyle(.borderedProminent)
+                        .disabled(agent.isStarting)
                         .accessibilitySortPriority(1)
                     }
                 }
@@ -392,11 +402,21 @@ private struct AgentPlaceholderView: View {
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 360)
 
-                Button(placeholderButtonTitle(for: agent)) {
+                Button {
                     model.onStart?()
+                } label: {
+                    if agent.isStarting {
+                        HStack(spacing: 7) {
+                            ProgressView().controlSize(.small)
+                            Text("Starting Agent…")
+                        }
+                    } else {
+                        Text(placeholderButtonTitle(for: agent))
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(agent.isStarting)
             } else {
                 Image(systemName: "sidebar.left")
                     .font(.system(size: 36, weight: .light))
