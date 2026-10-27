@@ -70,6 +70,7 @@ extern "C" {
 #define GHOSTTY_MODE_REVERSE_WRAP     (ghostty_mode_new(45, false))  /**< Reverse wrap */
 #define GHOSTTY_MODE_ALT_SCREEN_LEGACY (ghostty_mode_new(47, false)) /**< Alternate screen (legacy) */
 #define GHOSTTY_MODE_KEYPAD_KEYS      (ghostty_mode_new(66, false))  /**< Application keypad */
+#define GHOSTTY_MODE_BACKARROW_KEY_MODE (ghostty_mode_new(67, false))  /**< Backarrow key mode (DECBKM) */
 #define GHOSTTY_MODE_LEFT_RIGHT_MARGIN (ghostty_mode_new(69, false)) /**< Left/right margin mode */
 #define GHOSTTY_MODE_NORMAL_MOUSE     (ghostty_mode_new(1000, false)) /**< Normal mouse tracking */
 #define GHOSTTY_MODE_BUTTON_MOUSE     (ghostty_mode_new(1002, false)) /**< Button-event mouse tracking */
@@ -91,7 +92,9 @@ extern "C" {
 #define GHOSTTY_MODE_SYNC_OUTPUT      (ghostty_mode_new(2026, false)) /**< Synchronized output */
 #define GHOSTTY_MODE_GRAPHEME_CLUSTER (ghostty_mode_new(2027, false)) /**< Grapheme cluster mode */
 #define GHOSTTY_MODE_COLOR_SCHEME_REPORT (ghostty_mode_new(2031, false)) /**< Report color scheme */
+#define GHOSTTY_MODE_VISIBILITY_REPORT (ghostty_mode_new(2033, false)) /**< Report terminal visibility */
 #define GHOSTTY_MODE_IN_BAND_RESIZE   (ghostty_mode_new(2048, false)) /**< In-band size reports */
+#define GHOSTTY_MODE_PASTE_EVENTS     (ghostty_mode_new(5522, false)) /**< Kitty clipboard protocol paste events */
 /** @} */
 
 /**

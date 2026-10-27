@@ -28,7 +28,7 @@ def external-root [override?: string] {
 }
 
 def main [
-    --scheme: string = "Ghostty"       # Xcode scheme (Ghostty, Ghostty-iOS, DockTilePlugin)
+    --scheme: string = "Ghostty"       # Xcode scheme (Ghostty, DockTilePlugin)
     --configuration: string = "Release" # Build configuration (Debug, Release, ReleaseLocal)
     --action: string = "build"         # xcodebuild action (build, test, clean, etc.)
     --build-root: string                # Override GHOSTTY_MACOS_BUILD_ROOT

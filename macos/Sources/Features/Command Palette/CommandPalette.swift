@@ -22,7 +22,7 @@ struct CommandOption: Identifiable, Hashable {
     /// Whether to visually emphasize this option.
     let emphasis: Bool
     /// Sort key for stable ordering when titles are equal.
-    let sortKey: AnySortKey?
+    let sortKey: ObjectIdentifier?
     /// The action to perform when this option is selected.
     let action: () -> Void
 
@@ -37,7 +37,7 @@ struct CommandOption: Identifiable, Hashable {
         badge: String? = nil,
         searchTerms: [String] = [],
         emphasis: Bool = false,
-        sortKey: AnySortKey? = nil,
+        sortKey: ObjectIdentifier? = nil,
         action: @escaping () -> Void
     ) {
         self.id = id
@@ -78,23 +78,24 @@ struct CommandPaletteView: View {
     /// Set false when an external surface (a Liquid Glass panel) provides the
     /// background — avoids stacking a second material over the glass.
     var showsBackground: Bool = true
-    @State private var query = ""
+    @State private var rawQuery = ""
     @State private var selectedIndex: UInt? = 0
     @State private var hoveredOptionID: UUID?
     @State private var appeared = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    var query: String {
+        rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     // The options that we should show, taking into account any filtering from
-    // the query.
+    // the query. Matched options are ranked in the following order:
+    // leadingColor > title > subtitle > description > search terms.
     var filteredOptions: [CommandOption] {
         if query.isEmpty {
             return options
         } else {
-            return options.filter {
-                $0.title.localizedCaseInsensitiveContains(query) ||
-                ($0.subtitle?.localizedCaseInsensitiveContains(query) ?? false) ||
-                $0.searchTerms.contains(where: { $0.localizedCaseInsensitiveContains(query) })
-            }
+            return options.filteredAndSorted(query: query)
         }
     }
 
@@ -108,14 +109,14 @@ struct CommandPaletteView: View {
     }
 
     var body: some View {
-        let scheme: ColorScheme = if OSColor(backgroundColor).isLightColor {
+        let scheme: ColorScheme = if NSColor(backgroundColor).isLightColor {
             .light
         } else {
             .dark
         }
 
         VStack(alignment: .leading, spacing: 0) {
-            CommandPaletteQuery(query: $query, placeholder: placeholder) { event in
+            CommandPaletteQuery(query: $rawQuery, placeholder: placeholder) { event in
                 switch event {
                 case .exit:
                     isPresented = false
@@ -153,12 +154,13 @@ struct CommandPaletteView: View {
 
             CommandTable(
                 options: filteredOptions,
+                query: query,
                 selectedIndex: $selectedIndex,
                 hoveredOptionID: $hoveredOptionID,
                 maxHeight: tableMaxHeight) { option in
                     isPresented = false
                     option.action()
-            }
+                }
         }
         .frame(maxWidth: 500)
         .background(
@@ -201,7 +203,7 @@ struct CommandPaletteView: View {
                 // This is optional, since most of the time
                 // there will be a delay before the next use.
                 // To keep behavior the same as before, we reset it.
-                query = ""
+                rawQuery = ""
                 selectedIndex = options.isEmpty ? nil : 0
             }
         }
@@ -268,6 +270,7 @@ private struct CommandPaletteQuery: View {
 
 private struct CommandTable: View {
     var options: [CommandOption]
+    var query: String
     @Binding var selectedIndex: UInt?
     @Binding var hoveredOptionID: UUID?
     var maxHeight: CGFloat = 200
@@ -291,6 +294,7 @@ private struct CommandTable: View {
                         ForEach(Array(options.enumerated()), id: \.1.id) { index, option in
                             CommandRow(
                                 option: option,
+                                query: query,
                                 isSelected: {
                                     if let selected = selectedIndex {
                                         return selected == index ||
@@ -325,9 +329,52 @@ private struct CommandTable: View {
 /// A single row in the command palette.
 private struct CommandRow: View {
     let option: CommandOption
+    var query: String
     var isSelected: Bool
     @Binding var hoveredID: UUID?
     var action: () -> Void
+
+    private var highlightedTitle: Text {
+        guard !query.isEmpty,
+              let indices = option.title.matchedIndices(for: query) else {
+            return Text(option.title)
+                .fontWeight(option.emphasis ? .medium : .regular)
+        }
+
+        var attributed = AttributedString(option.title)
+        attributed[attributed.startIndex...].font = .body
+            .weight(option.emphasis ? .medium : .regular)
+
+        for idx in indices {
+            let offset = option.title.distance(from: option.title.startIndex, to: idx)
+            let attrStart = attributed.index(attributed.startIndex, offsetByCharacters: offset)
+            let attrEnd = attributed.index(attrStart, offsetByCharacters: 1)
+            attributed[attrStart..<attrEnd].font = .body.bold()
+            attributed[attrStart..<attrEnd].foregroundColor = Color.accentColor
+        }
+
+        return Text(attributed)
+    }
+
+    private func highlightedSubtitle(_ subtitle: String) -> Text {
+        guard !query.isEmpty,
+              option.title.matchedIndices(for: query) == nil,
+              let indices = subtitle.matchedIndices(for: query) else {
+            return Text(subtitle)
+        }
+
+        var attributed = AttributedString(subtitle)
+
+        for idx in indices {
+            let offset = subtitle.distance(from: subtitle.startIndex, to: idx)
+            let attrStart = attributed.index(attributed.startIndex, offsetByCharacters: offset)
+            let attrEnd = attributed.index(attrStart, offsetByCharacters: 1)
+            attributed[attrStart..<attrEnd].font = .caption.bold()
+            attributed[attrStart..<attrEnd].foregroundColor = Color.accentColor
+        }
+
+        return Text(attributed)
+    }
 
     var body: some View {
         Button(action: action) {
@@ -345,11 +392,10 @@ private struct CommandRow: View {
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(option.title)
-                        .fontWeight(option.emphasis ? .medium : .regular)
+                    highlightedTitle
 
-                    if let subtitle = option.subtitle {
-                        Text(subtitle)
+                    if let subtitle = option.subtitle ?? option.description {
+                        highlightedSubtitle(subtitle)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -410,5 +456,108 @@ private struct ShortcutSymbolsView: View {
                     .frame(minWidth: 13)
             }
         }
+    }
+}
+
+extension String {
+    /// Returns the character indices that match `query`, trying a substring match first,
+    /// then falling back to initials matching (first letter of each word).
+    /// - Returns: `nil` if neither matches.
+    func matchedIndices(for query: String) -> [String.Index]? {
+        guard !query.isEmpty else { return nil }
+
+        // Prefer substring match.
+        if let range = self.range(of: query, options: .caseInsensitive) {
+            return Array(self[range].indices)
+        }
+
+        // Fall back to initials match.
+        let words = self.split(whereSeparator: \.isWhitespace)
+        var queryIndex = query.startIndex
+        var matched: [String.Index] = []
+
+        for word in words {
+            guard queryIndex < query.endIndex else { break }
+
+            if word.first?.lowercased() == query[queryIndex].lowercased() {
+                matched.append(word.startIndex)
+                queryIndex = query.index(after: queryIndex)
+            }
+        }
+
+        return queryIndex == query.endIndex ? matched : nil
+    }
+}
+
+// MARK: - Match score
+
+extension Collection where Element == CommandOption {
+    /// Filters to the options matching `query` and ranks them best-first while
+    /// maintaining original order: a closer leading color match always wins,
+    /// then title, subtitle, description, and semantic search-term matches.
+    func filteredAndSorted(query: String) -> [Element] {
+        compactMap { CommandOptionMatch(option: $0, query: query) }
+            .sorted {
+                ($0.colorScore, $0.textScore) > ($1.colorScore, $1.textScore)
+            }
+            .map(\.option)
+    }
+}
+
+/// A scored match of a command option against a palette query.
+struct CommandOptionMatch {
+    let option: CommandOption
+    /// How closely the option's leading color matches a color name in the
+    /// query, from 0 (no match) to 1 (exact).
+    let colorScore: Double
+    /// Which text field matched, ranked: title (4), subtitle (3),
+    /// description (2), search terms (1), none (0).
+    let textScore: Int
+
+    /// Returns nil if the option doesn't match the query at all.
+    init?(option: CommandOption, query: String) {
+        let colorScore = Self.colorMatchScore(for: option.leadingColor, query: query)
+        let textScore: Int = if option.title.matchedIndices(for: query) != nil {
+            4
+        } else if option.subtitle?.matchedIndices(for: query) != nil {
+            3
+        } else if option.description?.matchedIndices(for: query) != nil {
+            2
+        } else if option.searchTerms.contains(where: { $0.matchedIndices(for: query) != nil }) {
+            1
+        } else {
+            0
+        }
+
+        guard colorScore > 0 || textScore > 0 else { return nil }
+        self.option = option
+        self.colorScore = colorScore
+        self.textScore = textScore
+    }
+
+    /// Returns a score (0.0 to 1.0) indicating how well a color matches a search query color name.
+    /// Returns 0 if no color name in the query matches, or if the color is nil.
+    static func colorMatchScore(for color: Color?, query: String) -> Double {
+        guard let color = color else { return 0 }
+
+        let queryLower = query.lowercased()
+        let nsColor = NSColor(color)
+
+        var bestScore: Double = 0
+        for name in NSColor.colorNames {
+            guard queryLower.contains(name),
+                  let systemColor = NSColor(named: name) else { continue }
+
+            let distance = nsColor.distance(to: systemColor)
+            // Max distance in weighted RGB space is ~3.0, so normalize and invert
+            // Use a threshold to determine "close enough" matches
+            let maxDistance: Double = 1.5
+            if distance < maxDistance {
+                let score = 1.0 - (distance / maxDistance)
+                bestScore = max(bestScore, score)
+            }
+        }
+
+        return bestScore
     }
 }
