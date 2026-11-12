@@ -178,8 +178,7 @@ struct CodexProvider: AgentProviderAdapter {
                 groups.append([
                     "hooks": [[
                         "type": "command",
-                        "command": AgentHookRuntime.shellQuote(
-                            AgentHookRuntime.scriptURL(root: root).path),
+                        "command": AgentHookRuntime.command(root: root),
                         "timeout": 5,
                     ]],
                 ])

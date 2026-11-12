@@ -24,6 +24,30 @@ enum AgentTerminalEnvironmentPolicy {
     ]
     private static let interactivePresentationDefaults = ["CLICOLOR": "1"]
 
+    /// Agent identity that a Clawddy launch gives its terminal. The
+    /// `GHOSTTY_AGENT_CRON_*` names belong to agent-cron and are not listed.
+    static let inheritedAgentIdentityVariables = [
+        "GHOSTTY_AGENT_ID",
+        "GHOSTTY_AGENT_NAME",
+        "GHOSTTY_AGENT_PROVIDER",
+        "GHOSTTY_AGENT_LAUNCH_GENERATION",
+        "GHOSTTY_AGENT_STATUS_DIR",
+        "CLAWDDY_AGENT_ID",
+        "CLAWDDY_AGENT_PROVIDER",
+        "CLAWDDY_AGENT_GENERATION",
+        "CLAWDDY_STATUS_DIR",
+    ]
+
+    /// Removes agent identity from this process's own environment by name, so
+    /// an app started from an agent's terminal never passes that agent's
+    /// identity to its terminals, probes or agents. Called once at launch,
+    /// before any terminal is created or restored.
+    static func removeInheritedAgentIdentity() {
+        for name in inheritedAgentIdentityVariables {
+            precondition(unsetenv(name) == 0, "unsetenv(\(name)) failed: errno \(errno)")
+        }
+    }
+
     static func removingInheritedAutomationVariables(
         from environment: [String: String]
     ) -> [String: String] {

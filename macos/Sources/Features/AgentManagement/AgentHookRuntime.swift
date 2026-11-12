@@ -5,16 +5,30 @@ enum AgentHookRuntime {
         root.hooksDir.appendingPathComponent("clawddy-provider-hook.sh")
     }
 
+    /// The command line a provider runs for each hook event. The status
+    /// folder travels as the script's only argument; the script has no
+    /// default.
+    static func command(root: AgentDataRoot) -> String {
+        "\(shellQuote(scriptURL(root: root).path)) \(shellQuote(root.statusDir.path))"
+    }
+
     static let script = """
         #!/bin/sh
         umask 077
+        # The status folder is the only argument. There is no default, so a
+        # command line without it records nothing anywhere.
+        DIR="$1"
+        if [ -z "$DIR" ]; then
+          cat >/dev/null
+          echo "clawddy-provider-hook.sh: missing status folder argument" >&2
+          exit 1
+        fi
         ID="${GHOSTTY_AGENT_ID:-$GHOSTTY_AGENT_NAME}"
         if [ -z "$ID" ]; then
           cat >/dev/null
           exit 0
         fi
 
-        DIR="${GHOSTTY_AGENT_STATUS_DIR:-$HOME/.config/ghostty-agents/status}"
         PROVIDER="${GHOSTTY_AGENT_PROVIDER:-claudeCode}"
         GENERATION="${GHOSTTY_AGENT_LAUNCH_GENERATION:-}"
         mkdir -p "$DIR" 2>/dev/null || exit 0

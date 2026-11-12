@@ -12,16 +12,31 @@ enum AgentMetadataRuntime {
         root.hooksDir.appendingPathComponent("clawddy-statusline-proxy.sh")
     }
 
+    /// The status-line command Claude runs. The status folder travels as the
+    /// proxy's first argument; the proxy has no default.
+    static func statusLineCommand(root: AgentDataRoot, agentID: UUID, upstreamURL: URL) -> String {
+        [proxyURL(root: root).path, root.statusDir.path, agentID.uuidString, upstreamURL.path]
+            .map(shellQuote)
+            .joined(separator: " ")
+    }
+
+    /// Arguments: status folder, agent ID, and the file holding the user's own
+    /// status-line command.
     static let proxyScript = """
         #!/bin/sh
         umask 077
-        ID="$1"
-        UPSTREAM_FILE="$2"
+        DIR="$1"
+        ID="$2"
+        UPSTREAM_FILE="$3"
+        if [ -z "$DIR" ]; then
+          cat >/dev/null
+          echo "clawddy-statusline-proxy.sh: missing status folder argument" >&2
+          exit 1
+        fi
         case "$ID" in
           ''|*[!A-Fa-f0-9-]*) cat >/dev/null; exit 0 ;;
         esac
 
-        DIR="${GHOSTTY_AGENT_STATUS_DIR:-$HOME/.config/ghostty-agents/status}"
         mkdir -p "$DIR" 2>/dev/null
         SNAPSHOT="$DIR/$ID.metadata.json"
         TEMP="${TMPDIR:-/tmp}/clawddy-statusline-$ID-$$.json"
@@ -86,11 +101,10 @@ enum AgentMetadataRuntime {
 
             var statusLine = effective.statusLine ?? [:]
             statusLine["type"] = "command"
-            statusLine["command"] = [
-                shellQuote(proxyURL.path),
-                shellQuote(agentID.uuidString),
-                shellQuote(upstreamURL.path),
-            ].joined(separator: " ")
+            statusLine["command"] = statusLineCommand(
+                root: root,
+                agentID: agentID,
+                upstreamURL: upstreamURL)
 
             let overlay: [String: Any] = ["statusLine": statusLine]
             let data = try JSONSerialization.data(
@@ -167,7 +181,7 @@ enum AgentMetadataRuntime {
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
-    private static func installProxy(root: AgentDataRoot) throws {
+    static func installProxy(root: AgentDataRoot) throws {
         try FileManager.default.createDirectory(
             at: root.hooksDir,
             withIntermediateDirectories: true)

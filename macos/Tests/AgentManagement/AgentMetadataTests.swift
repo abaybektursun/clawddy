@@ -108,7 +108,7 @@ struct AgentMetadataTests {
         let fm = FileManager.default
         let root = fm.temporaryDirectory
             .appendingPathComponent("clawddy-metadata-tests-\(UUID().uuidString)")
-        let status = root.appendingPathComponent(".config/ghostty-agents/status")
+        let status = root.appendingPathComponent("status")
         let script = root.appendingPathComponent("proxy.sh")
         let upstream = root.appendingPathComponent("upstream.command")
         defer { try? fm.removeItem(at: root) }
@@ -125,6 +125,7 @@ struct AgentMetadataTests {
             agentID: id,
             upstream: upstream,
             home: root,
+            statusDirectory: status,
             payload: payload)
 
         #expect(output.status == 0)
@@ -139,12 +140,12 @@ struct AgentMetadataTests {
         let fm = FileManager.default
         let root = fm.temporaryDirectory
             .appendingPathComponent("clawddy-metadata-tests-\(UUID().uuidString)")
-        let blockedStatus = root.appendingPathComponent(".config/ghostty-agents/status")
+        let blockedStatus = root.appendingPathComponent("status")
         let script = root.appendingPathComponent("proxy.sh")
         let upstream = root.appendingPathComponent("upstream.command")
         defer { try? fm.removeItem(at: root) }
 
-        try fm.createDirectory(at: blockedStatus.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
         try Data("not a directory".utf8).write(to: blockedStatus)
         try AgentMetadataRuntime.proxyScript.write(to: script, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
@@ -156,6 +157,7 @@ struct AgentMetadataTests {
             agentID: UUID(),
             upstream: upstream,
             home: root,
+            statusDirectory: blockedStatus,
             payload: payload)
 
         #expect(output.status == 0)
@@ -196,29 +198,86 @@ struct AgentMetadataTests {
             .path))
     }
 
+    /// The real installed proxy, run without arguments, exits non-zero and
+    /// writes nothing, although a status folder is in its environment. The
+    /// command in the settings overlay carries the folder and publishes into
+    /// it.
+    @Test func statuslineProxyRequiresStatusDirArgument() throws {
+        let fm = FileManager.default
+        let sandbox = fm.temporaryDirectory
+            .appendingPathComponent("clawddy-proxy-argument-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: sandbox) }
+        let root = AgentDataRoot(url: sandbox.appendingPathComponent("root", isDirectory: true))
+        let home = sandbox.appendingPathComponent("home", isDirectory: true)
+        let environmentStatus = sandbox.appendingPathComponent("environment-status", isDirectory: true)
+        let upstream = sandbox.appendingPathComponent("upstream.command")
+        let payloadURL = sandbox.appendingPathComponent("payload.json")
+        let payload = Data("{\"model\":{\"id\":\"claude-sonnet-4-6\"}}\n".utf8)
+        try fm.createDirectory(at: home, withIntermediateDirectories: true)
+        try AgentMetadataRuntime.installProxy(root: root)
+        try "cat".write(to: upstream, atomically: true, encoding: .utf8)
+        try payload.write(to: payloadURL)
+        let agentID = UUID()
+
+        func run(_ executable: String, _ arguments: [String]) throws -> (status: Int32, stdout: Data) {
+            let process = Process()
+            let output = Pipe()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+            process.environment = [
+                "GHOSTTY_AGENT_STATUS_DIR": environmentStatus.path,
+                "HOME": home.path,
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "SHELL": "/bin/sh",
+                "TMPDIR": home.path,
+            ]
+            process.standardInput = try FileHandle(forReadingFrom: payloadURL)
+            process.standardOutput = output
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            let stdout = try output.fileHandleForReading.readToEnd() ?? Data()
+            process.waitUntilExit()
+            return (process.terminationStatus, stdout)
+        }
+
+        let before = try filesUnder(sandbox)
+        let bare = try run(AgentMetadataRuntime.proxyURL(root: root).path, [])
+        #expect(bare.status != 0)
+        #expect(bare.stdout.isEmpty)
+        #expect(try filesUnder(sandbox) == before)
+
+        let command = AgentMetadataRuntime.statusLineCommand(
+            root: root,
+            agentID: agentID,
+            upstreamURL: upstream)
+        let configured = try run("/bin/sh", ["-c", command])
+        #expect(configured.status == 0)
+        #expect(configured.stdout == payload)
+        #expect(try Data(contentsOf: root.statusDir
+            .appendingPathComponent("\(agentID.uuidString).metadata.json")) == payload)
+        #expect(!fm.fileExists(atPath: environmentStatus.path))
+        #expect(!fm.fileExists(atPath: home.appendingPathComponent(".config").path))
+    }
+
     private func runProxy(
         script: URL,
         agentID: UUID,
         upstream: URL,
         home: URL,
-        statusDirectory: URL? = nil,
+        statusDirectory: URL,
         payload: Data
     ) throws -> (status: Int32, stdout: Data) {
         let process = Process()
         let input = Pipe()
         let output = Pipe()
         process.executableURL = script
-        process.arguments = [agentID.uuidString, upstream.path]
-        var environment = [
+        process.arguments = [statusDirectory.path, agentID.uuidString, upstream.path]
+        process.environment = [
             "HOME": home.path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "SHELL": "/bin/sh",
             "TMPDIR": home.path,
         ]
-        if let statusDirectory {
-            environment["GHOSTTY_AGENT_STATUS_DIR"] = statusDirectory.path
-        }
-        process.environment = environment
         process.standardInput = input
         process.standardOutput = output
 

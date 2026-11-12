@@ -18,6 +18,7 @@ struct AgentDataRoot: Equatable, Sendable {
     var statusDir: URL { url.appendingPathComponent("status", isDirectory: true) }
     var hooksDir: URL { url.appendingPathComponent("hooks", isDirectory: true) }
     var runtimeDir: URL { url.appendingPathComponent("runtime", isDirectory: true) }
+    var launchDir: URL { runtimeDir.appendingPathComponent("launch", isDirectory: true) }
     var codexHookReviewMarker: URL { url.appendingPathComponent("codex-hook-review-required") }
     var lockFile: URL { url.appendingPathComponent("clawddy.lock") }
 
@@ -36,11 +37,10 @@ struct AgentDataRoot: Equatable, Sendable {
     static func resolve(
         directoryName: String?,
         isRunningTests: Bool,
-        homeDirectory: URL,
-        temporaryDirectory: URL
+        homeDirectory: URL
     ) -> AgentDataRoot {
         if isRunningTests {
-            return AgentDataRoot(url: temporaryDirectory.appendingPathComponent(
+            return AgentDataRoot(url: FileManager.default.temporaryDirectory.appendingPathComponent(
                 "clawddy-tests-\(UUID().uuidString)",
                 isDirectory: true))
         }
@@ -73,6 +73,24 @@ struct AgentDataRoot: Equatable, Sendable {
         default:
             return nil
         }
+    }
+
+    /// A fresh path in the launch folder for one launch of `agentID`.
+    func newLaunchScriptURL(agentID: UUID) -> URL {
+        launchDir.appendingPathComponent("clawddy-\(agentID.uuidString)-\(UUID().uuidString).sh")
+    }
+
+    /// Empties the launch folder, creating it if needed. Called once at
+    /// start: only the instance holding this root's lock writes there, and
+    /// no script from an earlier run is needed again.
+    func resetLaunchDir() throws {
+        if FileManager.default.fileExists(atPath: launchDir.path) {
+            try FileManager.default.removeItem(at: launchDir)
+        }
+        try FileManager.default.createDirectory(
+            at: launchDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
     }
 
     struct InUse: LocalizedError {

@@ -27,6 +27,24 @@ final class AgentTerminalEnvironmentPolicyTests: XCTestCase {
         XCTAssertEqual(environment["CLAUDE_CONFIG_DIR"], "/tmp/claude")
     }
 
+    /// The names removed from the app's own environment at launch. Agent
+    /// identity is listed by name; agent-cron's variables are left alone.
+    func testStartupRemovesAgentIdentityByNameAndKeepsCronVariables() {
+        let names = AgentTerminalEnvironmentPolicy.inheritedAgentIdentityVariables
+        XCTAssertEqual(Set(names), [
+            "GHOSTTY_AGENT_ID",
+            "GHOSTTY_AGENT_NAME",
+            "GHOSTTY_AGENT_PROVIDER",
+            "GHOSTTY_AGENT_LAUNCH_GENERATION",
+            "GHOSTTY_AGENT_STATUS_DIR",
+            "CLAWDDY_AGENT_ID",
+            "CLAWDDY_AGENT_PROVIDER",
+            "CLAWDDY_AGENT_GENERATION",
+            "CLAWDDY_STATUS_DIR",
+        ])
+        XCTAssertFalse(names.contains { $0.hasPrefix("GHOSTTY_AGENT_CRON_") })
+    }
+
     func testShellPreludeUnsetsVariablesThatCannotBeRemovedBySurfaceOverlay() {
         let expectedUnset = "unset " + AgentTerminalEnvironmentPolicy
             .inheritedAutomationVariables

@@ -380,8 +380,7 @@ private struct AgentLaunchCoordinator: Sendable {
             printf '\\n\\033[33mAgent exited (status %s). Continuing in your login shell.\\033[0m\\n' "$command_status"
             exec "${SHELL:-/bin/zsh}" -l
             """
-        let scriptURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("clawddy-\(agentID.uuidString)-\(UUID().uuidString).sh")
+        let scriptURL = root.newLaunchScriptURL(agentID: agentID)
         guard AgentConfig.atomicWrite(Data(script.utf8), to: scriptURL) else {
             return .failure(
                 .launchPreparationFailed(provider, "The launch script could not be created."),
@@ -486,7 +485,11 @@ final class AgentBridge {
     // MARK: - Lifecycle
 
     func start(config: AgentConfig) {
-        cleanStaleScripts()
+        do {
+            try root.resetLaunchDir()
+        } catch {
+            fatalError("Could not reset \(root.launchDir.path): \(error)")
+        }
         let persisted = loadPersistedState()
         pendingRenames = persisted.pendingRenames
         eventOffsets = persisted.eventOffsets
@@ -1675,14 +1678,6 @@ final class AgentBridge {
     }
 
     // MARK: - Cleanup
-
-    private func cleanStaleScripts() {
-        let tmp = FileManager.default.temporaryDirectory
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: tmp.path) else { return }
-        for file in files where file.hasPrefix("clawddy-") && file.hasSuffix(".sh") {
-            try? FileManager.default.removeItem(at: tmp.appendingPathComponent(file))
-        }
-    }
 
     private func removeLaunchScript(for id: UUID) {
         guard let url = launchScripts.removeValue(forKey: id) else { return }

@@ -191,6 +191,9 @@ class AppDelegate: NSObject,
     // MARK: - NSApplicationDelegate
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // Before window restoration creates any terminal.
+        AgentTerminalEnvironmentPolicy.removeInheritedAgentIdentity()
+
         #if DEBUG
         if
             let suite = UserDefaults.ghosttySuite,

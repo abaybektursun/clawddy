@@ -5,7 +5,6 @@ import Testing
 
 struct AgentDataRootTests {
     private let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
-    private let temporary = URL(fileURLWithPath: "/private/tmp/clawddy-root-tests", isDirectory: true)
 
     /// Runs inside the real test host. If hosted runs did not set
     /// `XCTestConfigurationFilePath`, Clawddy would have started at launch and
@@ -26,8 +25,7 @@ struct AgentDataRootTests {
         let root = AgentDataRoot.resolve(
             directoryName: "clawddy-dev",
             isRunningTests: false,
-            homeDirectory: home,
-            temporaryDirectory: temporary)
+            homeDirectory: home)
         #expect(root.url.path == "/Users/example/.config/clawddy-dev")
         #expect(root.agentsFile.path == "/Users/example/.config/clawddy-dev/agents.json")
         #expect(root.statusDir.path == "/Users/example/.config/clawddy-dev/status")
@@ -78,15 +76,14 @@ struct AgentDataRootTests {
         let first = AgentDataRoot.resolve(
             directoryName: "ghostty-agents",
             isRunningTests: true,
-            homeDirectory: home,
-            temporaryDirectory: temporary)
+            homeDirectory: home)
         let second = AgentDataRoot.resolve(
             directoryName: nil,
             isRunningTests: true,
-            homeDirectory: home,
-            temporaryDirectory: temporary)
-        #expect(first.url.deletingLastPathComponent().path == temporary.path)
-        #expect(second.url.deletingLastPathComponent().path == temporary.path)
+            homeDirectory: home)
+        let temporary = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        #expect(first.url.deletingLastPathComponent().standardizedFileURL.path == temporary)
+        #expect(second.url.deletingLastPathComponent().standardizedFileURL.path == temporary)
         #expect(first != second)
         #expect(AgentDataRoot.isRunningTests(environment: [
             "XCTestConfigurationFilePath": "/tmp/x.xctestconfiguration",
@@ -114,5 +111,38 @@ struct AgentDataRootTests {
 
         // Ends the holder's lifetime here, not at its last use above.
         try holder.close()
+    }
+
+    /// Launch scripts live in `<root>/runtime/launch/`, and the startup
+    /// sweep empties only that folder. A `clawddy-*.sh` file outside it, as
+    /// another instance once kept in the shared temporary folder, survives.
+    @Test func launchScriptsUnderRoot() throws {
+        let fm = FileManager.default
+        let sandbox = fm.temporaryDirectory
+            .appendingPathComponent("clawddy-launch-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: sandbox) }
+        let root = AgentDataRoot(url: sandbox.appendingPathComponent("root", isDirectory: true))
+        let agentID = UUID()
+
+        let script = root.newLaunchScriptURL(agentID: agentID)
+        #expect(script.deletingLastPathComponent().path == root.url.path + "/runtime/launch")
+        #expect(script.lastPathComponent.hasPrefix("clawddy-\(agentID.uuidString)-"))
+        #expect(script.pathExtension == "sh")
+        #expect(root.newLaunchScriptURL(agentID: agentID) != script)
+
+        let foreign = sandbox.appendingPathComponent("shared/clawddy-\(UUID().uuidString).sh")
+        try fm.createDirectory(
+            at: foreign.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try Data("#!/bin/zsh\n".utf8).write(to: foreign)
+        try fm.createDirectory(at: root.launchDir, withIntermediateDirectories: true)
+        try Data("#!/bin/zsh\n".utf8).write(to: script)
+
+        try root.resetLaunchDir()
+
+        #expect(try fm.contentsOfDirectory(atPath: root.launchDir.path).isEmpty)
+        let attributes = try fm.attributesOfItem(atPath: root.launchDir.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+        #expect(fm.fileExists(atPath: foreign.path))
     }
 }

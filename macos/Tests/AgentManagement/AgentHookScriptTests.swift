@@ -112,6 +112,55 @@ struct AgentHookScriptTests {
             .appendingPathComponent(".config/ghostty-agents/status").path))
     }
 
+    /// The real installed script, run without its argument, exits non-zero
+    /// and writes nothing, although agent identity and a status folder are in
+    /// its environment. The command line the installers write carries the
+    /// folder and records into it.
+    @Test func hookScriptRequiresStatusDirArgument() throws {
+        let fm = FileManager.default
+        let sandbox = fm.temporaryDirectory
+            .appendingPathComponent("clawddy-hook-argument-tests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: sandbox) }
+        let root = AgentDataRoot(url: sandbox.appendingPathComponent("root", isDirectory: true))
+        let home = sandbox.appendingPathComponent("home", isDirectory: true)
+        let environmentStatus = sandbox.appendingPathComponent("environment-status", isDirectory: true)
+        let payload = sandbox.appendingPathComponent("payload.json")
+        try fm.createDirectory(at: home, withIntermediateDirectories: true)
+        try AgentHookRuntime.install(root: root)
+        try Data(#"{"session_id":"session-1","hook_event_name":"SessionStart"}"#.utf8).write(to: payload)
+        let agentID = UUID()
+
+        func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+            process.environment = [
+                "GHOSTTY_AGENT_ID": agentID.uuidString,
+                "GHOSTTY_AGENT_PROVIDER": AgentProviderID.claudeCode.rawValue,
+                "GHOSTTY_AGENT_LAUNCH_GENERATION": UUID().uuidString,
+                "GHOSTTY_AGENT_STATUS_DIR": environmentStatus.path,
+                "HOME": home.path,
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "TMPDIR": home.path,
+            ]
+            process.standardInput = try FileHandle(forReadingFrom: payload)
+            process.standardError = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            return process.terminationStatus
+        }
+
+        let before = try filesUnder(sandbox)
+        #expect(try run(AgentHookRuntime.scriptURL(root: root).path, []) != 0)
+        #expect(try filesUnder(sandbox) == before)
+
+        #expect(try run("/bin/sh", ["-c", AgentHookRuntime.command(root: root)]) == 0)
+        #expect(fm.fileExists(atPath: root.statusDir
+            .appendingPathComponent("\(agentID.uuidString).events").path))
+        #expect(!fm.fileExists(atPath: environmentStatus.path))
+        #expect(!fm.fileExists(atPath: home.appendingPathComponent(".config").path))
+    }
+
     @Test func providerExitIsJournaledBeforeFallbackShell() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("clawddy-exit-hook-tests-\(UUID().uuidString)")
@@ -235,11 +284,11 @@ private final class HookFixture {
     ) -> Process {
         let process = Process()
         process.executableURL = script
+        process.arguments = [status.path]
         process.environment = [
             "GHOSTTY_AGENT_ID": agentID.uuidString,
             "GHOSTTY_AGENT_PROVIDER": provider.rawValue,
             "GHOSTTY_AGENT_LAUNCH_GENERATION": generation.uuidString,
-            "GHOSTTY_AGENT_STATUS_DIR": status.path,
             "HOME": (home ?? root).path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "TMPDIR": root.path,
@@ -275,4 +324,14 @@ private final class HookFixture {
             try JSONDecoder().decode(AgentRawProviderEvent.self, from: $0)
         }
     }
+}
+
+/// Every path under `folder` with its size, to show that a run wrote nothing.
+func filesUnder(_ folder: URL) throws -> [String: Int] {
+    let enumerator = try #require(FileManager.default.enumerator(atPath: folder.path))
+    var result: [String: Int] = [:]
+    while let path = enumerator.nextObject() as? String {
+        result[path] = (enumerator.fileAttributes?[.size] as? NSNumber)?.intValue ?? -1
+    }
+    return result
 }

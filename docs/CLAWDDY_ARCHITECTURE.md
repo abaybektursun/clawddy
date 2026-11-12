@@ -284,7 +284,9 @@ agent is first launched:
 ```
 
 Claude Code registers it in `<CLAUDE_CONFIG_DIR>/settings.json`; Codex registers
-it in `<CODEX_HOME>/hooks.json`. Each adapter removes only older Clawddy-owned
+it in `<CODEX_HOME>/hooks.json`. The registered command is the script path
+followed by the root's status folder. The script records only into the folder
+named by that argument; without it, it exits non-zero and writes nothing. Each adapter removes only older Clawddy-owned
 handlers, preserves unrelated groups and settings, writes mode `0600`, and keeps
 one backup of the original user file. Integration is not performed at app
 startup, so merely opening Clawddy never changes a provider configuration.
@@ -362,8 +364,9 @@ presentation fields, and forwards the exact input to the user's original
 command. Only that command's output reaches Claude, so an existing status line
 continues to render unchanged.
 
-The proxy atomically publishes the same status-line input at Clawddy's explicit
-`GHOSTTY_AGENT_STATUS_DIR` (the default path is shown below):
+The proxy atomically publishes the same status-line input into the status
+folder passed as its first argument. There is no default; without the argument
+it exits non-zero and writes nothing:
 
 ```text
 ~/.config/ghostty-agents/status/<agent-uuid>.metadata.json
@@ -526,6 +529,13 @@ always builds the test identity (`com.mitchellh.ghostty.clawddy-tests`,
 products under `<build root>/tests`), whatever `--identity` says. Only the
 production bundle ID registers Option-Space and starts the updater.
 
+At launch, before any terminal exists, the app removes the agent identity
+variables (`GHOSTTY_AGENT_ID`, `GHOSTTY_AGENT_NAME`, `GHOSTTY_AGENT_PROVIDER`,
+`GHOSTTY_AGENT_LAUNCH_GENERATION`, `GHOSTTY_AGENT_STATUS_DIR`, and the four
+`CLAWDDY_*` agent names) from its own environment, so an app started from an
+agent's terminal cannot pass that identity on. agent-cron's
+`GHOSTTY_AGENT_CRON_*` variables are left alone.
+
 It contains provider-tagged unread and last-applied completion identities,
 pending provider renames, and per-agent event-journal byte offsets. The durable
 last-applied identity makes replay idempotent even after unread state is
@@ -547,8 +557,8 @@ Startup order:
 Provider hook installation remains a first-launch action, not a startup action.
 
 Shutdown cancels timers and watchers, removes surface observers, and flushes
-persisted state. Temporary `clawddy-<uuid>.sh` launch scripts are cleaned on the
-next start.
+persisted state. Launch scripts live in `<root>/runtime/launch/`; the next start
+empties that folder and nothing else.
 
 ## Workspace and Focus
 
@@ -630,7 +640,8 @@ testing, and accessible semantics must not depend on it.
   serialize Clawddy writers, detect concurrent external changes, and keep its
   backup behavior. Codex hook trust is never bypassed.
 - Keychain access uses the account home. Configuration and telemetry isolation
-  uses `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and `GHOSTTY_AGENT_STATUS_DIR`; do not
+  uses `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and the status folder passed to the
+  hook script and the status-line proxy; do not
   copy credentials or create a second login Keychain for an alternate-home
   installation.
 - New installations default Claude Code to `--dangerously-skip-permissions` and

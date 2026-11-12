@@ -51,8 +51,7 @@ final class ClawddyController: NSObject {
             directoryName: Bundle.main.object(
                 forInfoDictionaryKey: AgentDataRoot.infoKey) as? String,
             isRunningTests: isTestHost,
-            homeDirectory: home,
-            temporaryDirectory: FileManager.default.temporaryDirectory)
+            homeDirectory: home)
         if !isTestHost, let mismatch = AgentDataRoot.identityMismatch(
             bundleIdentifier: Bundle.main.bundleIdentifier,
             root: root,
