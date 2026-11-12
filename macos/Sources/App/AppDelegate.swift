@@ -444,6 +444,10 @@ class AppDelegate: NSObject,
 
     @MainActor
     func applicationWillTerminate(_ notification: Notification) {
+        // We have no notifications we want to persist after death,
+        // so remove them all now. In the future we may want to be
+        // more selective and only remove surface-targeted notifications.
+        UNUserNotificationCenter.current().removeAllDeliveredNotifications()
         clawddy.shutdown()
     }
 
