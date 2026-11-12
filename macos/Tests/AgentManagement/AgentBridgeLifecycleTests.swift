@@ -152,6 +152,33 @@ struct AgentBridgeLifecycleTests {
         #expect(agent.displayState == .failed)
     }
 
+    /// Flipped from `knownWrong_hostRefusingPresentLeavesAgentLaunching`
+    /// (P3.2): with no terminal to run the launch, the agent couldn't start,
+    /// and the launch timeout changes nothing afterwards.
+    @Test func hostRefusingPresentLeavesAgentFailedToStart() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        h.host.refusesPresent = true
+
+        try h.activate(id)
+
+        let agent = try h.agent(id)
+        #expect(h.host.calls == [.select(id), .present(id)])
+        #expect(agent.displayState == .failed)
+        #expect(agent.failureMessage == "The agent's terminal could not be opened.")
+        #expect(agent.surfaceState == .failed)
+        #expect(agent.processState == .exited)
+        #expect(try h.launchScripts().isEmpty)
+        #expect(h.presentationChanges.isEmpty)
+        #expect(h.aggregateChanges == [.idle, .attention])
+        #expect(h.notifier.posted.isEmpty)
+        h.scheduler.advance(by: 10)
+        #expect(agent.displayState == .failed)
+        #expect(agent.telemetryHealth == .awaiting)
+    }
+
     @Test func providerExitBeforeSessionStartIsStartFailure() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -229,6 +256,111 @@ struct AgentBridgeLifecycleTests {
 
         h.scheduler.advance(by: 10)
         #expect(h.surfaceDeaths == [id])
+    }
+
+    /// The host owns the only record of a surface. A close it reports ends
+    /// that agent's launch and removes the surface with its observers;
+    /// another agent's surface and launch are untouched.
+    @Test func surfaceDeathFromHostRemovesOnlyRecord() async throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        let other = try h.addAgent("Other")
+        h.start()
+        try h.launch(id)
+        try h.launch(other)
+        let surface = try #require(h.host.surfaces[id])
+
+        NotificationCenter.default.post(
+            name: Ghostty.Notification.ghosttyCloseSurface,
+            object: surface,
+            userInfo: ["process_alive": false])
+        await yieldToMainActor(until: { !h.host.hasSurface(id: id) })
+
+        let agent = try h.agent(id)
+        #expect(agent.displayState == .dead)
+        #expect(agent.surfaceState == .closed)
+        #expect(!h.host.hasSurface(id: id))
+        #expect(h.surfaceDeaths == [id])
+        #expect(h.providers.cleanups == [id])
+        #expect(try h.agent(other).displayState == .idle)
+        #expect(h.host.hasSurface(id: other))
+
+        // The removed surface reports nothing more.
+        NotificationCenter.default.post(
+            name: Ghostty.Notification.ghosttyCloseSurface,
+            object: surface,
+            userInfo: ["process_alive": false])
+        await yieldToMainActor(until: { false }, limit: 10)
+        #expect(h.surfaceDeaths == [id])
+        #expect(h.host.hasSurface(id: other))
+    }
+
+    /// A close the host reports for an earlier launch, here one that was
+    /// still on its way when the agent restarted, changes nothing.
+    @Test func closeFromEarlierLaunchIsIgnored() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.launch(id)
+        let first = try h.generation(id)
+        try h.providerExited(id, status: 0)
+        try h.activate(id)
+
+        h.bridge.surfaceClosed(id: id, generation: first, processAlive: false)
+
+        let agent = try h.agent(id)
+        #expect(agent.displayState == .launching)
+        #expect(agent.surfaceState == .open)
+        #expect(h.host.hasSurface(id: id))
+        #expect(h.surfaceDeaths.isEmpty)
+        #expect(try h.launchScripts().count == 1)
+        #expect(h.diagnostics.messages.contains("ignored close of an earlier surface of \(id)"))
+    }
+
+    /// Program status reaches the bridge inline, from the surface the host
+    /// presents, tagged with its agent and launch. A surface the host does
+    /// not present reaches nothing, and a report for an earlier launch is
+    /// ignored.
+    @Test func programStatusReachesBridgeWithAgentAndGeneration() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        let other = try h.addAgent("Other")
+        h.start()
+        try h.launch(id)
+        try h.launch(other)
+        let launch = try h.generation(id)
+        let surface = try #require(h.host.surfaces[id])
+        let working = Ghostty.Action.ProgramStatus(
+            state: .working, kind: nil, progress: nil, id: nil, app: nil, title: nil, message: nil)
+        let blocked = Ghostty.Action.ProgramStatus(
+            state: .blocked, kind: .permission, progress: nil, id: nil, app: nil, title: nil,
+            message: nil)
+
+        NotificationCenter.default.post(
+            name: .ghosttyDidReceiveProgramStatus,
+            object: surface,
+            userInfo: [Notification.Name.ProgramStatusKey: working])
+
+        #expect(h.bridge.lastProgramStatus == [id: working])
+        #expect(h.diagnostics.messages.last
+            == "program status \(id) generation \(launch): working kind=- id=-")
+
+        let before = h.diagnostics.messages
+        NotificationCenter.default.post(
+            name: .ghosttyDidReceiveProgramStatus,
+            object: NSObject(),
+            userInfo: [Notification.Name.ProgramStatusKey: blocked])
+        #expect(h.bridge.lastProgramStatus == [id: working])
+        #expect(h.diagnostics.messages == before)
+
+        h.bridge.programStatus(id: id, generation: UUID(), report: blocked)
+        #expect(h.bridge.lastProgramStatus == [id: working])
+        #expect(h.diagnostics.messages.last == "ignored program status for \(id)")
+        // Reporting changes no agent state yet.
+        #expect(try h.agent(id).displayState == .idle)
     }
 
     @Test func restartNewGenerationIgnoresOldEvents() throws {

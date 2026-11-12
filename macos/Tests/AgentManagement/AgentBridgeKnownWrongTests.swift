@@ -187,29 +187,4 @@ struct AgentBridgeKnownWrongTests {
         #expect(agent.metadata?.modelID == "")
         #expect(agent.metadata?.permissionMode == "")
     }
-
-    /// Right: a host that refuses to present leaves the agent in a failed-to-start state (P3.2).
-    @Test func knownWrong_hostRefusingPresentLeavesAgentLaunching() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        h.host.refusesPresent = true
-
-        try h.activate(id)
-
-        let agent = try h.agent(id)
-        #expect(h.host.calls == [.select(id), .present(id)])
-        #expect(agent.displayState == .launching)
-        #expect(agent.surfaceState == .opening)
-        #expect(agent.processState == .launching)
-        #expect(try h.launchScripts().isEmpty)
-        #expect(h.presentationChanges.isEmpty)
-        // The launch timeout still fires, but a surface that is still opening
-        // shows as starting whatever the telemetry says, so it stays so.
-        h.scheduler.advance(by: 10)
-        #expect(agent.telemetryHealth == .unavailable(
-            "The terminal is running, but agent activity status is unavailable."))
-        #expect(agent.displayState == .launching)
-    }
 }

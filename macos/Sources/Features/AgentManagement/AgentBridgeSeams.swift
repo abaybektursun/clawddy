@@ -1,5 +1,4 @@
 import Foundation
-import GhosttyKit
 @preconcurrency import UserNotifications
 import os
 
@@ -212,19 +211,11 @@ enum AgentDiagnostics {
 
 // MARK: - Surface host
 
-/// A presented agent terminal. It posts `Ghostty.Notification.ghosttyCloseSurface`
-/// with itself as the object when it closes, and knows whether its process
-/// has exited.
-@MainActor
-protocol AgentSurface: AnyObject {
-    var processExited: Bool { get }
-}
-
-extension Ghostty.SurfaceView: AgentSurface {}
-
-/// What presents agent terminals for the bridge. It is passed to each
-/// activation rather than held by the bridge; `AgentDetailViewController`
-/// is the production host.
+/// What presents agent terminals for the bridge; `AgentDetailViewController`
+/// is the production host. It is passed to each activation, and the bridge
+/// keeps only a weak reference to the last one. The host is the only owner
+/// of agent surfaces: it creates each one from its own app, observes it with
+/// `observeAgentSurface`, and drops its observers with it.
 @MainActor
 protocol AgentSurfaceHost: AnyObject {
     func hasSurface(id: UUID) -> Bool
@@ -235,19 +226,58 @@ protocol AgentSurfaceHost: AnyObject {
         agent: AgentInstance,
         focusTerminal: Bool,
         select: Bool,
-        createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+        createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool
     /// Presents the agent's terminal and returns whether it was newly created.
     @discardableResult
     func presentPreparedSurface(
         projectName: String,
         agent: AgentInstance,
-        createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+        createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool
-    func agentSurface(for id: UUID) -> (any AgentSurface)?
+    /// Reports each surface whose process has exited to the bridge as closed.
+    func reportExitedSurfaces()
     func removeSurface(id: UUID)
 }
 
-extension AgentDetailViewController: AgentSurfaceHost {
-    func agentSurface(for id: UUID) -> (any AgentSurface)? { surfaceView(for: id) }
+extension AgentDetailViewController: AgentSurfaceHost {}
+
+/// Reports one agent surface to the bridge, tagged with the agent and the
+/// launch the surface was created for: its close, and each program-status
+/// report. The host calls this in the same main-thread turn that creates the
+/// surface, so no report is missed, and removes the returned observers when
+/// it drops the surface.
+func observeAgentSurface(
+    _ surface: AnyObject,
+    agentID: UUID,
+    generation: UUID?,
+    bridge: AgentBridge
+) -> [NSObjectProtocol] {
+    let center = NotificationCenter.default
+    let close = center.addObserver(
+        forName: Ghostty.Notification.ghosttyCloseSurface,
+        object: surface,
+        queue: .main
+    ) { [weak bridge] notification in
+        let processAlive = notification.userInfo?["process_alive"] as? Bool ?? false
+        // Closing frees the surface, which must not happen inside the app
+        // tick that posted this.
+        Task { @MainActor [bridge] in
+            bridge?.surfaceClosed(id: agentID, generation: generation, processAlive: processAlive)
+        }
+    }
+    let status = center.addObserver(
+        forName: .ghosttyDidReceiveProgramStatus,
+        object: surface,
+        queue: .main
+    ) { [weak bridge] notification in
+        guard let report = notification.userInfo?[Notification.Name.ProgramStatusKey]
+            as? Ghostty.Action.ProgramStatus
+        else { return }
+        // Inline, so reports apply in the order the program sent them.
+        MainActor.assumeIsolated {
+            bridge?.programStatus(id: agentID, generation: generation, report: report)
+        }
+    }
+    return [close, status]
 }

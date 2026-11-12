@@ -404,7 +404,7 @@ final class ClawddyController: NSObject {
     @discardableResult
     func showWorkspace(activate: Bool = true) -> NSWindow? {
         if workspaceWindow == nil {
-            let detailVC = AgentDetailViewController(ghostty: ghostty)
+            let detailVC = AgentDetailViewController(ghostty: ghostty, bridge: bridge)
             self.detailVC = detailVC
 
             let navigationView = AgentInteractiveHostingView(rootView: AgentNavigationView(
@@ -675,7 +675,7 @@ final class ClawddyController: NSObject {
         project: AgentProject,
         scope: AgentWorkspaceModel.Scope? = nil
     ) {
-        guard let app = ghostty.app, let detailVC else { return }
+        guard let detailVC else { return }
         applyAgentSelection(.reveal(scope: scope, agentID: id))
         guard detailVC.activeID == id else { return }
         // Record intent before preparation starts. It stays pending while the
@@ -683,7 +683,7 @@ final class ClawddyController: NSObject {
         // reports the presented surface, so the first start and restarts are
         // focused and acknowledged without a second activation.
         explicitlyViewedAgentID = id
-        bridge.activateAgent(id: id, app: app, host: detailVC, project: project)
+        bridge.activateAgent(id: id, host: detailVC, project: project)
         updateViewingState()
         if let agent = bridge.agents[id] {
             workspaceWindow?.title = "\(project.name) — \(agent.name)"

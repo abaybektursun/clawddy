@@ -275,18 +275,6 @@ enum AgentSurfaceLaunchOutcome: Sendable {
         integrationIssue: String?)
 }
 
-private struct AgentAppHandle: @unchecked Sendable {
-    var value: ghostty_app_t
-}
-
-private final class AgentSurfaceHostReference: @unchecked Sendable {
-    weak var value: (any AgentSurfaceHost)?
-
-    init(_ value: any AgentSurfaceHost) {
-        self.value = value
-    }
-}
-
 struct AgentLaunchCoordinator: Sendable {
     let providers: AgentProviderTable
     let root: AgentDataRoot
@@ -449,8 +437,13 @@ final class AgentBridge {
     /// within this window, the state is stale (e.g., user cancelled).
     private static let compactingTimeout: TimeInterval = 30
 
-    private var surfaceViews: [UUID: any AgentSurface] = [:]
-    private var surfaceObservers: [UUID: NSObjectProtocol] = [:]
+    /// The host of the last activation. The surfaces are its own; the bridge
+    /// keeps only this weak reference, to present launches that finish
+    /// preparing and to ask for processes that exited.
+    @ObservationIgnored private weak var surfaceHost: (any AgentSurfaceHost)?
+    /// The last program-status report from each agent's current launch.
+    /// Nothing derives agent state from it yet.
+    @ObservationIgnored private(set) var lastProgramStatus: [UUID: Ghostty.Action.ProgramStatus] = [:]
     private var launchTimers: [UUID: any AgentTimer] = [:]
 
     private var statusDir: URL { root.statusDir }
@@ -521,10 +514,6 @@ final class AgentBridge {
         launchTimers.removeAll()
         for timer in compactingTimers.values { timer.invalidate() }
         compactingTimers.removeAll()
-        for observer in surfaceObservers.values {
-            NotificationCenter.default.removeObserver(observer)
-        }
-        surfaceObservers.removeAll()
         removeAllLaunchScripts(synchronously: true)
         persistState(synchronously: true)
     }
@@ -675,9 +664,9 @@ final class AgentBridge {
     /// Starts or reveals an agent. This never declares the agent viewed:
     /// viewing requires a presented live surface and a key workspace window,
     /// which only the workspace owner can reconcile.
-    func activateAgent(id: UUID, app: ghostty_app_t, host: any AgentSurfaceHost,
-                       project: AgentProject) {
+    func activateAgent(id: UUID, host: any AgentSurfaceHost, project: AgentProject) {
         guard let agent = agents[id] else { return }
+        surfaceHost = host
 
         if host.hasSurface(id: id), agent.processState == .exited {
             discardSurfaceForRestart(id: id, host: host, provider: agent.provider)
@@ -719,8 +708,6 @@ final class AgentBridge {
         let path = effectiveEnvironmentPath
         let workingDirectory = project.workingDirectory
         let projectName = project.name
-        let appHandle = AgentAppHandle(value: app)
-        let hostReference = AgentSurfaceHostReference(host)
         let launchCoordinator = AgentLaunchCoordinator(
             providers: providers,
             root: root)
@@ -738,7 +725,7 @@ final class AgentBridge {
         io.async { [weak self] in
             let outcome = launchCoordinator.prepare(launchRequest)
             io.onMainActor { [weak self] in
-                guard let self, let host = hostReference.value else {
+                guard let self, let host = self.surfaceHost else {
                     if case .success(let launch) = outcome {
                         io.global {
                             try? FileManager.default.removeItem(at: launch.scriptURL)
@@ -751,7 +738,6 @@ final class AgentBridge {
                     agentID: id,
                     projectName: projectName,
                     workingDirectory: workingDirectory,
-                    app: appHandle.value,
                     host: host)
             }
         }
@@ -776,7 +762,6 @@ final class AgentBridge {
         agentID: UUID,
         projectName: String,
         workingDirectory: String?,
-        app: ghostty_app_t,
         host: any AgentSurfaceHost
     ) {
         guard let agent = agents[agentID] else {
@@ -801,12 +786,7 @@ final class AgentBridge {
             guard agent.launchGeneration == generation,
                   agent.provider == provider
             else { return }
-            apply(
-                .launchFailed(generation: generation, message: issue.localizedDescription),
-                to: agent)
-            launchTimers[agentID]?.invalidate()
-            launchTimers.removeValue(forKey: agentID)
-            updateAggregate()
+            failLaunch(agent, generation: generation, message: issue.localizedDescription)
 
         case .success(let launch):
             guard agent.launchGeneration == launch.generation,
@@ -829,27 +809,27 @@ final class AgentBridge {
                 surfaceConfig.command = launch.scriptURL.path
                 surfaceConfig.workingDirectory = workingDirectory
                 surfaceConfig.environmentVariables = launch.environment
-                return (app, surfaceConfig)
+                return surfaceConfig
             }
-            guard isNew, let surface = host.agentSurface(for: agentID) else {
-                removeFileOffMain(launch.scriptURL)
-                launchScripts.removeValue(forKey: agentID)
+            guard isNew else {
+                // No terminal will run the launch script.
+                removeLaunchScript(for: agentID)
+                failLaunch(
+                    agent,
+                    generation: launch.generation,
+                    message: "The agent's terminal could not be opened.")
                 return
             }
-            surfaceViews[agentID] = surface
             apply(.surfaceOpened(generation: launch.generation), to: agent)
-            let observer = NotificationCenter.default.addObserver(
-                forName: Ghostty.Notification.ghosttyCloseSurface,
-                object: surface,
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.handleSurfaceDeath(id: agentID)
-                }
-            }
-            surfaceObservers[agentID] = observer
             onSurfacePresentationChanged?(agentID)
         }
+    }
+
+    private func failLaunch(_ agent: AgentInstance, generation: UUID, message: String) {
+        apply(.launchFailed(generation: generation, message: message), to: agent)
+        launchTimers[agent.id]?.invalidate()
+        launchTimers.removeValue(forKey: agent.id)
+        updateAggregate()
     }
 
     // MARK: - Fork
@@ -987,10 +967,9 @@ final class AgentBridge {
         // manufacturing any lifecycle state.
         requestStatusPoll(after: 0)
 
-        // Check for process exits that the notification might have missed (e.g., crashes)
-        for (id, surface) in surfaceViews where surface.processExited {
-            handleSurfaceDeath(id: id)
-        }
+        // Process exits that posted no close (an abnormal exit keeps its
+        // terminal open with an error message).
+        surfaceHost?.reportExitedSurfaces()
     }
 
     /// Evaluates telemetry confidence only after a complete journal
@@ -1389,15 +1368,40 @@ final class AgentBridge {
 
     // MARK: - Surface Management
 
+    /// The host reports that an agent's terminal closed, or that its process
+    /// exited; `processAlive` says whether the process was still running.
+    /// `generation` is the launch the surface was created for: a close from
+    /// an earlier launch changes nothing, and nil closes the current one.
+    func surfaceClosed(id: UUID, generation: UUID?, processAlive: Bool) {
+        guard !isTerminating, let agent = agents[id] else { return }
+        if let generation, agent.launchGeneration != generation {
+            diagnose(.debug, "ignored close of an earlier surface of \(id)")
+            return
+        }
+        diagnose(.info, "surface death: \(id)\(processAlive ? ", process running" : "")")
+        destroySurface(id: id)
+    }
+
+    /// One program-status report from the terminal of an agent's launch. It
+    /// arrives inside the app tick, so nothing here may free a surface.
+    func programStatus(id: UUID, generation: UUID?, report: Ghostty.Action.ProgramStatus) {
+        guard let agent = agents[id], let generation, agent.launchGeneration == generation else {
+            diagnose(.debug, "ignored program status for \(id)")
+            return
+        }
+        lastProgramStatus[id] = report
+        let kind = report.kind.map { String(describing: $0) } ?? "-"
+        diagnose(
+            .debug,
+            "program status \(id) generation \(generation): \(report.state) kind=\(kind) id=\(report.id ?? "-")")
+    }
+
     private func discardSurfaceForRestart(
         id: UUID,
         host: any AgentSurfaceHost,
         provider: AgentProviderID
     ) {
-        surfaceViews.removeValue(forKey: id)
-        if let observer = surfaceObservers.removeValue(forKey: id) {
-            NotificationCenter.default.removeObserver(observer)
-        }
+        lastProgramStatus.removeValue(forKey: id)
         launchTimers[id]?.invalidate()
         launchTimers.removeValue(forKey: id)
         compactingTimers[id]?.invalidate()
@@ -1409,7 +1413,7 @@ final class AgentBridge {
     }
 
     private func destroySurface(id: UUID) {
-        surfaceViews.removeValue(forKey: id)
+        lastProgramStatus.removeValue(forKey: id)
         launchTimers[id]?.invalidate()
         launchTimers.removeValue(forKey: id)
         compactingTimers[id]?.invalidate()
@@ -1420,11 +1424,6 @@ final class AgentBridge {
             io.async { cleanup(provider, id) }
         }
 
-        // Remove process exit observer
-        if let observer = surfaceObservers.removeValue(forKey: id) {
-            NotificationCenter.default.removeObserver(observer)
-        }
-
         if let agent = agents[id] {
             apply(.surfaceDied(generation: agent.launchGeneration), to: agent)
         }
@@ -1432,11 +1431,6 @@ final class AgentBridge {
         onSurfacePresentationChanged?(id)
         updateAggregate()
         persistState()
-    }
-
-    private func handleSurfaceDeath(id: UUID) {
-        diagnose(.info, "surface death: \(id)")
-        destroySurface(id: id)
     }
 
     // MARK: - Notifications

@@ -13,6 +13,10 @@ private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "Agent
 /// syncFocus → ghostty_surface_set_focus) runs unchanged.
 ///
 /// All keys are UUID-based. Zero rekey on rename.
+///
+/// This controller is the only owner of agent surfaces. It reports each
+/// surface's close and program status to the bridge, tagged with the launch
+/// the surface was created for.
 final class AgentDetailViewController: NSViewController {
 
     /// Everything one agent's terminal needs, created and destroyed together.
@@ -20,9 +24,14 @@ final class AgentDetailViewController: NSViewController {
         let host: AgentTerminalHost
         let container: TerminalViewContainer
         let surface: Ghostty.SurfaceView
+        /// The launch the surface was created for.
+        let generation: UUID?
+        /// Report the surface to the bridge; removed with the pane.
+        let observers: [NSObjectProtocol]
     }
 
     private weak var ghostty: Ghostty.App?
+    private let bridge: AgentBridge
 
     private var panesByID: [UUID: Pane] = [:]
     private(set) var activeID: UUID?
@@ -40,8 +49,9 @@ final class AgentDetailViewController: NSViewController {
         didSet { headerModel.onStart = onStartAgent }
     }
 
-    init(ghostty: Ghostty.App) {
+    init(ghostty: Ghostty.App, bridge: AgentBridge) {
         self.ghostty = ghostty
+        self.bridge = bridge
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -50,6 +60,9 @@ final class AgentDetailViewController: NSViewController {
 
     deinit {
         for o in keyObservers { NotificationCenter.default.removeObserver(o) }
+        for pane in panesByID.values {
+            pane.observers.forEach(NotificationCenter.default.removeObserver)
+        }
     }
 
     override func loadView() {
@@ -156,7 +169,7 @@ final class AgentDetailViewController: NSViewController {
         agent: AgentInstance,
         focusTerminal: Bool = true,
         select: Bool = true,
-        createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+        createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool {
         let id = agent.id
         // First: detaches the previous container, drops the previous host's
@@ -170,7 +183,7 @@ final class AgentDetailViewController: NSViewController {
 
         if panesByID[id] == nil {
             guard let ghostty else { fatalError("AgentDetailViewController used without ghostty") }
-            guard let (app, config) = createConfig() else {
+            guard let app = ghostty.app, let config = createConfig() else {
                 // No pane was created; presentation already reflects that.
                 return false
             }
@@ -188,7 +201,16 @@ final class AgentDetailViewController: NSViewController {
             // shown via selectAgent would keep a nil hostingWindow and
             // syncFocus could never grant focus.
             host.hostingWindow = view.window
-            panesByID[id] = Pane(host: host, container: container, surface: surface)
+            panesByID[id] = Pane(
+                host: host,
+                container: container,
+                surface: surface,
+                generation: agent.launchGeneration,
+                observers: observeAgentSurface(
+                    surface,
+                    agentID: id,
+                    generation: agent.launchGeneration,
+                    bridge: bridge))
             isNew = true
             logger.info("created host for agent \(id)")
         }
@@ -228,7 +250,7 @@ final class AgentDetailViewController: NSViewController {
     func presentPreparedSurface(
         projectName: String,
         agent: AgentInstance,
-        createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+        createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool {
         let window = view.window
         let presentation = AgentLaunchPresentationPolicy.decide(
@@ -254,9 +276,19 @@ final class AgentDetailViewController: NSViewController {
         headerModel.showsAgentDetails = true
     }
 
+    /// Reports each agent terminal whose process has exited as closed. An
+    /// abnormal exit keeps its terminal open with an error message and posts
+    /// no close, so the bridge's heartbeat asks.
+    func reportExitedSurfaces() {
+        for (id, pane) in panesByID where pane.surface.processExited {
+            bridge.surfaceClosed(id: id, generation: pane.generation, processAlive: false)
+        }
+    }
+
     func removeSurface(id: UUID) {
         logger.info("removeSurface \(id)")
         guard let pane = panesByID.removeValue(forKey: id) else { return }
+        pane.observers.forEach(NotificationCenter.default.removeObserver)
         pane.host.focusedSurface = nil
         pane.container.removeFromSuperview()
         refreshPresentation()
@@ -273,8 +305,6 @@ final class AgentDetailViewController: NSViewController {
     func hasSurface(id: UUID) -> Bool { panesByID[id] != nil }
 
     var hasActiveSurface: Bool { activePane != nil }
-
-    func surfaceView(for id: UUID) -> Ghostty.SurfaceView? { panesByID[id]?.surface }
 
     private func attach(_ container: TerminalViewContainer) {
         guard container.superview == nil else { return }

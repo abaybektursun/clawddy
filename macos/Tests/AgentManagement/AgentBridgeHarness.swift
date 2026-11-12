@@ -157,19 +157,25 @@ final class FakeProviders: @unchecked Sendable {
     }
 }
 
+/// Stands in for a terminal: the object a test posts its close and
+/// program-status notifications with.
 @MainActor
-final class FakeSurface: AgentSurface {
+final class FakeSurface {
     var processExited = false
     let configuration: Ghostty.SurfaceConfiguration
+    /// The launch the surface was created for.
+    let generation: UUID?
+    fileprivate var observers: [NSObjectProtocol] = []
 
-    init(configuration: Ghostty.SurfaceConfiguration) {
+    init(configuration: Ghostty.SurfaceConfiguration, generation: UUID?) {
         self.configuration = configuration
+        self.generation = generation
     }
 }
 
 /// Presents agent terminals as `AgentDetailViewController` does, without
 /// creating a terminal: a surface exists from its creation until
-/// `removeSurface`.
+/// `removeSurface`, and is observed for the bridge the same way.
 @MainActor
 final class FakeSurfaceHost: AgentSurfaceHost {
     enum Call: Equatable {
@@ -181,6 +187,8 @@ final class FakeSurfaceHost: AgentSurfaceHost {
 
     /// Makes `presentPreparedSurface` create nothing and return false.
     var refusesPresent = false
+    /// Where the surfaces' closes and program status are reported.
+    weak var bridge: AgentBridge?
     private(set) var calls: [Call] = []
     private(set) var surfaces: [UUID: FakeSurface] = [:]
 
@@ -195,35 +203,47 @@ final class FakeSurfaceHost: AgentSurfaceHost {
         agent: AgentInstance,
         focusTerminal: Bool,
         select: Bool,
-        createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+        createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool {
         calls.append(.show(agent.id))
-        return create(agent.id, createConfig)
+        return create(agent, createConfig)
     }
 
     func presentPreparedSurface(
         projectName: String,
         agent: AgentInstance,
-        createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+        createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool {
         calls.append(.present(agent.id))
         guard !refusesPresent else { return false }
-        return create(agent.id, createConfig)
+        return create(agent, createConfig)
     }
 
-    func agentSurface(for id: UUID) -> (any AgentSurface)? { surfaces[id] }
+    func reportExitedSurfaces() {
+        for (id, surface) in surfaces where surface.processExited {
+            bridge?.surfaceClosed(id: id, generation: surface.generation, processAlive: false)
+        }
+    }
 
     func removeSurface(id: UUID) {
         calls.append(.remove(id))
-        surfaces[id] = nil
+        surfaces.removeValue(forKey: id)?.observers.forEach(NotificationCenter.default.removeObserver)
     }
 
     private func create(
-        _ id: UUID,
-        _ createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+        _ agent: AgentInstance,
+        _ createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool {
-        guard surfaces[id] == nil, let (_, configuration) = createConfig() else { return false }
-        surfaces[id] = FakeSurface(configuration: configuration)
+        guard surfaces[agent.id] == nil, let configuration = createConfig() else { return false }
+        let surface = FakeSurface(configuration: configuration, generation: agent.launchGeneration)
+        if let bridge {
+            surface.observers = observeAgentSurface(
+                surface,
+                agentID: agent.id,
+                generation: agent.launchGeneration,
+                bridge: bridge)
+        }
+        surfaces[agent.id] = surface
         return true
     }
 }
@@ -335,6 +355,7 @@ final class AgentBridgeHarness {
     /// Wires the bridge as `ClawddyController` does: every callback is set
     /// before `start`, which publishes the aggregate state.
     private func wire() {
+        host.bridge = bridge
         bridge.environmentPath = binFolder.path
         bridge.onAggregateStateChanged = { [weak self] in self?.aggregateChanges.append($0) }
         bridge.onSendText = { [weak self] in self?.sentText.append(SentText(id: $0, text: $1)) }
@@ -361,10 +382,7 @@ final class AgentBridgeHarness {
 
     func activate(_ id: UUID, host: (any AgentSurfaceHost)? = nil) throws {
         let project = try #require(config.project(forAgent: id))
-        // A stand-in app handle: the bridge only hands it back to the host,
-        // and the fake host never uses it.
-        let app = try #require(UnsafeMutableRawPointer(bitPattern: 1))
-        bridge.activateAgent(id: id, app: app, host: host ?? self.host, project: project)
+        bridge.activateAgent(id: id, host: host ?? self.host, project: project)
     }
 
     /// Activates the agent and applies its `SessionStart`.
