@@ -145,7 +145,7 @@ enum AgentSessionStore {
         }
     }
 
-    private static func valid(_ value: String) -> Bool {
+    static func valid(_ value: String) -> Bool {
         !value.isEmpty && value.unicodeScalars.allSatisfy(safeIDCharacters.contains)
     }
 }

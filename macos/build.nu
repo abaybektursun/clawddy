@@ -125,10 +125,17 @@ def main [
         _ => []
     }
 
+    # xcodebuild hands each TEST_RUNNER_<NAME> variable to the test process as
+    # <NAME>. The clean environment below would drop them, so pass them on.
+    let test_runner_environment = ($env | transpose name value
+        | where name starts-with "TEST_RUNNER_"
+        | each {|e| $"($e.name)=($e.value)" })
+
     (^env -i
         $"HOME=($env.HOME)"
         "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         $"TMPDIR=($temporary)/"
+        ...$test_runner_environment
         $"ZIG_LOCAL_CACHE_DIR=($zig_local_cache)"
         $"ZIG_GLOBAL_CACHE_DIR=($zig_global_cache)"
         $"COMPILATION_CACHE_CAS_PATH=($compilation_cache)"

@@ -113,6 +113,26 @@ struct AgentDataRootTests {
         try holder.close()
     }
 
+    /// The lock is free as soon as `withLock` returns or throws, not when its
+    /// handle is eventually deallocated.
+    @Test func withLockUnlocksWhenItsBodyThrows() throws {
+        struct Failure: Error {}
+        let root = AgentDataRoot(url: FileManager.default.temporaryDirectory
+            .appendingPathComponent("clawddy-lock-tests-\(UUID().uuidString)", isDirectory: true))
+        defer {
+            do {
+                try FileManager.default.removeItem(at: root.url)
+            } catch {
+                Issue.record(error)
+            }
+        }
+
+        #expect(throws: Failure.self) { try root.withLock { () -> Int in throw Failure() } }
+        #expect(try root.withLock { 42 } == 42)
+        let holder = try root.lock()
+        try holder.close()
+    }
+
     /// Launch scripts live in `<root>/runtime/launch/`, and the startup
     /// sweep empties only that folder. A `clawddy-*.sh` file outside it, as
     /// another instance once kept in the shared temporary folder, survives.

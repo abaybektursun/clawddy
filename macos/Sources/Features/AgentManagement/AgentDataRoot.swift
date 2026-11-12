@@ -21,6 +21,12 @@ struct AgentDataRoot: Equatable, Sendable {
     var launchDir: URL { runtimeDir.appendingPathComponent("launch", isDirectory: true) }
     var codexHookReviewMarker: URL { url.appendingPathComponent("codex-hook-review-required") }
     var lockFile: URL { url.appendingPathComponent("clawddy.lock") }
+    /// agent-cron's folder. Clawddy never reads, writes or copies it.
+    var cronDir: URL { url.appendingPathComponent("cron", isDirectory: true) }
+
+    func migrationReportFile(mode: AgentMigrationMode) -> URL {
+        url.appendingPathComponent("migration-\(mode.rawValue).json")
+    }
 
     static func isRunningTests(environment: [String: String]) -> Bool {
         environment["XCTestConfigurationFilePath"] != nil
@@ -121,5 +127,18 @@ struct AgentDataRoot: Equatable, Sendable {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
         }
         return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    }
+
+    /// Runs `body` holding the root's lock, and unlocks however `body` ends.
+    /// Unlocking does not wait for the handle to be deallocated, which can
+    /// happen well after the call returns.
+    func withLock<T>(_ body: () throws -> T) throws -> T {
+        let handle = try lock()
+        defer {
+            precondition(
+                flock(handle.fileDescriptor, LOCK_UN) == 0,
+                "Unlocking \(lockFile.path) failed with errno \(errno).")
+        }
+        return try body()
     }
 }

@@ -46,7 +46,7 @@ final class AgentWorkspaceModel {
         case task(projectID: UUID, taskID: UUID)
     }
 
-    private enum DefaultsKey {
+    enum DefaultsKey {
         static let scope = "clawddy.workspace.scope"
         static let selectedAgentID = "clawddy.workspace.selectedAgentID"
         static let preferredAgents = "clawddy.workspace.preferredAgents"
