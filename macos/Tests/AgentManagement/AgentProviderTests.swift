@@ -3,6 +3,10 @@ import Testing
 @testable import Ghostty
 
 struct AgentProviderTests {
+    /// Never created: event normalization reads no files.
+    private let unusedRoot = AgentDataRoot(
+        url: URL(fileURLWithPath: "/nonexistent/clawddy-provider-tests", isDirectory: true))
+
     @Test func reasoningEffortOptionsAreProviderData() {
         for provider in AgentProviderID.allCases {
             let options = provider.reasoningEffortOptions
@@ -92,25 +96,6 @@ struct AgentProviderTests {
         #expect(AgentAuthenticationPresentation.reconciledInteraction(
             current: .permission,
             authentication: .unavailable("Probe failed")) == .permission)
-    }
-
-    @Test func explicitAgentDataDirectorySupportsIsolatedAppInstances() {
-        let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
-        let isolated = URL(
-            fileURLWithPath: "/private/tmp/clawddy-isolated",
-            isDirectory: true)
-
-        #expect(AgentConfig.resolveBaseDirectory(
-            environment: ["GHOSTTY_AGENT_DATA_DIR": isolated.path],
-            defaultHomeDirectory: home) == isolated.standardizedFileURL)
-        #expect(AgentConfig.resolveBaseDirectory(
-            environment: ["GHOSTTY_AGENT_DATA_DIR": "relative/path"],
-            defaultHomeDirectory: home) == home
-                .appendingPathComponent(".config/ghostty-agents", isDirectory: true))
-        #expect(AgentConfig.resolveBaseDirectory(
-            environment: [:],
-            defaultHomeDirectory: home) == home
-                .appendingPathComponent(".config/ghostty-agents", isDirectory: true))
     }
 
     @Test func legacyAgentConfigMigratesToClaudeCode() throws {
@@ -321,7 +306,7 @@ struct AgentProviderTests {
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: executable.path)
-        let provider = CodexProvider()
+        let provider = CodexProvider(root: AgentDataRoot(url: directory))
         let generation = UUID()
         let base = AgentLaunchRequest(
             agentID: UUID(),
@@ -365,22 +350,22 @@ struct AgentProviderTests {
 
     @Test func adaptersNormalizeProviderSpecificHooksToSharedEvents() throws {
         let event = try rawEvent(name: "PermissionRequest")
-        #expect(CodexProvider().normalize(event) == [.turnInteractionChanged(.permission)])
-        #expect(ClaudeCodeProvider().normalize(event) == [.turnInteractionChanged(.permission)])
+        #expect(CodexProvider(root: unusedRoot).normalize(event) == [.turnInteractionChanged(.permission)])
+        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(event) == [.turnInteractionChanged(.permission)])
 
         let codexFailure = try rawEvent(name: "PostToolUseFailure")
-        #expect(CodexProvider().normalize(codexFailure).isEmpty)
-        #expect(ClaudeCodeProvider().normalize(codexFailure) == [
+        #expect(CodexProvider(root: unusedRoot).normalize(codexFailure).isEmpty)
+        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(codexFailure) == [
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])
 
         let childCompleted = try rawEvent(name: "SubagentStop")
-        #expect(CodexProvider().normalize(childCompleted) == [
+        #expect(CodexProvider(root: unusedRoot).normalize(childCompleted) == [
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])
-        #expect(ClaudeCodeProvider().normalize(childCompleted) == [
+        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(childCompleted) == [
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])
@@ -388,7 +373,7 @@ struct AgentProviderTests {
 
     @Test func claudeToolFailureDoesNotNormalizeToTurnFailureButStopFailureDoes() throws {
         let toolFailure = try rawEvent(name: "PostToolUseFailure")
-        let normalizedFailure = ClaudeCodeProvider().normalize(toolFailure)
+        let normalizedFailure = ClaudeCodeProvider(root: unusedRoot).normalize(toolFailure)
         #expect(!normalizedFailure.contains(.turnFailed(nil)))
         #expect(!normalizedFailure.contains(.turnCompleted(turnID: nil)))
         #expect(normalizedFailure == [
@@ -397,10 +382,10 @@ struct AgentProviderTests {
         ])
 
         let stopFailure = try rawEvent(name: "StopFailure")
-        #expect(ClaudeCodeProvider().normalize(stopFailure) == [.turnFailed(nil)])
+        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(stopFailure) == [.turnFailed(nil)])
 
         let stop = try rawEvent(name: "Stop")
-        #expect(ClaudeCodeProvider().normalize(stop) == [.turnCompleted(turnID: nil)])
+        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(stop) == [.turnCompleted(turnID: nil)])
     }
 
     @Test func capabilityMatrixDoesNotPretendUnavailableCodexTelemetryExists() {

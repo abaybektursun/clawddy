@@ -19,11 +19,17 @@ final class ClawddyController: NSObject {
     private static let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "Clawddy")
 
     private let ghostty: Ghostty.App
-    let config = AgentConfig()
-    let bridge = AgentBridge()
-    let workspaceModel = AgentWorkspaceModel(
-        defaults: AgentVisualAuditPolicy.isEnabled(
-            environment: ProcessInfo.processInfo.environment) ? nil : .standard)
+    /// True inside a test host. Clawddy then never starts: no bridge, status
+    /// item, hot key, probes or preferences, and its data root is a fresh
+    /// temporary folder.
+    private let isTestHost: Bool
+    /// Open for the life of the process; holds the data root's lock.
+    private let rootLock: FileHandle
+    let config: AgentConfig
+    let bridge: AgentBridge
+    let workspaceModel: AgentWorkspaceModel
+    private(set) lazy var settingsController = SettingsController(
+        preferencesFile: config.root.preferencesFile)
 
     /// Fires whenever aggregate agent state changes; the app resyncs its badge.
     var onAggregateStateChanged: (() -> Void)?
@@ -38,8 +44,49 @@ final class ClawddyController: NSObject {
     private var eventHandlerRef: EventHandlerRef?
 
     init(ghostty: Ghostty.App) {
+        let environment = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        isTestHost = AgentDataRoot.isRunningTests(environment: environment)
+        let root = AgentDataRoot.resolve(
+            directoryName: Bundle.main.object(
+                forInfoDictionaryKey: AgentDataRoot.infoKey) as? String,
+            isRunningTests: isTestHost,
+            homeDirectory: home,
+            temporaryDirectory: FileManager.default.temporaryDirectory)
+        if !isTestHost, let mismatch = AgentDataRoot.identityMismatch(
+            bundleIdentifier: Bundle.main.bundleIdentifier,
+            root: root,
+            homeDirectory: home) {
+            fatalError(mismatch)
+        }
+        rootLock = Self.lockOrExit(root)
+        Self.logger.info("data root \(root.url.path, privacy: .public)")
+
         self.ghostty = ghostty
+        config = AgentConfig(root: root)
+        bridge = AgentBridge(root: root)
+        workspaceModel = AgentWorkspaceModel(
+            defaults: isTestHost || AgentVisualAuditPolicy.isEnabled(
+                environment: environment) ? nil : .standard)
         super.init()
+    }
+
+    /// A second instance on the same root would double-apply every event and
+    /// race the first one's writes, so it tells the user and quits before
+    /// touching any data.
+    private static func lockOrExit(_ root: AgentDataRoot) -> FileHandle {
+        do {
+            return try root.lock()
+        } catch let inUse as AgentDataRoot.InUse {
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Clawddy is already running"
+            alert.informativeText = inUse.localizedDescription
+            alert.runModal()
+            exit(1)
+        } catch {
+            fatalError("Could not lock \(root.lockFile.path): \(error)")
+        }
     }
 
     // MARK: - App hooks
@@ -51,6 +98,8 @@ final class ClawddyController: NSObject {
     }
 
     func setup() {
+        guard !isTestHost else { return }
+
         bridge.environmentPath = AgentEnvironmentResolver.fallbackPath
         AgentEnvironmentResolver.resolve { [weak self] path in
             self?.bridge.environmentPath = path
@@ -139,7 +188,7 @@ final class ClawddyController: NSObject {
                     agentID: firstID))
                 self.showWorkspace(activate: false)?.orderBack(nil)
             case .settings:
-                SettingsController.shared.show(activate: false)
+                self.settingsController.show(activate: false)
             }
         }
     }

@@ -510,11 +510,14 @@ Only state that cannot be reconstructed is persisted in:
 ~/.config/ghostty-agents/state.json
 ```
 
-`GHOSTTY_AGENT_DATA_DIR` may select a different absolute root for the complete
-configuration, status, hook, and state tree. Parallel production-build testing
-uses this explicit boundary because Foundation's macOS home-directory APIs do
-not reliably follow an overridden `HOME`; changing `HOME` alone is not an
-isolation mechanism.
+The data root (`AgentDataRoot`) is resolved once at launch and passed to
+everything that touches the configuration, status, hook, and state tree. It is
+`~/.config/<ClawddyDataDirectoryName>`, an Info.plist key set by the
+`CLAWDDY_DATA_DIRECTORY_NAME` build setting, or a fresh temporary folder in a
+test host. Launch fails if the production bundle ID `com.mitchellh.ghostty`
+is paired with any other root than `~/.config/ghostty-agents`, or another
+bundle ID with that root. A lock file, `<root>/clawddy.lock`, refuses a second
+instance on the same root. There is no environment override.
 
 It contains provider-tagged unread and last-applied completion identities,
 pending provider renames, and per-agent event-journal byte offsets. The durable

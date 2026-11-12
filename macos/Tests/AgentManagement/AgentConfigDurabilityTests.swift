@@ -214,7 +214,7 @@ struct AgentConfigDurabilityTests {
         """
         try Data(legacy.utf8).write(to: file)
 
-        let config = AgentConfig(dataDirectory: directory)
+        let config = AgentConfig(root: AgentDataRoot(url: directory))
         #expect(config.errorMessage == nil)
         let project = try #require(config.projects.first)
         let task = try #require(project.tasks.first)
@@ -243,7 +243,7 @@ struct AgentConfigDurabilityTests {
         let validJSON = configuration(agents: [agentObject(id: Self.agentID, name: "Valid")])
         try Data(validJSON.utf8).write(to: file)
 
-        let config = AgentConfig(dataDirectory: directory)
+        let config = AgentConfig(root: AgentDataRoot(url: directory))
         #expect(config.errorMessage == nil)
         #expect(config.allAgentEntries.map(\.name) == ["Valid"])
         let projectID = try #require(config.projects.first?.id)
@@ -295,7 +295,7 @@ struct AgentConfigDurabilityTests {
         let brokenData = Data(brokenJSON.utf8)
         try brokenData.write(to: file)
 
-        let config = AgentConfig(dataDirectory: directory)
+        let config = AgentConfig(root: AgentDataRoot(url: directory))
         #expect(config.projects.isEmpty)
         #expect(config.errorMessage?.hasPrefix("Agents configuration could not be loaded") == true)
 

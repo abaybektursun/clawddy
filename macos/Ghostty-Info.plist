@@ -46,6 +46,8 @@
 			</array>
 		</dict>
 	</array>
+	<key>ClawddyDataDirectoryName</key>
+	<string>$(CLAWDDY_DATA_DIRECTORY_NAME)</string>
 	<key>GhosttyBuild</key>
 	<string></string>
 	<key>GhosttyCommit</key>

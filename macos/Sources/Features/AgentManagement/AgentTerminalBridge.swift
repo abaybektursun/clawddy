@@ -317,6 +317,7 @@ private final class AgentDetailReference: @unchecked Sendable {
 
 private struct AgentLaunchCoordinator: Sendable {
     let providerRegistry: AgentProviderRegistry
+    let root: AgentDataRoot
 
     func prepare(_ initialRequest: AgentLaunchRequest) -> AgentSurfaceLaunchOutcome {
         var request = initialRequest
@@ -325,8 +326,14 @@ private struct AgentLaunchCoordinator: Sendable {
         let provider = request.provider
         let generation = request.launchGeneration
         let adapter = providerRegistry.adapter(for: provider)
-        request.session = AgentSessionStore.session(for: agentID, provider: provider)
-        request.pendingFork = AgentSessionStore.pendingFork(for: agentID, provider: provider)
+        request.session = AgentSessionStore.session(
+            for: agentID,
+            provider: provider,
+            directory: root.statusDir)
+        request.pendingFork = AgentSessionStore.pendingFork(
+            for: agentID,
+            provider: provider,
+            directory: root.statusDir)
         let prepared: AgentPreparedLaunch
         switch adapter.prepareLaunch(request) {
         case .success(let launch): prepared = launch
@@ -347,7 +354,7 @@ private struct AgentLaunchCoordinator: Sendable {
             from: prepared.environment)
         environment["HOME"] = AgentConfig.accountHomeDirectory.path
         environment["PATH"] = request.environmentPath
-        environment["GHOSTTY_AGENT_STATUS_DIR"] = AgentConfig.statusDir.path
+        environment["GHOSTTY_AGENT_STATUS_DIR"] = root.statusDir.path
         environment["GHOSTTY_AGENT_ID"] = agentID.uuidString
         environment["GHOSTTY_AGENT_PROVIDER"] = provider.rawValue
         environment["GHOSTTY_AGENT_LAUNCH_GENERATION"] = generation.uuidString
@@ -368,7 +375,8 @@ private struct AgentLaunchCoordinator: Sendable {
             \(AgentHookRuntime.exitEventCommand(
                 provider: provider,
                 agentID: agentID,
-                generation: generation))
+                generation: generation,
+                statusDirectory: root.statusDir))
             printf '\\n\\033[33mAgent exited (status %s). Continuing in your login shell.\\033[0m\\n' "$command_status"
             exec "${SHELL:-/bin/zsh}" -l
             """
@@ -442,7 +450,8 @@ final class AgentBridge {
     private var healthRefreshGenerations: [AgentProviderID: UUID] = [:]
     private var compactingTimers: [UUID: Timer] = [:]
     private var launchScripts: [UUID: URL] = [:]
-    private let providerRegistry = AgentProviderRegistry()
+    let root: AgentDataRoot
+    private let providerRegistry: AgentProviderRegistry
     private var integrationIssues: [AgentProviderID: String] = [:]
     var environmentPath: String? {
         didSet {
@@ -467,7 +476,12 @@ final class AgentBridge {
     private var surfaceObservers: [UUID: NSObjectProtocol] = [:]
     private var launchTimers: [UUID: Timer] = [:]
 
-    private var statusDir: URL { AgentConfig.statusDir }
+    private var statusDir: URL { root.statusDir }
+
+    init(root: AgentDataRoot) {
+        self.root = root
+        providerRegistry = AgentProviderRegistry(root: root)
+    }
 
     // MARK: - Lifecycle
 
@@ -488,7 +502,8 @@ final class AgentBridge {
                     provider: entry.provider,
                     sessionID: AgentSessionStore.session(
                         for: entry.id,
-                        provider: entry.provider)?.sessionID,
+                        provider: entry.provider,
+                        directory: statusDir)?.sessionID,
                     turnID: nil,
                     launchGeneration: UUID(),
                     eventID: "legacy-unread")
@@ -626,7 +641,9 @@ final class AgentBridge {
         // that has never launched and has no persisted session identity.
         for entry in allEntries {
             if let agent = agents[entry.id] {
-                let persistedProvider = AgentSessionStore.persistedProvider(for: entry.id)
+                let persistedProvider = AgentSessionStore.persistedProvider(
+                    for: entry.id,
+                    directory: statusDir)
                 switch AgentRuntimeProviderPolicy.decision(
                     current: agent.provider,
                     requested: entry.provider,
@@ -743,7 +760,9 @@ final class AgentBridge {
         let projectName = project.name
         let appHandle = AgentAppHandle(value: app)
         let detailReference = AgentDetailReference(detailVC)
-        let launchCoordinator = AgentLaunchCoordinator(providerRegistry: providerRegistry)
+        let launchCoordinator = AgentLaunchCoordinator(
+            providerRegistry: providerRegistry,
+            root: root)
         let launchRequest = AgentLaunchRequest(
             agentID: id,
             name: name,
@@ -888,7 +907,8 @@ final class AgentBridge {
         guard providerRegistry.capabilities(for: source.provider).fork.isSupported,
               let sourceSession = AgentSessionStore.session(
                   for: sourceId,
-                  provider: source.provider)
+                  provider: source.provider,
+                  directory: statusDir)
         else {
             logger.warning("fork: no session for source \(sourceId)")
             return nil
@@ -918,7 +938,7 @@ final class AgentBridge {
         let pending = AgentPendingFork(
             provider: source.provider,
             sourceSessionID: sourceSession.sessionID)
-        guard AgentSessionStore.write(pending, for: entry.id) else {
+        guard AgentSessionStore.write(pending, for: entry.id, directory: statusDir) else {
             deleteAgent(id: entry.id, config: config)
             logger.error("fork: failed to persist source session for \(entry.id)")
             return nil
@@ -1001,8 +1021,9 @@ final class AgentBridge {
 
         // Clean status files
         let adapter = providerRegistry.adapter(for: agentProvider)
+        let statusDir = statusDir
         ioQueue.async {
-            AgentSessionStore.removeAll(for: id)
+            AgentSessionStore.removeAll(for: id, directory: statusDir)
             adapter.cleanup(agentID: id)
         }
     }
@@ -1229,10 +1250,11 @@ final class AgentBridge {
                     removeLaunchScript(for: id)
                     let provider = agent.provider
                     integrationIssues[provider] = nil
+                    let root = root
                     ioQueue.async {
-                        AgentSessionStore.clearPendingFork(for: id)
+                        AgentSessionStore.clearPendingFork(for: id, directory: root.statusDir)
                         if provider == .codex {
-                            CodexProvider.clearHookReviewRequired()
+                            CodexProvider.clearHookReviewRequired(root: root)
                         }
                     }
                     refreshProviderHealth(provider)
@@ -1322,8 +1344,9 @@ final class AgentBridge {
                 sessionID: sessionID,
                 launchGeneration: generation)
             let agentID = agent.id
+            let statusDir = statusDir
             ioQueue.async {
-                _ = AgentSessionStore.write(binding, for: agentID)
+                _ = AgentSessionStore.write(binding, for: agentID, directory: statusDir)
             }
         }
 
@@ -1601,7 +1624,7 @@ final class AgentBridge {
     // MARK: - Persistence
 
     private func loadPersistedState() -> PersistedState {
-        guard let data = try? Data(contentsOf: AgentConfig.stateURL),
+        guard let data = try? Data(contentsOf: root.stateFile),
               let state = try? JSONDecoder().decode(PersistedState.self, from: data)
         else { return PersistedState() }
         return state
@@ -1620,8 +1643,9 @@ final class AgentBridge {
         state.pendingRenames = pendingRenames
         state.eventOffsets = eventOffsets
         guard let data = try? JSONEncoder().encode(state) else { return }
+        let stateFile = root.stateFile
         let write: @Sendable () -> Void = {
-            _ = AgentConfig.atomicWrite(data, to: AgentConfig.stateURL)
+            _ = AgentConfig.atomicWrite(data, to: stateFile)
         }
         if synchronously {
             ioQueue.sync(execute: write)

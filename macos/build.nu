@@ -94,8 +94,16 @@ def main [
     # optimized but must explicitly emit a testable module; it is never used as
     # the runnable production bundle. Restrict the action to unit tests so
     # Xcode does not build or launch the permission-gated UI-test target.
+    # The test host always gets its own bundle ID and data folder name, so a
+    # test run can never share preferences, notifications or data with the
+    # live app, whatever other flags are given.
     let test_arguments = if $action == "test" {
-        ["-only-testing:GhosttyTests" "ENABLE_TESTABILITY=YES"]
+        [
+            "-only-testing:GhosttyTests"
+            "ENABLE_TESTABILITY=YES"
+            "CLAWDDY_BUNDLE_IDENTIFIER=com.mitchellh.ghostty.clawddy-tests"
+            "CLAWDDY_DATA_DIRECTORY_NAME=clawddy-tests"
+        ]
     } else {
         []
     }

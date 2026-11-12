@@ -6,7 +6,7 @@ enum AgentSessionStore {
 
     static func persistedProvider(
         for agentID: UUID,
-        directory: URL = AgentConfig.statusDir
+        directory: URL
     ) -> AgentProviderID? {
         let sessionURL = directory
             .appendingPathComponent("\(agentID.uuidString).session.json")
@@ -39,7 +39,7 @@ enum AgentSessionStore {
     static func session(
         for agentID: UUID,
         provider: AgentProviderID,
-        directory: URL = AgentConfig.statusDir
+        directory: URL
     ) -> AgentSessionBinding? {
         let taggedURL = directory
             .appendingPathComponent("\(agentID.uuidString).session.json")
@@ -69,7 +69,7 @@ enum AgentSessionStore {
     static func write(
         _ binding: AgentSessionBinding,
         for agentID: UUID,
-        directory: URL = AgentConfig.statusDir
+        directory: URL
     ) -> Bool {
         guard valid(binding.sessionID) else { return false }
         let encoder = JSONEncoder()
@@ -83,7 +83,7 @@ enum AgentSessionStore {
     static func pendingFork(
         for agentID: UUID,
         provider: AgentProviderID,
-        directory: URL = AgentConfig.statusDir
+        directory: URL
     ) -> AgentPendingFork? {
         let taggedURL = directory
             .appendingPathComponent("\(agentID.uuidString).fork.json")
@@ -109,7 +109,7 @@ enum AgentSessionStore {
     static func write(
         _ pending: AgentPendingFork,
         for agentID: UUID,
-        directory: URL = AgentConfig.statusDir
+        directory: URL
     ) -> Bool {
         guard valid(pending.sourceSessionID) else { return false }
         let encoder = JSONEncoder()
@@ -122,7 +122,7 @@ enum AgentSessionStore {
 
     static func clearPendingFork(
         for agentID: UUID,
-        directory: URL = AgentConfig.statusDir
+        directory: URL
     ) {
         for suffix in ["fork.json", "forkFrom"] {
             try? FileManager.default.removeItem(
@@ -133,7 +133,7 @@ enum AgentSessionStore {
 
     static func removeAll(
         for agentID: UUID,
-        directory: URL = AgentConfig.statusDir
+        directory: URL
     ) {
         for suffix in [
             "session.json", "session", "fork.json", "forkFrom", "lastEvent",

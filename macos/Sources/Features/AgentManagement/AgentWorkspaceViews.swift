@@ -60,7 +60,7 @@ final class AgentWorkspaceModel {
     private var preferredAgents: [String: UUID] = [:]
     private var collapsedProjectIDs: Set<UUID> = []
     private var hasPersistedProjectDisclosure = false
-    private let defaults: UserDefaults?
+    let defaults: UserDefaults?
 
     init(defaults: UserDefaults? = .standard) {
         self.defaults = defaults
@@ -503,9 +503,9 @@ struct AgentNavigationView: View {
 
                 if let error = config.errorMessage {
                     Button("Reveal Configuration Issue", systemImage: "exclamationmark.triangle.fill") {
-                        let target = FileManager.default.fileExists(atPath: AgentConfig.configURL.path)
-                            ? AgentConfig.configURL
-                            : AgentConfig.baseDir
+                        let target = FileManager.default.fileExists(atPath: config.root.agentsFile.path)
+                            ? config.root.agentsFile
+                            : config.root.url
                         NSWorkspace.shared.activateFileViewerSelecting([target])
                     }
                     .labelStyle(.iconOnly)
@@ -1229,12 +1229,27 @@ private struct NewAgentSheet: View {
     let commit: (String, AgentProviderID, AgentLaunchProfile) -> Bool
 
     @Environment(\.dismiss) private var dismiss
-    @State private var draft = AgentCreationDraft(
-        provider: Self.restoredProvider,
-        preferences: AgentPreferencesStore.load())
+    @State private var draft: AgentCreationDraft
     @State private var error: String?
     @State private var showsRunSettings = false
     @FocusState private var nameFocused: Bool
+
+    init(
+        bridge: AgentBridge,
+        taskName: String,
+        visualAuditScenario: AgentVisualAuditScenario?,
+        failureMessage: @escaping () -> String?,
+        commit: @escaping (String, AgentProviderID, AgentLaunchProfile) -> Bool
+    ) {
+        self.bridge = bridge
+        self.taskName = taskName
+        self.visualAuditScenario = visualAuditScenario
+        self.failureMessage = failureMessage
+        self.commit = commit
+        _draft = State(initialValue: AgentCreationDraft(
+            provider: Self.restoredProvider,
+            preferences: AgentPreferencesStore.load(from: bridge.root.preferencesFile)))
+    }
 
     private static var restoredProvider: AgentProviderID {
         guard let raw = UserDefaults.standard.string(forKey: providerDefaultsKey),
@@ -1257,7 +1272,7 @@ private struct NewAgentSheet: View {
             set: { provider in
                 draft.transition(
                     to: provider,
-                    preferences: AgentPreferencesStore.load())
+                    preferences: AgentPreferencesStore.load(from: bridge.root.preferencesFile))
                 error = nil
             })
     }
@@ -1363,7 +1378,7 @@ private struct NewAgentSheet: View {
                 draft.name = "Release review"
                 draft.transition(
                     to: .codex,
-                    preferences: AgentPreferencesStore.load())
+                    preferences: AgentPreferencesStore.load(from: bridge.root.preferencesFile))
                 draft.modelID = "gpt-5.6"
                 draft.reasoningEffort = "high"
                 showsRunSettings = true

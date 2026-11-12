@@ -49,18 +49,14 @@ struct AgentPreferences: Codable, Equatable, Sendable {
 }
 
 enum AgentPreferencesStore {
-    static var fileURL: URL {
-        AgentConfig.baseDir.appendingPathComponent("preferences.json")
-    }
-
-    static func load(from url: URL = fileURL) -> AgentPreferences {
+    static func load(from url: URL) -> AgentPreferences {
         guard let data = try? Data(contentsOf: url),
               let preferences = try? JSONDecoder().decode(AgentPreferences.self, from: data)
         else { return AgentPreferences() }
         return preferences
     }
 
-    static func save(_ preferences: AgentPreferences, to url: URL = fileURL) throws {
+    static func save(_ preferences: AgentPreferences, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(
             at: directory,

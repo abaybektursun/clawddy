@@ -2,8 +2,14 @@ import SwiftUI
 import GhosttyKit
 
 struct SettingsView: View {
-    @State private var preferences = AgentPreferencesStore.load()
+    let preferencesFile: URL
+    @State private var preferences: AgentPreferences
     @State private var persistenceError: String?
+
+    init(preferencesFile: URL) {
+        self.preferencesFile = preferencesFile
+        _preferences = State(initialValue: AgentPreferencesStore.load(from: preferencesFile))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -111,7 +117,7 @@ struct SettingsView: View {
                 var updated = preferences
                 updated.setDefaultStartMode(newValue, for: provider)
                 do {
-                    try AgentPreferencesStore.save(updated)
+                    try AgentPreferencesStore.save(updated, to: preferencesFile)
                     preferences = updated
                     persistenceError = nil
                 } catch {
@@ -122,5 +128,6 @@ struct SettingsView: View {
 }
 
 #Preview {
-    SettingsView()
+    SettingsView(preferencesFile: FileManager.default.temporaryDirectory
+        .appendingPathComponent("clawddy-settings-preview.json"))
 }

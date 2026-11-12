@@ -1064,7 +1064,7 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func showSettings(_ sender: Any?) {
-        SettingsController.shared.show()
+        clawddy.settingsController.show()
     }
 
     @IBAction func reloadConfig(_ sender: Any?) {

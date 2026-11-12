@@ -389,8 +389,13 @@ protocol AgentProviderAdapter: Sendable {
 }
 
 struct AgentProviderRegistry: Sendable {
-    private let claude = ClaudeCodeProvider()
-    private let codex = CodexProvider()
+    private let claude: ClaudeCodeProvider
+    private let codex: CodexProvider
+
+    init(root: AgentDataRoot) {
+        claude = ClaudeCodeProvider(root: root)
+        codex = CodexProvider(root: root)
+    }
 
     func adapter(for provider: AgentProviderID) -> any AgentProviderAdapter {
         switch provider {

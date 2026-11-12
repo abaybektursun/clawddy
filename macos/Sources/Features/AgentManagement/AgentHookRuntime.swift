@@ -1,8 +1,8 @@
 import Foundation
 
 enum AgentHookRuntime {
-    static var scriptURL: URL {
-        AgentConfig.hooksDir.appendingPathComponent("clawddy-provider-hook.sh")
+    static func scriptURL(root: AgentDataRoot) -> URL {
+        root.hooksDir.appendingPathComponent("clawddy-provider-hook.sh")
     }
 
     static let script = """
@@ -61,11 +61,12 @@ enum AgentHookRuntime {
         exit 0
         """
 
-    static func install() throws {
+    static func install(root: AgentDataRoot) throws {
         try FileManager.default.createDirectory(
-            at: AgentConfig.hooksDir,
+            at: root.hooksDir,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
+        let scriptURL = Self.scriptURL(root: root)
         let existing = (try? String(contentsOf: scriptURL, encoding: .utf8)) ?? ""
         if existing != script {
             guard AgentConfig.atomicWrite(Data(script.utf8), to: scriptURL) else {
@@ -81,7 +82,7 @@ enum AgentHookRuntime {
         provider: AgentProviderID,
         agentID: UUID,
         generation: UUID,
-        statusDirectory: URL = AgentConfig.statusDir
+        statusDirectory: URL
     ) -> String {
         let eventFormat = "{\"schemaVersion\":1,\"eventID\":\"\(UUID().uuidString)\","
             + "\"provider\":\"\(provider.rawValue)\","

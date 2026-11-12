@@ -3,6 +3,7 @@ import Foundation
 struct ClaudeCodeProvider: AgentProviderAdapter {
     let id: AgentProviderID = .claudeCode
     let capabilities: AgentProviderCapabilities = .claudeCode
+    let root: AgentDataRoot
 
     private static let hookedEvents = [
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
@@ -12,7 +13,7 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
 
     func prepareIntegration() -> Result<AgentIntegrationPreparation, AgentProviderIssue> {
         do {
-            try AgentHookRuntime.install()
+            try AgentHookRuntime.install(root: root)
             try installHooks()
             return .success(.ready)
         } catch {
@@ -26,7 +27,8 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
 
         let metadata = AgentMetadataRuntime.prepare(
             agentID: request.agentID,
-            workingDirectory: request.workingDirectory)
+            workingDirectory: request.workingDirectory,
+            root: root)
         var arguments: [String] = []
 
         if let session = request.session, session.provider == id {
@@ -144,7 +146,7 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
     }
 
     func cleanup(agentID: UUID) {
-        AgentMetadataRuntime.remove(agentID: agentID)
+        AgentMetadataRuntime.remove(agentID: agentID, root: root)
     }
 
     private func installHooks() throws {
@@ -159,7 +161,8 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
                 groups.append([
                     "hooks": [[
                         "type": "command",
-                        "command": AgentHookRuntime.shellQuote(AgentHookRuntime.scriptURL.path),
+                        "command": AgentHookRuntime.shellQuote(
+                            AgentHookRuntime.scriptURL(root: root).path),
                         "timeout": 5,
                     ]],
                 ])

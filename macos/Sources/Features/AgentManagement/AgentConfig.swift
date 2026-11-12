@@ -185,39 +185,8 @@ class AgentConfig {
     /// are refused until a load succeeds so a malformed file is never replaced
     /// by a partial in-memory model.
     private var loadFailure: Error?
-    /// Explicit data root for tests and future multi-root scenarios. `nil`
-    /// resolves through `baseDir` (environment override or the account default).
-    @ObservationIgnored private let overrideDataDirectory: URL?
+    @ObservationIgnored let root: AgentDataRoot
 
-    var dataDirectory: URL { overrideDataDirectory ?? Self.baseDir }
-    var configFileURL: URL { dataDirectory.appendingPathComponent("agents.json") }
-    var statusDirectoryURL: URL { dataDirectory.appendingPathComponent("status") }
-
-    static var baseDir: URL {
-        resolveBaseDirectory(
-            environment: ProcessInfo.processInfo.environment,
-            defaultHomeDirectory: FileManager.default.homeDirectoryForCurrentUser)
-    }
-
-    /// Resolve Clawddy's complete mutable data root. macOS does not guarantee
-    /// that Foundation's home-directory APIs honor an inherited `HOME`, so a
-    /// parallel app instance must use an explicit absolute override rather than
-    /// relying on process environment emulation.
-    static func resolveBaseDirectory(
-        environment: [String: String],
-        defaultHomeDirectory: URL
-    ) -> URL {
-        let fallback = defaultHomeDirectory
-            .appendingPathComponent(".config/ghostty-agents", isDirectory: true)
-        guard let rawValue = environment["GHOSTTY_AGENT_DATA_DIR"]?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !rawValue.isEmpty
-        else { return fallback }
-
-        let expanded = (rawValue as NSString).expandingTildeInPath
-        guard (expanded as NSString).isAbsolutePath else { return fallback }
-        return URL(fileURLWithPath: expanded, isDirectory: true).standardizedFileURL
-    }
     private struct AccountIdentity: Sendable {
         var homeDirectory: URL
         var userName: String
@@ -298,10 +267,6 @@ class AgentConfig {
             fileURLWithPath: (rawValue as NSString).expandingTildeInPath,
             isDirectory: true)
     }
-    static var configURL: URL { baseDir.appendingPathComponent("agents.json") }
-    static var statusDir: URL { baseDir.appendingPathComponent("status") }
-    static var hooksDir: URL { baseDir.appendingPathComponent("hooks") }
-    static var stateURL: URL { baseDir.appendingPathComponent("state.json") }
 
     /// Flat list of all agent entries across all projects and tasks.
     var allAgentEntries: [AgentEntry] {
@@ -314,8 +279,8 @@ class AgentConfig {
         return errorMessage
     }
 
-    init(dataDirectory: URL? = nil) {
-        overrideDataDirectory = dataDirectory?.standardizedFileURL
+    init(root: AgentDataRoot) {
+        self.root = root
         do {
             try ensureDirs()
         } catch {
@@ -323,7 +288,7 @@ class AgentConfig {
             logger.error("setup failed: \(error.localizedDescription)")
         }
         load()
-        if FileManager.default.fileExists(atPath: self.dataDirectory.path) {
+        if FileManager.default.fileExists(atPath: root.url.path) {
             watchConfigDir()
         }
     }
@@ -335,7 +300,7 @@ class AgentConfig {
     // MARK: - Load / Save
 
     func load() {
-        guard FileManager.default.fileExists(atPath: configFileURL.path) else {
+        guard FileManager.default.fileExists(atPath: root.agentsFile.path) else {
             // Nothing on disk can be clobbered, so a previous failure no longer
             // blocks writes (e.g. the user deleted the broken file).
             if loadFailure != nil {
@@ -345,7 +310,7 @@ class AgentConfig {
             return
         }
         do {
-            let data = try Data(contentsOf: configFileURL)
+            let data = try Data(contentsOf: root.agentsFile)
             let config = try JSONDecoder().decode(AgentConfigFile.self, from: data)
             // Only a fully decoded file clears the failure and replaces the
             // observable model; a partial decode never reaches this point.
@@ -356,7 +321,7 @@ class AgentConfig {
             migrateStatusFiles()
             let restoredProviderIdentity = Self.enforcePersistedProviderBindings(
                 in: &projects,
-                statusDirectory: statusDirectoryURL)
+                statusDirectory: root.statusDir)
 
             if config.schemaVersion < AgentConfigFile.currentSchemaVersion
                 || restoredProviderIdentity {
@@ -427,8 +392,8 @@ class AgentConfig {
                         "session", "session.json", "state", "heartbeat", "forkFrom",
                         "fork.json", "lastEvent", "events", "events.lock", "json", "metadata.json",
                     ] {
-                        let oldURL = statusDirectoryURL.appendingPathComponent("\(oldKey).\(ext)")
-                        let newURL = statusDirectoryURL.appendingPathComponent("\(newKey).\(ext)")
+                        let oldURL = root.statusDir.appendingPathComponent("\(oldKey).\(ext)")
+                        let newURL = root.statusDir.appendingPathComponent("\(newKey).\(ext)")
                         if fm.fileExists(atPath: oldURL.path) && !fm.fileExists(atPath: newURL.path) {
                             try? fm.moveItem(at: oldURL, to: newURL)
                             logger.info("migrated \(oldKey).\(ext) → \(newKey).\(ext)")
@@ -483,7 +448,7 @@ class AgentConfig {
             // Refuse to replace a file that failed to decode: the on-disk bytes
             // are the only copy of the entries this model does not contain.
             // A removed file has nothing left to protect.
-            guard !FileManager.default.fileExists(atPath: configFileURL.path) else {
+            guard !FileManager.default.fileExists(atPath: root.agentsFile.path) else {
                 let reason = Self.describeLoadFailure(loadFailure)
                 errorMessage = "Agents configuration could not be saved because the existing configuration could not be loaded: \(reason)"
                 logger.error("save blocked by load failure: \(reason)")
@@ -504,7 +469,7 @@ class AgentConfig {
             logger.error("save encode failed: \(error.localizedDescription)")
             return false
         }
-        guard Self.atomicWrite(data, to: configFileURL) else {
+        guard Self.atomicWrite(data, to: root.agentsFile) else {
             errorMessage = "Agents configuration could not be saved. Check the file permissions and available storage."
             return false
         }
@@ -732,21 +697,21 @@ class AgentConfig {
     private func ensureDirs() throws {
         let fm = FileManager.default
         try fm.createDirectory(
-            at: dataDirectory,
+            at: root.url,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
         try fm.createDirectory(
-            at: statusDirectoryURL,
+            at: root.statusDir,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dataDirectory.path)
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: statusDirectoryURL.path)
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.url.path)
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.statusDir.path)
     }
 
     /// Watch the config DIRECTORY (not the file). Handles atomic external edits
     /// that replace the inode, and fresh installs where the file doesn't exist yet.
     private func watchConfigDir() {
-        let dirPath = dataDirectory.path
+        let dirPath = root.url.path
         let fd = open(dirPath, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(
@@ -759,7 +724,7 @@ class AgentConfig {
             // Compare raw bytes (definitive — no hash collisions).
             // This also suppresses our own writes (save() updates lastConfigData
             // before the kqueue event arrives).
-            guard let data = try? Data(contentsOf: self.configFileURL) else { return }
+            guard let data = try? Data(contentsOf: self.root.agentsFile) else { return }
             guard data != self.lastConfigData else {
                 BridgeMetrics.shared.recordConfigReloadDeduped()
                 return

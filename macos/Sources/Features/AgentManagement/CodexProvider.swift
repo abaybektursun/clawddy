@@ -3,6 +3,7 @@ import Foundation
 struct CodexProvider: AgentProviderAdapter {
     let id: AgentProviderID = .codex
     let capabilities: AgentProviderCapabilities = .codex
+    let root: AgentDataRoot
 
     private static let hookedEvents = [
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
@@ -11,25 +12,22 @@ struct CodexProvider: AgentProviderAdapter {
     ]
     private static let hookReviewNotice =
         "Review and trust Clawddy’s activity hook in Codex with /hooks. The terminal remains fully usable while status tracking is paused."
-    private static var hookReviewMarkerURL: URL {
-        AgentConfig.baseDir.appendingPathComponent("codex-hook-review-required")
-    }
 
     func prepareIntegration() -> Result<AgentIntegrationPreparation, AgentProviderIssue> {
         do {
-            try AgentHookRuntime.install()
+            try AgentHookRuntime.install(root: root)
             let changed = try installHooks()
             if changed {
                 guard AgentConfig.atomicWrite(
                     Data(Self.hookReviewNotice.utf8),
-                    to: Self.hookReviewMarkerURL)
+                    to: root.codexHookReviewMarker)
                 else { throw CocoaError(.fileWriteUnknown) }
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o600],
-                    ofItemAtPath: Self.hookReviewMarkerURL.path)
+                    ofItemAtPath: root.codexHookReviewMarker.path)
             }
             return .success(AgentIntegrationPreparation(
-                notice: Self.isHookReviewRequired ? Self.hookReviewNotice : nil))
+                notice: isHookReviewRequired ? Self.hookReviewNotice : nil))
         } catch {
             return .failure(.integrationFailed(id, error.localizedDescription))
         }
@@ -119,7 +117,7 @@ struct CodexProvider: AgentProviderAdapter {
         return AgentProviderHealth(
             installation: .ready(executable: executable.path, version: version),
             authentication: Self.authenticationState(from: auth),
-            integrationIssue: Self.isHookReviewRequired ? Self.hookReviewNotice : nil)
+            integrationIssue: isHookReviewRequired ? Self.hookReviewNotice : nil)
     }
 
     static func authenticationState(
@@ -160,33 +158,34 @@ struct CodexProvider: AgentProviderAdapter {
         return value
     }
 
-    static func clearHookReviewRequired() {
-        try? FileManager.default.removeItem(at: hookReviewMarkerURL)
+    static func clearHookReviewRequired(root: AgentDataRoot) {
+        try? FileManager.default.removeItem(at: root.codexHookReviewMarker)
     }
 
-    private static var isHookReviewRequired: Bool {
-        FileManager.default.fileExists(atPath: hookReviewMarkerURL.path)
+    private var isHookReviewRequired: Bool {
+        FileManager.default.fileExists(atPath: root.codexHookReviewMarker.path)
     }
 
     private func installHooks() throws -> Bool {
         let url = AgentConfig.codexConfigDir.appendingPathComponent("hooks.json")
         let backup = url.deletingLastPathComponent()
             .appendingPathComponent("hooks.json.clawddy-backup")
-        return try AgentHookRuntime.updateJSONFile(at: url, backupURL: backup) { root in
+        return try AgentHookRuntime.updateJSONFile(at: url, backupURL: backup) { file in
             var hooks = AgentHookRuntime.removingIntegrationHandlers(
-                from: root["hooks"] as? [String: Any] ?? [:])
+                from: file["hooks"] as? [String: Any] ?? [:])
             for event in Self.hookedEvents {
                 var groups = hooks[event] as? [[String: Any]] ?? []
                 groups.append([
                     "hooks": [[
                         "type": "command",
-                        "command": AgentHookRuntime.shellQuote(AgentHookRuntime.scriptURL.path),
+                        "command": AgentHookRuntime.shellQuote(
+                            AgentHookRuntime.scriptURL(root: root).path),
                         "timeout": 5,
                     ]],
                 ])
                 hooks[event] = groups
             }
-            root["hooks"] = hooks
+            file["hooks"] = hooks
         }
     }
 }

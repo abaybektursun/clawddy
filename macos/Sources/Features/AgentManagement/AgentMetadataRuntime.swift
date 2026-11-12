@@ -8,8 +8,9 @@ enum AgentMetadataRuntime {
         var unavailableReason: String?
     }
 
-    static var runtimeDirectory: URL { AgentConfig.baseDir.appendingPathComponent("runtime") }
-    static var proxyURL: URL { AgentConfig.hooksDir.appendingPathComponent("clawddy-statusline-proxy.sh") }
+    static func proxyURL(root: AgentDataRoot) -> URL {
+        root.hooksDir.appendingPathComponent("clawddy-statusline-proxy.sh")
+    }
 
     static let proxyScript = """
         #!/bin/sh
@@ -44,7 +45,11 @@ enum AgentMetadataRuntime {
         exit 0
         """
 
-    static func prepare(agentID: UUID, workingDirectory: String?) -> Preparation {
+    static func prepare(
+        agentID: UUID,
+        workingDirectory: String?,
+        root: AgentDataRoot
+    ) -> Preparation {
         do {
             let effective = effectiveSettings(workingDirectory: workingDirectory)
             if effective.managedStatusLine {
@@ -58,8 +63,9 @@ enum AgentMetadataRuntime {
                     unavailableReason: "Claude hooks are disabled by settings.")
             }
 
-            try installProxy()
-            let directory = runtimeDirectory.appendingPathComponent(agentID.uuidString)
+            try installProxy(root: root)
+            let proxyURL = Self.proxyURL(root: root)
+            let directory = root.runtimeDir.appendingPathComponent(agentID.uuidString)
             try FileManager.default.createDirectory(
                 at: directory,
                 withIntermediateDirectories: true,
@@ -105,9 +111,9 @@ enum AgentMetadataRuntime {
         }
     }
 
-    static func remove(agentID: UUID) {
+    static func remove(agentID: UUID, root: AgentDataRoot) {
         try? FileManager.default.removeItem(
-            at: runtimeDirectory.appendingPathComponent(agentID.uuidString))
+            at: root.runtimeDir.appendingPathComponent(agentID.uuidString))
     }
 
     static func shellQuote(_ value: String) -> String {
@@ -161,10 +167,11 @@ enum AgentMetadataRuntime {
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
-    private static func installProxy() throws {
+    private static func installProxy(root: AgentDataRoot) throws {
         try FileManager.default.createDirectory(
-            at: AgentConfig.hooksDir,
+            at: root.hooksDir,
             withIntermediateDirectories: true)
+        let proxyURL = Self.proxyURL(root: root)
         let existing = (try? String(contentsOf: proxyURL, encoding: .utf8)) ?? ""
         if existing != proxyScript {
             guard AgentConfig.atomicWrite(Data(proxyScript.utf8), to: proxyURL) else {
