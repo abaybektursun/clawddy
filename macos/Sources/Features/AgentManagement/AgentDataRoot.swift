@@ -104,6 +104,17 @@ struct AgentDataRoot: Equatable, Sendable {
         launchDir.appendingPathComponent("clawddy-\(agentID.uuidString)-\(UUID().uuidString).sh")
     }
 
+    /// Deletes every file of the agent: each `<agent id>.*` in the status
+    /// folder, and its runtime folder. No other agent's file matches.
+    func removeFiles(ofAgent agentID: UUID) throws {
+        let fm = FileManager.default
+        let prefix = agentID.uuidString + "."
+        for name in try fm.contentsOfDirectory(atPath: statusDir.path) where name.hasPrefix(prefix) {
+            try fm.removeItemIfPresent(at: statusDir.appendingPathComponent(name))
+        }
+        try fm.removeItemIfPresent(at: runtimeDir.appendingPathComponent(agentID.uuidString))
+    }
+
     /// Empties the launch folder, creating it if needed. Called once at
     /// start: only the instance holding this root's lock writes there, and
     /// no script from an earlier run is needed again.

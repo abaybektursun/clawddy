@@ -605,8 +605,7 @@ final class AgentBridge {
 
         // Remove instances for deleted entries
         for id in agents.keys where !configIds.contains(id) {
-            destroySurface(id: id)
-            agents.removeValue(forKey: id)
+            removeAgent(id: id)
         }
 
         // Sync editable values. Provider identity can replace only a runtime
@@ -640,6 +639,8 @@ final class AgentBridge {
                     if agent.lastAppliedCompletion?.provider == entry.provider {
                         runtime.lastAppliedCompletion = agent.lastAppliedCompletion
                     }
+                    // The old provider's files go with its runtime.
+                    removeAgent(id: entry.id)
                     agents[entry.id] = AgentInstance(entry: entry, runtime: runtime)
                     continue
                 case .preserveRuntimeAndRestoreConfig:
@@ -979,32 +980,56 @@ final class AgentBridge {
     @discardableResult
     func deleteAgent(id: UUID, config: AgentConfig) -> Bool {
         guard config.removeAgent(id: id) else { return false }
-        removeAgentRuntime(id: id)
+        removeAgent(id: id)
         updateAggregate()
         persistState()
         return true
     }
 
-    func removeAgentRuntimes(ids: [UUID]) {
-        ids.forEach { removeAgentRuntime(id: $0) }
+    /// Deletes the project and every agent in it.
+    @discardableResult
+    func deleteProject(id: UUID, config: AgentConfig) -> Bool {
+        guard let project = config.projects.first(where: { $0.id == id }) else { return false }
+        let ids = project.tasks.flatMap(\.agents).map(\.id)
+        guard config.removeProject(id: id) else { return false }
+        removeAgents(ids)
+        return true
+    }
+
+    /// Deletes the task and every agent in it.
+    @discardableResult
+    func deleteTask(projectID: UUID, taskID: UUID, config: AgentConfig) -> Bool {
+        guard let task = config.projects.first(where: { $0.id == projectID })?
+            .tasks.first(where: { $0.id == taskID })
+        else { return false }
+        let ids = task.agents.map(\.id)
+        guard config.removeTask(projectId: projectID, taskId: taskID) else { return false }
+        removeAgents(ids)
+        return true
+    }
+
+    private func removeAgents(_ ids: [UUID]) {
+        for id in ids { removeAgent(id: id) }
         updateAggregate()
         persistState()
     }
 
-    private func removeAgentRuntime(id: UUID) {
-        let agentProvider = agents[id]?.provider ?? .claudeCode
+    /// The one way an agent goes, whatever removed it: Delete, deleting its
+    /// project or task, an edit of `agents.json` that drops it, or a provider
+    /// change that replaces its runtime. Its terminal closes, its runtime is
+    /// dropped, and every `<agent id>.*` file in the status folder and its
+    /// runtime folder are deleted. No other agent's file is touched.
+    private func removeAgent(id: UUID) {
         destroySurface(id: id)
         agents.removeValue(forKey: id)
-
-        // Clean status files
-        let cleanup = providers.cleanup
-        let statusDir = statusDir
+        let kept = storageErrors.filter { !$0.key.lastPathComponent.hasPrefix(id.uuidString) }
+        if kept.count != storageErrors.count { storageErrors = kept }
+        let root = root
         store(
-            statusDir.appendingPathComponent(id.uuidString),
+            root.statusDir.appendingPathComponent(id.uuidString),
             "The files of removed agent \(id) could not all be deleted"
         ) {
-            try AgentSessionStore.removeAll(for: id, directory: statusDir)
-            try cleanup(agentProvider, id)
+            try root.removeFiles(ofAgent: id)
         }
     }
 

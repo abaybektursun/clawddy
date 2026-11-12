@@ -117,20 +117,6 @@ enum AgentSessionStore {
         try FileManager.default.removeItemIfPresent(at: forkURL(agentID, directory))
     }
 
-    static func removeAll(
-        for agentID: UUID,
-        directory: URL
-    ) throws {
-        for suffix in [
-            "session.json", "session", "fork.json", "lastEvent",
-            "events", "events.lock", "metadata.json",
-        ] {
-            try FileManager.default.removeItemIfPresent(
-                at: directory
-                    .appendingPathComponent("\(agentID.uuidString).\(suffix)"))
-        }
-    }
-
     static func valid(_ value: String) -> Bool {
         !value.isEmpty && value.unicodeScalars.allSatisfy(safeIDCharacters.contains)
     }

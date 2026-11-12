@@ -811,18 +811,10 @@ struct AgentNavigationView: View {
         defer { deletion = nil }
         switch action {
         case .deleteProject(let id, _, _):
-            guard let project = config.projects.first(where: { $0.id == id }) else { return }
-            let agentIDs = project.tasks.flatMap(\.agents).map(\.id)
-            guard config.removeProject(id: id) else { return }
-            bridge.removeAgentRuntimes(ids: agentIDs)
+            guard bridge.deleteProject(id: id, config: config) else { return }
             onSelectScope(.all)
         case .deleteTask(let projectID, let taskID, _, _):
-            guard let project = config.projects.first(where: { $0.id == projectID }),
-                  let task = project.tasks.first(where: { $0.id == taskID })
-            else { return }
-            let agentIDs = task.agents.map(\.id)
-            guard config.removeTask(projectId: projectID, taskId: taskID) else { return }
-            bridge.removeAgentRuntimes(ids: agentIDs)
+            guard bridge.deleteTask(projectID: projectID, taskID: taskID, config: config) else { return }
             onSelectScope(.project(projectID))
         case .resetSessions(let projectID, let newPath, _):
             applyDirectory(newPath, to: projectID)

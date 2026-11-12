@@ -24,25 +24,4 @@ struct AgentBridgeKnownWrongTests {
         #expect(agent.sessionID == "nested-session")
         #expect(try h.binding(id).sessionID == "nested-session")
     }
-
-    /// Right: every removal route deletes the agent's `<uuid>.*` status files (P3.10).
-    @Test func knownWrong_externalDeleteLeavesStatusFiles() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        let other = try h.addAgent("Other")
-        h.start()
-        try h.launch(id)
-        try h.launch(other)
-
-        try h.editConfigExternally { $0.removeAll { $0.id == id } }
-
-        #expect(h.bridge.agents[id] == nil)
-        #expect(h.exists(h.statusFile(id, "events")))
-        #expect(h.exists(h.statusFile(id, "session.json")))
-        // Deleting through the bridge does remove them.
-        #expect(h.bridge.deleteAgent(id: other, config: h.config))
-        #expect(!h.exists(h.statusFile(other, "events")))
-        #expect(!h.exists(h.statusFile(other, "session.json")))
-    }
 }
