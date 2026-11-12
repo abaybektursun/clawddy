@@ -319,10 +319,14 @@ The hook depends only on macOS system tools. For each invocation it:
 2. Uses `plutil` to extract only session, event, turn, model, and permission identifiers.
 3. Adds a stable event ID plus the provider and launch generation from its
    arguments (Claude) or the `CLAWDDY_*` variables (Codex).
-4. Atomically updates the provider-tagged session binding and appends one JSONL
-   record while holding the macOS `lockf` lock for that agent. The append waits
-   for the short kernel-managed critical section instead of timing out and
-   silently dropping a lifecycle fact.
+4. Appends one JSONL record while holding the macOS `lockf` lock for that
+   agent. The append waits for the short kernel-managed critical section
+   instead of timing out and silently dropping a lifecycle fact.
+
+The script writes no session binding. The bridge rewrites the provider-tagged
+binding from each `SessionStart` record of the agent's current launch, whatever
+its source (`startup`, `resume`, `clear`, `compact`, `fork`), so after `/clear`
+the next launch resumes the new session.
 
 ```text
 ~/.config/ghostty-agents/status/<agent-uuid>.session.json
@@ -494,8 +498,15 @@ generation. Command selection is ordered:
 2. Fork the provider-matching source recorded in `.fork.json`.
 3. Start a fresh interactive provider TUI.
 
-Claude Code uses its interactive `--resume` and `--fork-session` paths plus
-optional model, effort, and status-line settings. Its unrestricted mode adds
+Claude Code checks the fork marker first, because it stays until the fork is
+seen alive. It starts a new session as `--session-id <new>`, resumes as
+`--resume <id>`, and forks as `--resume <source> --fork-session --session-id
+<new>`. A new or forked session's ID is written as the agent's binding before
+the process starts. Every Claude launch adds `--name <agent label>`, plus
+optional model, effort, and status-line settings. A resume that Claude ends
+with `SessionEnd` before any `SessionStart` found no such session; the agent
+then shows a failed start whose only action, Start Fresh, forgets the saved
+session and launches a new one. Its unrestricted mode adds
 `--dangerously-skip-permissions`. Codex uses the stable interactive `resume` and
 `fork` subcommands plus optional `--model` and `model_reasoning_effort`
 configuration. Its YOLO mode adds the canonical
@@ -522,9 +533,9 @@ session ID and provider to the new UUID's `.fork.json` file. The marker is
 removed after the new agent's first valid hook confirms launch. The source and
 fork never share an identity or cross a provider boundary.
 
-Renaming always updates Clawddy's editable label. Both provider TUIs receive
-`/rename` only in a display state the bridge considers safe for input; otherwise
-the request is persisted and delivered after a safe state arrives.
+Renaming updates Clawddy's label at once. Nothing is typed into a running
+terminal: Claude receives the label as `--name` at its next launch, and Codex
+sessions are not renamed.
 
 ## Persistence and Recovery
 
@@ -557,8 +568,8 @@ variables (`GHOSTTY_AGENT_ID`, `GHOSTTY_AGENT_NAME`, `GHOSTTY_AGENT_PROVIDER`,
 agent's terminal cannot pass that identity on. agent-cron's
 `GHOSTTY_AGENT_CRON_*` variables are left alone.
 
-It contains provider-tagged unread and last-applied completion identities,
-pending provider renames, and per-agent event-journal byte offsets. The durable
+It contains provider-tagged unread and last-applied completion identities
+and per-agent event-journal byte offsets. The durable
 last-applied identity makes replay idempotent even after unread state is
 acknowledged. Surface, process, activity,
 interaction, telemetry, display, and aggregate state are reconstructed from
@@ -568,7 +579,7 @@ Startup order:
 
 1. Ensure config, hook, and status directories exist.
 2. Load configuration and restore provider identities from persisted bindings.
-3. Load persisted unread/last-applied completion and pending-rename state.
+3. Load persisted unread/last-applied completion state.
 4. Recreate inactive, provider-specific runtime instances.
 5. Start config and status directory watchers and consume unseen complete events.
 6. Probe provider installation/auth health away from the main actor.
@@ -708,7 +719,9 @@ Changes to this feature require the general macOS matrix in
 
 - Fresh, resumed, and forked launch for each provider, including mixed projects.
 - Signed-out first use, Codex hook review, disabled hooks, and late telemetry recovery.
-- Rename while idle and rename deferred during a blocking state.
+- Rename while running and stopped; the next Claude launch carries `--name`.
+- `/clear`, then Restart resumes the post-clear session; a resume of a missing
+  session offers Start Fresh.
 - External `agents.json` edit and provider-identity enforcement.
 - Burst hook traffic, duplicate file events, and malformed event JSON.
 - Agent process exit, deletion, app termination, and next-launch cleanup.

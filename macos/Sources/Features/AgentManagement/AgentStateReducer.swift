@@ -68,11 +68,16 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     var launchGeneration: UUID?
     var sessionID: String?
     var turnState: AgentTurnState = .inactive
+    /// The saved session this launch resumes, until the provider starts it.
+    var resumingSessionID: String?
+    /// The saved session this launch found missing. The agent can only
+    /// start fresh; `failureMessage` says why.
+    var missingSessionID: String?
 }
 
 enum AgentRuntimeEvent: Equatable, Sendable {
     case launchRequested(generation: UUID)
-    case surfaceOpened(generation: UUID)
+    case surfaceOpened(generation: UUID, resumedSessionID: String? = nil)
     case launchTimedOut(generation: UUID)
     case launchFailed(generation: UUID, message: String)
     case interactionRequired(generation: UUID, interaction: AgentInteractionState)
@@ -123,9 +128,10 @@ enum AgentStateReducer {
                 sessionID: current.sessionID,
                 turnState: .inactive)
 
-        case .surfaceOpened(let generation):
+        case .surfaceOpened(let generation, let resumedSessionID):
             guard state.launchGeneration == generation else { break }
             state.surfaceState = .open
+            state.resumingSessionID = resumedSessionID
 
         case .launchTimedOut(let generation):
             guard state.launchGeneration == generation,
@@ -249,6 +255,16 @@ enum AgentStateReducer {
                 state.turnState = .inactive
                 state.activityState = .idle
                 state.interactionState = .none
+                // Claude ends a resume of a session it cannot find before
+                // starting it: `SessionEnd`, no `SessionStart`, exit status 1.
+                // The exit record may come first and has then already marked
+                // the launch failed, without saying why.
+                if let missing = state.resumingSessionID {
+                    state.resumingSessionID = nil
+                    state.missingSessionID = missing
+                    if state.failureMessage == nil { effects.append(.failed) }
+                    state.failureMessage = "\(provider.displayName) found no conversation with session ID \(missing), so the agent could not be resumed."
+                }
 
             case .providerExited:
                 // Handled before provider confirmation above so an executable
@@ -283,6 +299,8 @@ enum AgentStateReducer {
             state.interactionState = .none
             state.turnState = .inactive
             state.failureMessage = nil
+            state.resumingSessionID = nil
+            state.missingSessionID = nil
 
         case .completionViewed:
             clearUnread(&state, effects: &effects)
@@ -318,6 +336,7 @@ enum AgentStateReducer {
         guard state.processState != .running else { return }
         state.processState = .running
         state.failureMessage = nil
+        state.resumingSessionID = nil
         effects.append(.becameAlive)
     }
 }

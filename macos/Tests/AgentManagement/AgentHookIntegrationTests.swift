@@ -241,6 +241,42 @@ struct AgentHookIntegrationTests {
         #expect(try filesUnder(sandbox.url) == before)
     }
 
+    /// A new Claude session launches as `--session-id <new> --name <label>`,
+    /// and the new ID is the agent's binding before the process starts. The
+    /// next launch resumes that session, still named.
+    @Test func claudeNewLaunchChoosesSessionID() throws {
+        let sandbox = try HookSandbox()
+        defer { sandbox.remove() }
+        let request = sandbox.request(.claudeCode)
+        let claude = sandbox.bin.appendingPathComponent("claude").path
+        func binding() throws -> AgentSessionBinding {
+            try #require(AgentSessionStore.session(
+                for: request.agentID,
+                provider: .claudeCode,
+                directory: sandbox.root.statusDir))
+        }
+
+        let first = try sandbox.prepareSurfaceLaunch(request)
+        let chosen = try binding()
+        let sessionID = chosen.sessionID
+        #expect(UUID(uuidString: sessionID) != nil && sessionID == sessionID.lowercased())
+        #expect(chosen == AgentSessionBinding(
+            provider: .claudeCode,
+            sessionID: sessionID,
+            launchGeneration: request.launchGeneration))
+        let firstScript = try String(contentsOf: first.scriptURL, encoding: .utf8)
+        #expect(firstScript.contains(shellCommand([claude, "--session-id", sessionID, "--name", "Agent"])))
+        #expect(!firstScript.contains("--resume"))
+
+        var next = request
+        next.launchGeneration = UUID()
+        let second = try sandbox.prepareSurfaceLaunch(next)
+        let secondScript = try String(contentsOf: second.scriptURL, encoding: .utf8)
+        #expect(secondScript.contains(shellCommand([claude, "--resume", sessionID, "--name", "Agent"])))
+        #expect(!secondScript.contains("--session-id"))
+        #expect(try binding() == chosen)
+    }
+
     /// A fork launches as `--resume <source> --fork-session --session-id
     /// <new>`, and the new ID is the agent's binding before the process
     /// starts. Until the fork is seen alive its marker stays, and a relaunch
@@ -323,6 +359,8 @@ private struct HookSandbox {
         try fm.createDirectory(at: bin, withIntermediateDirectories: true)
         // The bridge does this at start; launch scripts are written there.
         try root.resetLaunchDir()
+        // `AgentConfig` creates the status folder before any launch.
+        try fm.createDirectory(at: root.statusDir, withIntermediateDirectories: true)
         for name in ["claude", "codex"] {
             let executable = bin.appendingPathComponent(name)
             try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)

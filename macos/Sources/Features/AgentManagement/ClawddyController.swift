@@ -143,9 +143,6 @@ final class ClawddyController: NSObject {
             self?.updateStatusIcon(state)
             self?.onAggregateStateChanged?()
         }
-        bridge.onSendText = { [weak self] id, text in
-            self?.detailVC?.sendText(text, toAgent: id)
-        }
         bridge.onSurfaceDeath = { [weak self] id in
             self?.detailVC?.removeSurface(id: id)
         }
@@ -477,6 +474,10 @@ final class ClawddyController: NSObject {
                 guard let self, let project = self.config.project(forAgent: id) else { return }
                 self.activateAgent(id: id, project: project)
             }
+            detailVC.onStartFresh = { [weak self] id in
+                guard let self, let project = self.config.project(forAgent: id) else { return }
+                self.activateAgent(id: id, project: project, startFresh: true)
+            }
 
             detailVC.setBackgroundColor(NSColor(ghostty.config.backgroundColor))
             workspaceWindow = window
@@ -670,10 +671,12 @@ final class ClawddyController: NSObject {
                 windowIsMiniaturized: window.isMiniaturized)))
     }
 
+    /// `startFresh` replaces a missing saved session with a new one.
     private func activateAgent(
         id: UUID,
         project: AgentProject,
-        scope: AgentWorkspaceModel.Scope? = nil
+        scope: AgentWorkspaceModel.Scope? = nil,
+        startFresh: Bool = false
     ) {
         guard let detailVC else { return }
         applyAgentSelection(.reveal(scope: scope, agentID: id))
@@ -683,7 +686,11 @@ final class ClawddyController: NSObject {
         // reports the presented surface, so the first start and restarts are
         // focused and acknowledged without a second activation.
         explicitlyViewedAgentID = id
-        bridge.activateAgent(id: id, host: detailVC, project: project)
+        if startFresh {
+            bridge.startFresh(id: id, host: detailVC, project: project)
+        } else {
+            bridge.activateAgent(id: id, host: detailVC, project: project)
+        }
         updateViewingState()
         if let agent = bridge.agents[id] {
             workspaceWindow?.title = "\(project.name) — \(agent.name)"

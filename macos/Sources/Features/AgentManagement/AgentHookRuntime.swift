@@ -31,7 +31,8 @@ enum AgentHookRuntime {
     /// another Clawddy instance is never recorded here. Without a complete
     /// identity the script drains its input and records nothing; it exits 0,
     /// because an argument-less global entry left by an older Clawddy must not
-    /// report a hook error in every Claude session on the machine.
+    /// report a hook error in every Claude session on the machine. The script
+    /// only appends records; the bridge writes the session binding from them.
     static let script = """
         #!/bin/sh
         umask 077
@@ -52,8 +53,7 @@ enum AgentHookRuntime {
         mkdir -p "$DIR" 2>/dev/null || exit 0
 
         INPUT="${TMPDIR:-/tmp}/clawddy-hook-$ID-$$.json"
-        SESSION_TEMP="$DIR/$ID.session.$$.tmp"
-        trap 'rm -f "$INPUT" "$SESSION_TEMP"' EXIT HUP INT TERM
+        trap 'rm -f "$INPUT"' EXIT HUP INT TERM
         cat > "$INPUT" || exit 0
         chmod 600 "$INPUT" 2>/dev/null
 
@@ -73,13 +73,6 @@ enum AgentHookRuntime {
         PROVIDER=$(sanitize "$PROVIDER")
         GENERATION=$(sanitize "$GENERATION")
         [ -z "$EVENT_ID" ] && EVENT_ID=$(sanitize "$GENERATION-$$-$(/bin/date +%s)")
-
-        if [ -n "$SID" ]; then
-          printf '{"provider":"%s","sessionID":"%s","launchGeneration":"%s"}\n' \
-            "$PROVIDER" "$SID" "$GENERATION" > "$SESSION_TEMP"
-          chmod 600 "$SESSION_TEMP" 2>/dev/null
-          mv -f "$SESSION_TEMP" "$DIR/$ID.session.json" 2>/dev/null || true
-        fi
 
         [ -z "$EVENT" ] && exit 0
         EVENTS="$DIR/$ID.events"

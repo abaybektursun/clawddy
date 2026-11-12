@@ -147,6 +147,7 @@ final class AgentInstance: Identifiable {
     var launchGeneration: UUID? { runtime.launchGeneration }
     var sessionID: String? { runtime.sessionID }
     var turnState: AgentTurnState { runtime.turnState }
+    var missingSessionID: String? { runtime.missingSessionID }
 
     var displayState: DisplayState {
         if failureMessage != nil { return .failed }
@@ -221,13 +222,13 @@ enum AggregateState: Equatable {
 // MARK: - Persisted Bridge State
 
 /// `state.json`. Files the app wrote before P3.4 also hold
-/// `lastAppliedCompletions` and `eventOffsets`, which are no longer read.
+/// `lastAppliedCompletions` and `eventOffsets`, and before P3.6
+/// `pendingRenames`; none of them is read any more.
 private struct PersistedState: Codable {
     var unreadCompletions: [UUID: AgentCompletionID] = [:]
-    var pendingRenames: [UUID: String] = [:]
 
     private enum CodingKeys: String, CodingKey {
-        case unreadCompletions, pendingRenames
+        case unreadCompletions
     }
 
     init() {}
@@ -237,9 +238,6 @@ private struct PersistedState: Codable {
         unreadCompletions = try container.decodeIfPresent(
             [UUID: AgentCompletionID].self,
             forKey: .unreadCompletions) ?? [:]
-        pendingRenames = try container.decodeIfPresent(
-            [UUID: String].self,
-            forKey: .pendingRenames) ?? [:]
     }
 }
 
@@ -250,6 +248,8 @@ struct AgentPreparedSurfaceLaunch: Sendable {
     var environment: [String: String]
     var metadataAvailability: AgentMetadataAvailability
     var integrationIssue: String?
+    /// See `AgentPreparedLaunch.resumedSessionID`.
+    var resumedSessionID: String?
 }
 
 enum AgentSurfaceLaunchOutcome: Sendable {
@@ -265,12 +265,30 @@ struct AgentLaunchCoordinator: Sendable {
     let providers: AgentProviderTable
     let root: AgentDataRoot
 
-    func prepare(_ initialRequest: AgentLaunchRequest) -> AgentSurfaceLaunchOutcome {
+    /// `discardingSession` first forgets the agent's saved session, so the
+    /// launch starts a new one.
+    func prepare(
+        _ initialRequest: AgentLaunchRequest,
+        discardingSession: Bool = false
+    ) -> AgentSurfaceLaunchOutcome {
         var request = initialRequest
         let agentID = request.agentID
         let name = request.name
         let provider = request.provider
         let generation = request.launchGeneration
+        if discardingSession {
+            do {
+                try AgentSessionStore.discardSession(for: agentID, directory: root.statusDir)
+            } catch {
+                return .failure(
+                    .launchPreparationFailed(
+                        provider,
+                        "The missing session could not be forgotten: \(error.localizedDescription)"),
+                    provider: provider,
+                    generation: generation,
+                    integrationIssue: nil)
+            }
+        }
         request.session = AgentSessionStore.session(
             for: agentID,
             provider: provider,
@@ -290,7 +308,8 @@ struct AgentLaunchCoordinator: Sendable {
                 integrationIssue: nil)
         }
         // A session ID the launch chose is the agent's binding before the
-        // process starts; the `SessionStart` hook later writes the same one.
+        // process starts; the bridge rewrites the binding from each
+        // `SessionStart` of the launch.
         if let session = prepared.newSession,
            !AgentSessionStore.write(session, for: agentID, directory: root.statusDir) {
             return .failure(
@@ -361,7 +380,8 @@ struct AgentLaunchCoordinator: Sendable {
             scriptURL: scriptURL,
             environment: environment,
             metadataAvailability: prepared.metadataAvailability,
-            integrationIssue: integrationIssue))
+            integrationIssue: integrationIssue,
+            resumedSessionID: prepared.resumedSessionID))
     }
 }
 
@@ -377,7 +397,6 @@ final class AgentBridge {
         })
 
     var onAggregateStateChanged: ((AggregateState) -> Void)?
-    var onSendText: ((UUID, String) -> Void)?
     var onSurfaceDeath: ((UUID) -> Void)?
     /// Fires when the set of presented agent surfaces changes, after the
     /// presentation and after death teardown. The workspace owner owns
@@ -386,7 +405,6 @@ final class AgentBridge {
     var onSurfacePresentationChanged: ((UUID) -> Void)?
     private(set) var currentlyViewedAgentId: UUID?
 
-    private var pendingRenames: [UUID: String] = [:]
     private var lastAggregateState: AggregateState?
     private var isTerminating = false
 
@@ -452,7 +470,6 @@ final class AgentBridge {
             fatalError("Could not reset \(root.launchDir.path): \(error)")
         }
         let persisted = loadPersistedState()
-        pendingRenames = persisted.pendingRenames
 
         // Reconstruct agents from config. No terminal outlives the app, so
         // every agent starts not running; only an unread completion stays.
@@ -567,7 +584,6 @@ final class AgentBridge {
         for id in agents.keys where !configIds.contains(id) {
             destroySurface(id: id)
             agents.removeValue(forKey: id)
-            pendingRenames.removeValue(forKey: id)
         }
 
         // Sync editable values. Provider identity can replace only a runtime
@@ -638,6 +654,22 @@ final class AgentBridge {
     /// viewing requires a presented live surface and a key workspace window,
     /// which only the workspace owner can reconcile.
     func activateAgent(id: UUID, host: any AgentSurfaceHost, project: AgentProject) {
+        activate(id: id, host: host, project: project, discardingSession: false)
+    }
+
+    /// Starts a new session for an agent whose saved session is missing:
+    /// the launch forgets the saved session before it reads it.
+    func startFresh(id: UUID, host: any AgentSurfaceHost, project: AgentProject) {
+        guard agents[id]?.missingSessionID != nil else { return }
+        activate(id: id, host: host, project: project, discardingSession: true)
+    }
+
+    private func activate(
+        id: UUID,
+        host: any AgentSurfaceHost,
+        project: AgentProject,
+        discardingSession: Bool
+    ) {
         guard let agent = agents[id] else { return }
         surfaceHost = host
 
@@ -696,7 +728,9 @@ final class AgentBridge {
             pendingFork: nil)
         let io = self.io
         io.async { [weak self] in
-            let outcome = launchCoordinator.prepare(launchRequest)
+            let outcome = launchCoordinator.prepare(
+                launchRequest,
+                discardingSession: discardingSession)
             io.onMainActor { [weak self] in
                 guard let self, let host = self.surfaceHost else {
                     if case .success(let launch) = outcome {
@@ -793,7 +827,11 @@ final class AgentBridge {
                     message: "The agent's terminal could not be opened.")
                 return
             }
-            apply(.surfaceOpened(generation: launch.generation), to: agent)
+            apply(
+                .surfaceOpened(
+                    generation: launch.generation,
+                    resumedSessionID: launch.resumedSessionID),
+                to: agent)
             onSurfacePresentationChanged?(agentID)
         }
     }
@@ -856,30 +894,11 @@ final class AgentBridge {
 
     // MARK: - Rename
 
-    func requestRename(id: UUID, newName: String) {
-        let safeName = newName
-            .components(separatedBy: .newlines)
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !safeName.isEmpty,
-              let agent = agents[id],
-              agent.name != safeName
-        else { return }
-        agent.name = safeName
-
-        guard providers.capabilities(agent.provider).sessionRename.isSupported else {
-            pendingRenames.removeValue(forKey: id)
-            persistState()
-            return
-        }
-        if isSafeForInput(agent.displayState) {
-            diagnose(.info, "rename: sending /rename for \(id) immediately")
-            onSendText?(id, "/rename \(safeName)\n")
-        } else {
-            diagnose(.info, "rename: deferring /rename for \(id)")
-            pendingRenames[id] = safeName
-            persistState()
-        }
+    /// Changes the agent's label at once, as `AgentConfig.renameAgent` stores
+    /// it. Nothing reaches a running terminal: Claude takes the label as
+    /// `--name` at its next launch, and Codex sessions are not renamed.
+    func renameAgent(id: UUID, newName: String) {
+        agents[id]?.name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func acknowledgeCompletion(id: UUID) {
@@ -917,7 +936,6 @@ final class AgentBridge {
         let agentProvider = agents[id]?.provider ?? .claudeCode
         destroySurface(id: id)
         agents.removeValue(forKey: id)
-        pendingRenames.removeValue(forKey: id)
 
         // Clean status files
         let cleanup = providers.cleanup
@@ -1004,7 +1022,7 @@ final class AgentBridge {
 
     /// What provider facts set in motion once applied: the launch's cleanup
     /// when the provider is seen alive or gone, notifications while the
-    /// agent is not viewed, a deferred rename, and saving the unread state.
+    /// agent is not viewed, and saving the unread state.
     private func perform(_ effects: [AgentRuntimeEffect], of agent: AgentInstance) {
         let id = agent.id
         if effects.contains(.becameAlive) {
@@ -1047,13 +1065,7 @@ final class AgentBridge {
             }
         }
 
-        var shouldPersist = effects.contains(.unreadChanged)
-        if isSafeForInput(agent.displayState),
-           let pendingName = pendingRenames.removeValue(forKey: id) {
-            onSendText?(id, "/rename \(pendingName)\n")
-            shouldPersist = true
-        }
-        if shouldPersist {
+        if effects.contains(.unreadChanged) {
             persistState()
         }
         updateAggregate()
@@ -1092,6 +1104,10 @@ final class AgentBridge {
         provider: AgentProviderID,
         to agent: AgentInstance
     ) {
+        // The one place the binding follows the provider: every `SessionStart`
+        // of the current launch, whatever its source (startup, resume,
+        // clear, compact, fork), names the session the next launch resumes.
+        // After `/clear` that is the new session, not the one launched.
         if case .sessionStarted(let sessionID, _, _) = domainEvent,
            let sessionID,
            !sessionID.isEmpty,
@@ -1102,8 +1118,11 @@ final class AgentBridge {
                 launchGeneration: generation)
             let agentID = agent.id
             let statusDir = statusDir
+            let diagnose = diagnose
             io.async {
-                _ = AgentSessionStore.write(binding, for: agentID, directory: statusDir)
+                if !AgentSessionStore.write(binding, for: agentID, directory: statusDir) {
+                    diagnose(.error, "could not save session \(sessionID) as the binding of \(agentID)")
+                }
             }
         }
 
@@ -1131,13 +1150,6 @@ final class AgentBridge {
             return nil
         }
         return version
-    }
-
-    private func isSafeForInput(_ state: DisplayState) -> Bool {
-        switch state {
-        case .idle, .finished: return true
-        default: return false
-        }
     }
 
     @discardableResult
@@ -1335,7 +1347,6 @@ final class AgentBridge {
             guard let completion = $0.unreadCompletion else { return nil }
             return ($0.id, completion)
         })
-        state.pendingRenames = pendingRenames
         guard let data = try? JSONEncoder().encode(state) else { return }
         let stateFile = root.stateFile
         let write: @Sendable () -> Void = {

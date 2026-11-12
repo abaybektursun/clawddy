@@ -18,6 +18,8 @@ struct AgentHookScriptTests {
         #expect(process.terminationStatus == 0)
     }
 
+    /// The script records the event and nothing else: the bridge writes the
+    /// session binding from the record.
     @Test func hookPublishesProviderTaggedSessionAndEvent() throws {
         let fixture = try HookFixture()
         defer { fixture.remove() }
@@ -33,14 +35,8 @@ struct AgentHookScriptTests {
                 """.utf8))
 
         #expect(result == 0)
-        let binding = try JSONDecoder().decode(
-            AgentSessionBinding.self,
-            from: Data(contentsOf: fixture.status
-                .appendingPathComponent("\(agentID.uuidString).session.json")))
-        #expect(binding == AgentSessionBinding(
-            provider: .codex,
-            sessionID: "session-123",
-            launchGeneration: generation))
+        #expect(!FileManager.default.fileExists(atPath: fixture.status
+            .appendingPathComponent("\(agentID.uuidString).session.json").path))
 
         let events = try fixture.events(agentID)
         #expect(events.count == 1)
@@ -48,6 +44,7 @@ struct AgentHookScriptTests {
         #expect(events[0].eventID?.isEmpty == false)
         #expect(events[0].launchGeneration == generation)
         #expect(events[0].hookEventName == "SessionStart")
+        #expect(events[0].sessionID == "session-123")
         #expect(events[0].turnID == "turn-1")
         #expect(events[0].model == "gpt-5.4")
         #expect(events[0].permissionMode == "default")
@@ -107,7 +104,7 @@ struct AgentHookScriptTests {
 
         #expect(result == 0)
         #expect(FileManager.default.fileExists(atPath: fixture.status
-            .appendingPathComponent("\(agentID.uuidString).session.json").path))
+            .appendingPathComponent("\(agentID.uuidString).events").path))
         #expect(!FileManager.default.fileExists(atPath: accountHome
             .appendingPathComponent(".config/ghostty-agents/status").path))
     }

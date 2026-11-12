@@ -373,7 +373,6 @@ struct AgentProviderTests {
     @Test func capabilityMatrixDoesNotPretendUnavailableCodexTelemetryExists() {
         #expect(AgentProviderID.codex.capabilities.resume.isSupported)
         #expect(AgentProviderID.codex.capabilities.fork.isSupported)
-        #expect(AgentProviderID.codex.capabilities.sessionRename.isSupported)
         #expect(!AgentProviderID.codex.capabilities.contextTelemetry.isSupported)
         #expect(AgentProviderID.codex.capabilities.contextTelemetry.explanation != nil)
         #expect(AgentProviderID.claudeCode.capabilities.contextTelemetry.isSupported)

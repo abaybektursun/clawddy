@@ -1026,3 +1026,36 @@ Each point below is either a contradiction or a refinement.
 8. **Note (liveness).**
    - In an already-trusted folder, `SessionStart` can run before Claude even sends the 7501 query (c2b: hook at 0.243 s, query at 0.386 s, `idle` at 0.415 s; c5b the same).
    - This does not conflict with "first report within 10 s marks the provider alive": every session's first report came within 0.5 s of spawn, or within 0.35 s of accepting the trust dialog.
+
+## P3.6 capture (2026-11-12): `--resume` of a session that does not exist
+
+Same machine, Claude Code 2.1.322, same harness, run from this shell (not inside a Clawddy agent), user's configured model (no model call happens). Three runs of
+`claude --resume <uuid-X> --name p36name --settings <logging hooks> --debug-file …`, where `<uuid-X>` is a fresh random UUID that names no session anywhere. Captures: `/Volumes/Xcode/GhosttyBuilds/ghostty/tmp/p36/r1`–`r3`. All three share the folder `r1/work`.
+
+- **r1, untrusted folder, nothing typed:** the trust dialog comes first. `7501;?` is sent and answered. Nothing else happens; the session is not looked up. The harness ended it with SIGHUP (exit status 129), and no hook ran.
+- **r2, same folder, trust accepted (`down`, `enter` at 1.148 s):**
+  ```
+   1.505 OSC   '\x1b]7501;state=clear\x07'
+   1.505 TEXT  No conversation found with session ID: <uuid-X>
+   1.506 OSC   '\x1b]7501;state=clear\x07'
+   1.530 HOOK  SessionEnd sid=<uuid-X> reason=other
+         EXIT  status 1
+  ```
+- **r3, same folder, now trusted (the case Clawddy launches into):**
+  ```
+   0.277 TEXT  No conversation found with session ID: <uuid-X>
+   0.303 HOOK  SessionEnd sid=<uuid-X> reason=other
+         EXIT  status 1
+  ```
+  No OSC 7501 bytes at all: no query, no state. The debug log has `[ERROR] No conversation found with session ID: <uuid-X>`, then the `SessionEnd:other` hooks.
+- **In both r2 and r3:**
+  - No `SessionStart`. `SessionEnd` runs with `reason: "other"` and carries the requested id; its payload has only the common fields and `reason`.
+  - Exit status 1. The harness sent SIGHUP only after the child had closed the terminal; a SIGHUP exit is 129 (r1), so 1 is Claude's own.
+  - No transcript was created: the folder's project directory under `<CLAUDE_CONFIG>/projects/` does not exist.
+- **Declining the trust dialog** also exits with status 1 and no `SessionStart` (A2), but runs no hook at all ("workspace trust not accepted"). So a `SessionEnd` with no `SessionStart` before it is what sets a missing session apart.
+
+**Safety:** `run.sh` saw status-folder changes only during r1, in one live agent's files, from the owner's own session. The r1 session ran no hook, because trust was never accepted. In r2 and r3, the user's old global `clawddy-provider-hook.sh` entry also ran on `SessionEnd`; it found no agent identity (stripped by `clean-env`) and exited 0. The only global side effect was Claude's own trust and project entry for `r1/work` in its state file (`.claude.json` in the home folder).
+
+**Rule used in P3.6:** a Claude launch that resumes a saved session (`--resume <id>`, not a fork) and records `SessionEnd` before any `SessionStart` found no such session. The agent shows it as a failed start that offers "Start fresh". The exit record (status 1) may arrive on either side of `SessionEnd`. A resume that exits with no hook at all stays an ordinary start failure. The on-screen text is not read.
+
+Not captured: whether Claude looks for the id only under the current folder's project. A session that exists but was started in another folder may give the same result.

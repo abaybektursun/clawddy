@@ -25,25 +25,6 @@ struct AgentBridgeKnownWrongTests {
         #expect(try h.binding(id).sessionID == "nested-session")
     }
 
-    /// Right: nothing is typed into a terminal whose provider has exited; Claude takes the new name as `--name` at its next launch (P3.6).
-    @Test func knownWrong_renameTypedIntoFallbackShellAfterExit() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
-        try h.providerExited(id, status: 0)
-        let agent = try h.agent(id)
-        #expect(agent.processState == .exited)
-        #expect(agent.displayState == .finished)
-
-        h.bridge.requestRename(id: id, newName: "Renamed")
-
-        #expect(h.sentText == [SentText(id: id, text: "/rename Renamed\n")])
-    }
-
     /// Right: an undecodable record is logged with its offset (P3.9).
     @Test func knownWrong_undecodableRecordDroppedSilently() throws {
         let h = try AgentBridgeHarness()

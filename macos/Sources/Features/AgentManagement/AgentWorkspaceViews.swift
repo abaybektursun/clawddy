@@ -1003,7 +1003,7 @@ struct AgentListView: View {
                     guard case .agent(let id, _) = target,
                           config.renameAgent(id: id, newName: name)
                     else { return false }
-                    bridge.requestRename(id: id, newName: name)
+                    bridge.renameAgent(id: id, newName: name)
                     return true
                 })
         }

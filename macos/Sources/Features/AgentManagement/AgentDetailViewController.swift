@@ -51,6 +51,12 @@ final class AgentDetailViewController: NSViewController {
         didSet { headerModel.onStart = onStartAgent }
     }
 
+    /// Starts a new session for an agent whose saved session is missing.
+    /// Wired once, like `onStartAgent`.
+    var onStartFresh: ((UUID) -> Void)? {
+        didSet { headerModel.onStartFresh = onStartFresh }
+    }
+
     init(ghostty: Ghostty.App, bridge: AgentBridge) {
         self.ghostty = ghostty
         self.bridge = bridge
@@ -344,12 +350,6 @@ final class AgentDetailViewController: NSViewController {
         }
     }
 
-    /// Send text to a specific agent's terminal pty.
-    func sendText(_ text: String, toAgent id: UUID) {
-        guard let surface = panesByID[id]?.surface.surfaceModel else { return }
-        surface.sendText(text)
-    }
-
     /// Match the terminal canvas to Ghostty's theme: the layer takes the
     /// terminal background color and the placeholder's color scheme follows
     /// it. The header itself deliberately keeps the window-chrome color.
@@ -372,6 +372,7 @@ class AgentDetailHeaderModel {
     var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
     var canvasColorScheme: ColorScheme = .dark
     @ObservationIgnored var onStart: ((UUID) -> Void)?
+    @ObservationIgnored var onStartFresh: ((UUID) -> Void)?
     @ObservationIgnored var onFocusTerminal: (() -> Void)?
 }
 
@@ -422,7 +423,13 @@ private struct AgentDetailHeaderView: View {
                         .accessibilitySortPriority(1)
                     } else {
                         Button {
-                            model.onStart?(agent.id)
+                            // A missing session can only be replaced; a
+                            // restart would resume it and fail again.
+                            if agent.missingSessionID != nil {
+                                model.onStartFresh?(agent.id)
+                            } else {
+                                model.onStart?(agent.id)
+                            }
                         } label: {
                             if agent.isStarting {
                                 HStack(spacing: 6) {
@@ -458,6 +465,7 @@ private struct AgentDetailHeaderView: View {
     }
 
     private func primaryActionTitle(for agent: AgentInstance) -> String {
+        if agent.missingSessionID != nil { return "Start Fresh" }
         if agent.interactionState == .authentication { return "Open Terminal to Sign In" }
         if agent.surfaceState == .failed { return "Retry" }
         if agent.processState == .exited { return "Restart" }

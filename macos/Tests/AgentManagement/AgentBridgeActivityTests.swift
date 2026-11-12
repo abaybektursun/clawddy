@@ -251,35 +251,36 @@ struct AgentBridgeActivityTests {
         #expect(h.notifier.posted.map(\.identifier) == [waiting, completed])
     }
 
-    @Test func renameWhileIdleIsTypedImmediately() throws {
+    /// Renaming changes the label at once and reaches no terminal, even while
+    /// Claude waits at its prompt, where `/rename` used to be typed, or after
+    /// a turn ends, where a queued one was. The next launch names the
+    /// session with the new label.
+    @Test func renameTypesNothingAndNextLaunchCarriesNewName() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
+        try h.useRealClaudeLaunch()
         let id = try h.addAgent("Agent")
         h.start()
-        try h.launch(id)
+        try h.launch(id, session: "session-1")
+        let agent = try h.agent(id)
+        #expect(agent.displayState == .idle)
+        let hostCalls = h.host.calls
 
-        h.bridge.requestRename(id: id, newName: "New Name")
-
-        #expect(try h.agent(id).name == "New Name")
-        #expect(h.sentText == [SentText(id: id, text: "/rename New Name\n")])
-        #expect(try h.persisted("pendingRenames").isEmpty)
-    }
-
-    @Test func renameWhileWorkingIsDeferredPersistedThenTyped() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        try h.launch(id)
+        #expect(h.config.renameAgent(id: id, newName: "New Name"))
+        h.bridge.renameAgent(id: id, newName: "New Name")
+        #expect(agent.name == "New Name")
         try h.hook(id, "UserPromptSubmit")
-
-        h.bridge.requestRename(id: id, newName: "New Name")
-        #expect(h.sentText.isEmpty)
-        #expect(try h.persisted("pendingRenames")[id] as? String == "New Name")
-
         try h.hook(id, "Stop")
-        #expect(h.sentText == [SentText(id: id, text: "/rename New Name\n")])
-        #expect(try h.persisted("pendingRenames").isEmpty)
+        #expect(h.host.calls == hostCalls)
+        let state = try #require(
+            JSONSerialization.jsonObject(with: Data(contentsOf: h.root.stateFile)) as? [String: Any])
+        #expect(state["pendingRenames"] == nil)
+
+        try h.providerExited(id, status: 0)
+        try h.activate(id)
+
+        #expect(h.providers.launchRequests.last?.name == "New Name")
+        #expect(try h.launchScript().contains(shellCommand(["--resume", "session-1", "--name", "New Name"])))
     }
 
     /// Status-line metadata is stamped with its file's modification time, and
@@ -356,6 +357,53 @@ struct AgentBridgeActivityTests {
             "clawddy.\(id.uuidString).waiting",
             "clawddy.\(id.uuidString).completed",
         ])
+    }
+
+    /// Every `SessionStart` the real hook script records rebinds the agent,
+    /// whatever its source, in the order Claude sends them (P3.5a case 7):
+    /// after `/clear` the binding names the new session, and Restart
+    /// resumes it.
+    @Test func sessionStartHookRebindsAfterClear() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        try h.useRealClaudeLaunch()
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.activate(id)
+        let launched = try h.binding(id).sessionID
+        let cleared = "8d0e5f6a-3b2c-4d1e-9f8a-7b6c5d4e3f2a"
+        let agent = try h.agent(id)
+        func run(_ payload: String) throws {
+            let generation = try h.generation(id)
+            let groups = ClaudeCodeProvider(root: h.root)
+                .overlayHooks(agentID: id, generation: generation)["SessionStart"] as? [[String: Any]]
+            let handlers = try #require(groups?.first?["hooks"] as? [[String: Any]])
+            let command = try #require(handlers.first?["command"] as? String)
+            #expect(try runHook(command, payload: payload, in: h.folder) == 0)
+            h.poll()
+        }
+        func binding(_ session: String) throws -> AgentSessionBinding {
+            AgentSessionBinding(provider: .claudeCode, sessionID: session, launchGeneration: try h.generation(id))
+        }
+
+        try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionStart","source":"startup","model":"claude-test"}"#)
+        #expect(try h.binding(id) == binding(launched))
+        try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionEnd","reason":"clear"}"#)
+        try run(#"{"session_id":"\#(cleared)","hook_event_name":"SessionStart","source":"clear"}"#)
+        #expect(try h.binding(id) == binding(cleared))
+        #expect(agent.sessionID == cleared)
+        try run(#"{"session_id":"\#(cleared)","hook_event_name":"SessionStart","source":"compact","model":"claude-test"}"#)
+        #expect(try h.binding(id) == binding(cleared))
+
+        try h.providerExited(id, status: 0)
+        try h.activate(id)
+        #expect(try h.launchScript().contains(shellCommand(["--resume", cleared, "--name", "Agent"])))
+        try run(#"{"session_id":"\#(cleared)","hook_event_name":"SessionStart","source":"resume"}"#)
+        #expect(try h.binding(id) == binding(cleared))
+        // A resumed session that started ends as usual.
+        try run(#"{"session_id":"\#(cleared)","hook_event_name":"SessionEnd","reason":"prompt_input_exit"}"#)
+        #expect(agent.missingSessionID == nil)
+        #expect(agent.failureMessage == nil)
     }
 }
 

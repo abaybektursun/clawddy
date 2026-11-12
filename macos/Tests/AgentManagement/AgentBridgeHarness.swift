@@ -266,9 +266,9 @@ final class FakeSurfaceHost: AgentSurfaceHost {
     }
 }
 
-struct SentText: Equatable {
-    let id: UUID
-    let text: String
+/// `arguments` as a launch script's command line quotes them.
+func shellCommand(_ arguments: [String]) -> String {
+    arguments.map(AgentHookRuntime.shellQuote).joined(separator: " ")
 }
 
 /// A bridge on a temporary root with one project holding one task, wired as
@@ -290,7 +290,6 @@ final class AgentBridgeHarness {
     private(set) var config: AgentConfig
     private(set) var bridge: AgentBridge
     private(set) var aggregateChanges: [AggregateState] = []
-    private(set) var sentText: [SentText] = []
     private(set) var surfaceDeaths: [UUID] = []
     private(set) var presentationChanges: [UUID] = []
 
@@ -323,6 +322,18 @@ final class AgentBridgeHarness {
     /// An empty folder: no provider executable is found on this PATH.
     var binFolder: URL { folder.appendingPathComponent("bin", isDirectory: true) }
 
+    /// Launches go through the real Claude provider, which finds a stand-in
+    /// `claude` in `binFolder` that exits at once. Unlike the default launch
+    /// it reads the user's Claude settings, as the provider's own tests do;
+    /// it writes only under the harness root.
+    func useRealClaudeLaunch() throws {
+        let executable = binFolder.appendingPathComponent("claude")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let claude = ClaudeCodeProvider(root: root)
+        providers.prepareLaunch = { claude.prepareLaunch($0) }
+    }
+
     @discardableResult
     func addAgent(_ name: String, provider: AgentProviderID = .claudeCode) throws -> UUID {
         try #require(config.addAgent(
@@ -347,7 +358,6 @@ final class AgentBridgeHarness {
         config = AgentConfig(root: root)
         host = FakeSurfaceHost()
         aggregateChanges = []
-        sentText = []
         surfaceDeaths = []
         presentationChanges = []
         bridge = AgentBridge(
@@ -376,7 +386,6 @@ final class AgentBridgeHarness {
         host.bridge = bridge
         bridge.environmentPath = binFolder.path
         bridge.onAggregateStateChanged = { [weak self] in self?.aggregateChanges.append($0) }
-        bridge.onSendText = { [weak self] in self?.sentText.append(SentText(id: $0, text: $1)) }
         bridge.onSurfaceDeath = { [weak self] id in
             self?.surfaceDeaths.append(id)
             self?.host.removeSurface(id: id)
@@ -499,6 +508,14 @@ final class AgentBridgeHarness {
 
     func launchScripts() throws -> [String] {
         try FileManager.default.contentsOfDirectory(atPath: root.launchDir.path)
+    }
+
+    /// The one launch script there is: the current launch's, which stays
+    /// until its provider is seen alive or gone.
+    func launchScript() throws -> String {
+        let names = try launchScripts()
+        try #require(names.count == 1)
+        return try String(contentsOf: root.launchDir.appendingPathComponent(names[0]), encoding: .utf8)
     }
 
     func size(_ url: URL) throws -> Int {

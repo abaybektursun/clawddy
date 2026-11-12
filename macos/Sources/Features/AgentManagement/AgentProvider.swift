@@ -152,7 +152,6 @@ enum AgentCapabilitySupport: Equatable, Sendable {
 struct AgentProviderCapabilities: Equatable, Sendable {
     var resume: AgentCapabilitySupport
     var fork: AgentCapabilitySupport
-    var sessionRename: AgentCapabilitySupport
     var modelTelemetry: AgentCapabilitySupport
     var effortTelemetry: AgentCapabilitySupport
     var contextTelemetry: AgentCapabilitySupport
@@ -162,7 +161,6 @@ struct AgentProviderCapabilities: Equatable, Sendable {
     static let claudeCode = Self(
         resume: .supported,
         fork: .supported,
-        sessionRename: .supported,
         modelTelemetry: .supported,
         effortTelemetry: .supported,
         contextTelemetry: .supported,
@@ -172,7 +170,6 @@ struct AgentProviderCapabilities: Equatable, Sendable {
     static let codex = Self(
         resume: .supported,
         fork: .supported,
-        sessionRename: .supported,
         modelTelemetry: .supported,
         effortTelemetry: .unavailable("Reasoning effort is not exposed by the interactive hook interface."),
         contextTelemetry: .unavailable(
@@ -284,9 +281,14 @@ struct AgentPreparedLaunch: Sendable {
     var environment: [String: String]
     var metadataAvailability: AgentMetadataAvailability
     /// The session this launch creates under an ID it chose, recorded as the
-    /// agent's binding before the process starts. Nil when the ID is learned
-    /// from the provider's `SessionStart` hook.
+    /// agent's binding before the process starts: every new or forked Claude
+    /// session. Nil when the launch resumes a session, and for Codex, which
+    /// cannot be given an ID.
     var newSession: AgentSessionBinding?
+    /// The saved session a Claude launch resumes. Claude ends a resume of a
+    /// session it cannot find with `SessionEnd` and no `SessionStart`, which
+    /// is how the agent learns that the session is missing.
+    var resumedSessionID: String?
 }
 
 struct AgentIntegrationPreparation: Equatable, Sendable {

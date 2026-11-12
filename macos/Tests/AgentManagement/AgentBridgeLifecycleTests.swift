@@ -231,6 +231,87 @@ struct AgentBridgeLifecycleTests {
         #expect(try h.binding(fork.id).sessionID == "fork-session")
     }
 
+    /// A resume of a session Claude cannot find, as captured for P3.6: it
+    /// prints "No conversation found with session ID …", runs `SessionEnd`
+    /// and no `SessionStart`, and exits with status 1. The agent says why it
+    /// could not start and offers only to start fresh, which forgets the
+    /// saved session, the untagged file older builds wrote included, and
+    /// launches a new one.
+    @Test func missingSessionIsExplicitFailure() throws {
+        // `SessionEnd` before `SessionStart` is the only sign; a Claude hook
+        // list without `SessionEnd` cannot tell a missing session apart.
+        #expect(ClaudeCodeProvider.hookedEvents.contains("SessionEnd"))
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        try h.useRealClaudeLaunch()
+        let id = try h.addAgent("Agent")
+        #expect(AgentSessionStore.write(
+            AgentSessionBinding(provider: .claudeCode, sessionID: "gone-session", launchGeneration: nil),
+            for: id,
+            directory: h.root.statusDir))
+        try Data("gone-session\n".utf8).write(to: h.statusFile(id, "session"))
+        h.start()
+        try h.activate(id)
+        #expect(try h.launchScript().contains(shellCommand(["--resume", "gone-session", "--name", "Agent"])))
+
+        try h.hook(id, "SessionEnd", session: "gone-session")
+        try h.providerExited(id, status: 1)
+
+        let agent = try h.agent(id)
+        #expect(agent.displayState == .failed)
+        #expect(agent.missingSessionID == "gone-session")
+        #expect(agent.failureMessage
+            == "Claude Code found no conversation with session ID gone-session, so the agent could not be resumed.")
+        // The fallback shell keeps the terminal, which shows Claude's message.
+        #expect(h.host.hasSurface(id: id))
+        #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
+
+        let project = try #require(h.config.project(forAgent: id))
+        h.bridge.startFresh(id: id, host: h.host, project: project)
+
+        let fresh = try h.binding(id).sessionID
+        #expect(fresh != "gone-session" && UUID(uuidString: fresh) != nil)
+        #expect(!h.exists(h.statusFile(id, "session")))
+        let script = try h.launchScript()
+        #expect(script.contains(shellCommand(["--session-id", fresh, "--name", "Agent"])))
+        #expect(!script.contains("--resume"))
+        #expect(agent.missingSessionID == nil)
+        #expect(agent.displayState == .launching)
+        // Start fresh is only for a missing session.
+        h.bridge.startFresh(id: id, host: h.host, project: project)
+        #expect(try h.binding(id).sessionID == fresh)
+    }
+
+    /// The exit record may come before Claude's `SessionEnd`; the failure
+    /// then says why once `SessionEnd` arrives. Until it does, a resume that
+    /// exits with status 1 without running any hook is an ordinary start
+    /// failure: declining the folder's trust dialog looks like that, and the
+    /// session may well exist.
+    @Test func missingSessionNeedsSessionEndBeforeSessionStart() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        try h.useRealClaudeLaunch()
+        let id = try h.addAgent("Agent")
+        #expect(AgentSessionStore.write(
+            AgentSessionBinding(provider: .claudeCode, sessionID: "saved-session", launchGeneration: nil),
+            for: id,
+            directory: h.root.statusDir))
+        h.start()
+        try h.activate(id)
+
+        try h.providerExited(id, status: 1)
+        let agent = try h.agent(id)
+        #expect(agent.displayState == .failed)
+        #expect(agent.missingSessionID == nil)
+        #expect(agent.failureMessage == "The provider exited before the agent session started (status 1).")
+
+        try h.hook(id, "SessionEnd", session: "saved-session")
+        #expect(agent.missingSessionID == "saved-session")
+        #expect(agent.failureMessage
+            == "Claude Code found no conversation with session ID saved-session, so the agent could not be resumed.")
+        #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
+    }
+
     @Test func surfaceDeathIsExitedAndCleansUp() async throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }

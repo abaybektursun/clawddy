@@ -70,28 +70,34 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
             hooks: overlayHooks(agentID: request.agentID, generation: request.launchGeneration))
         var arguments: [String] = []
         var newSession: AgentSessionBinding?
+        var resumedSessionID: String?
+        // The ID of a session this launch creates, in Claude's lowercase form.
+        let chosenSession = AgentSessionBinding(
+            provider: id,
+            sessionID: UUID().uuidString.lowercased(),
+            launchGeneration: request.launchGeneration)
 
         // A fork marker stays until the forked process is seen alive, so
         // while it exists the fork has not started, and this launch forks
-        // again rather than resuming a session that may not exist. The launch
-        // chooses the fork's ID, in Claude's lowercase form; Claude accepts
-        // `--session-id` together with `--resume` only with `--fork-session`.
+        // again rather than resuming a session that may not exist. Claude
+        // accepts `--session-id` together with `--resume` only with
+        // `--fork-session`.
         if let pending = request.pendingFork, pending.provider == id {
-            let session = AgentSessionBinding(
-                provider: id,
-                sessionID: UUID().uuidString.lowercased(),
-                launchGeneration: request.launchGeneration)
-            newSession = session
+            newSession = chosenSession
             arguments += [
                 "--resume", pending.sourceSessionID,
-                "--fork-session", "--session-id", session.sessionID,
-                "--name", request.name,
+                "--fork-session", "--session-id", chosenSession.sessionID,
             ]
         } else if let session = request.session, session.provider == id {
+            resumedSessionID = session.sessionID
             arguments += ["--resume", session.sessionID]
         } else {
-            arguments += ["--name", request.name]
+            newSession = chosenSession
+            arguments += ["--session-id", chosenSession.sessionID]
         }
+        // Claude takes the agent's label at every launch, resumes included,
+        // so a rename reaches the session at its next launch.
+        arguments += ["--name", request.name]
         arguments += id.startModeArguments(request.launchProfile.startMode)
         if let model = request.launchProfile.modelID, !model.isEmpty {
             arguments += ["--model", model]
@@ -114,7 +120,8 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
             arguments: arguments,
             environment: environment,
             metadataAvailability: availability,
-            newSession: newSession))
+            newSession: newSession,
+            resumedSessionID: resumedSessionID))
     }
 
     func normalize(_ event: AgentRawProviderEvent) -> [AgentDomainEvent] {

@@ -78,6 +78,16 @@ enum AgentSessionStore {
         return AgentConfig.atomicWrite(data, to: url)
     }
 
+    /// Forgets the agent's saved session, including the untagged file older
+    /// builds wrote, which `session` would otherwise read and resume.
+    static func discardSession(for agentID: UUID, directory: URL) throws {
+        for suffix in ["session.json", "session"] {
+            let url = directory.appendingPathComponent("\(agentID.uuidString).\(suffix)")
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            try FileManager.default.removeItem(at: url)
+        }
+    }
+
     static func pendingFork(
         for agentID: UUID,
         provider: AgentProviderID,
