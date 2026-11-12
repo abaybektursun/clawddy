@@ -44,30 +44,6 @@ struct AgentBridgeKnownWrongTests {
         #expect(h.sentText == [SentText(id: id, text: "/rename Renamed\n")])
     }
 
-    /// Right: closing an agent terminal whose process is alive asks first (P3.3).
-    @Test func knownWrong_closeWithLiveProcessDestroysWithoutConfirmation() async throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        try h.launch(id)
-        let surface = try #require(h.host.surfaces[id])
-        let agent = try h.agent(id)
-
-        NotificationCenter.default.post(
-            name: Ghostty.Notification.ghosttyCloseSurface,
-            object: surface,
-            userInfo: ["process_alive": true])
-
-        // The close reaches the bridge through a main-actor task, so nothing
-        // has changed when the post returns.
-        #expect(agent.surfaceState == .open)
-        await yieldToMainActor(until: { agent.surfaceState == .closed })
-        #expect(agent.displayState == .dead)
-        #expect(h.surfaceDeaths == [id])
-        #expect(h.host.calls.last == .remove(id))
-    }
-
     /// Right: an undecodable record is logged with its offset (P3.9).
     @Test func knownWrong_undecodableRecordDroppedSilently() throws {
         let h = try AgentBridgeHarness()

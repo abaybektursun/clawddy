@@ -182,6 +182,7 @@ final class FakeSurfaceHost: AgentSurfaceHost {
         case select(UUID)
         case show(UUID)
         case present(UUID)
+        case confirmClose(UUID)
         case remove(UUID)
     }
 
@@ -191,6 +192,7 @@ final class FakeSurfaceHost: AgentSurfaceHost {
     weak var bridge: AgentBridge?
     private(set) var calls: [Call] = []
     private(set) var surfaces: [UUID: FakeSurface] = [:]
+    private var pendingClose: (@MainActor () -> Void)?
 
     func hasSurface(id: UUID) -> Bool { surfaces[id] != nil }
 
@@ -223,6 +225,19 @@ final class FakeSurfaceHost: AgentSurfaceHost {
         for (id, surface) in surfaces where surface.processExited {
             bridge?.surfaceClosed(id: id, generation: surface.generation, processAlive: false)
         }
+    }
+
+    /// Records the question; `answerClose` gives the user's answer.
+    func confirmClose(id: UUID, then close: @escaping @MainActor () -> Void) {
+        calls.append(.confirmClose(id))
+        pendingClose = close
+    }
+
+    /// Answers the open close question: Close when `confirmed`, else Cancel.
+    func answerClose(confirmed: Bool) {
+        let close = pendingClose
+        pendingClose = nil
+        if confirmed { close?() }
     }
 
     func removeSurface(id: UUID) {

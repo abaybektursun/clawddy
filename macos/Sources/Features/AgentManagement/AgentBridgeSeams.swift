@@ -237,6 +237,9 @@ protocol AgentSurfaceHost: AnyObject {
     ) -> Bool
     /// Reports each surface whose process has exited to the bridge as closed.
     func reportExitedSurfaces()
+    /// Asks the user before closing the agent's terminal while its process
+    /// runs, and calls `close` only if they agree.
+    func confirmClose(id: UUID, then close: @escaping @MainActor () -> Void)
     func removeSurface(id: UUID)
 }
 

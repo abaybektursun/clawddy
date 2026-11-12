@@ -727,6 +727,22 @@ final class ClawddyController: NSObject {
     }
 }
 
+extension AgentQuitConfirmation {
+    /// The quit confirmation when no terminal window needs one: running
+    /// agents still ask, in Ghostty's words for quitting. Called from
+    /// `AppDelegate.terminate`, on the main thread.
+    static func ask(runningAgents: Int) -> NSApplication.TerminateReply {
+        guard let notice = notice(runningAgents: runningAgents) else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "Quit Ghostty?"
+        alert.informativeText = notice
+        alert.addButton(withTitle: "Terminate")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+}
+
 extension ClawddyController: NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {

@@ -408,6 +408,7 @@ class AppDelegate: NSObject,
         return derivedConfig.shouldQuitAfterLastWindowClosed
     }
 
+    @MainActor
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let windows = NSApplication.shared.windows
         if windows.isEmpty { return .terminateNow }
@@ -439,7 +440,7 @@ class AppDelegate: NSObject,
         // If our app says we don't need to confirm, we can exit now.
         if !ghostty.needsConfirmQuit { return .terminateNow }
 
-        return terminate()
+        return terminate(runningAgents: clawddy.bridge.runningAgentCount)
     }
 
     @MainActor
@@ -1432,20 +1433,24 @@ extension AppDelegate: NSMenuItemValidation {
 // MARK: - Termination Flow
 
 extension AppDelegate {
-    func terminate() -> NSApplication.TerminateReply {
+    /// Clawddy: agent terminals are not terminal windows, so the agents still
+    /// running are named in the same confirmation, or ask on their own.
+    func terminate(runningAgents: Int) -> NSApplication.TerminateReply {
         let controllersNeedConfirmation = NSApplication.shared.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .filter { !$0.windowCanBeClosedWithoutConfirmation() }
 
         guard !controllersNeedConfirmation.isEmpty else {
-            return .terminateNow
+            return AgentQuitConfirmation.ask(runningAgents: runningAgents)
         }
 
         if controllersNeedConfirmation.count == 1 {
             Task {
                 let response = await controllersNeedConfirmation[0].confirmCloseAsync(
                     messageText: "Quit Ghostty?",
-                    informativeText: "The terminal still has a running process. If you quit, the process will be killed.",
+                    informativeText: AgentQuitConfirmation.informativeText(
+                        "The terminal still has a running process. If you quit, the process will be killed.",
+                        runningAgents: runningAgents),
                     confirmButtonTitle: "Terminate",
                 )
 
@@ -1461,6 +1466,9 @@ extension AppDelegate {
             let alert = NSAlert.reviewWindowsAlert(
                 messageText: "You have \(controllersNeedConfirmation.count) windows with running processes. Do you want to review these windows before quitting?"
             )
+            alert.informativeText = AgentQuitConfirmation.informativeText(
+                alert.informativeText,
+                runningAgents: runningAgents)
 
             switch alert.runModal() {
             case .alertFirstButtonReturn:

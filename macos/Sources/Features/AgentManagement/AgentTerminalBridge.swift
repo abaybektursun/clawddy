@@ -1358,6 +1358,12 @@ final class AgentBridge {
         return .idle
     }
 
+    /// Agents whose provider is starting or running in a terminal; quitting
+    /// stops them.
+    var runningAgentCount: Int {
+        agents.values.filter { $0.surfaceState == .open && $0.processState != .exited }.count
+    }
+
     private func updateAggregate() {
         let current = aggregateState
         if lastAggregateState != current {
@@ -1369,16 +1375,27 @@ final class AgentBridge {
     // MARK: - Surface Management
 
     /// The host reports that an agent's terminal closed, or that its process
-    /// exited; `processAlive` says whether the process was still running.
-    /// `generation` is the launch the surface was created for: a close from
-    /// an earlier launch changes nothing, and nil closes the current one.
+    /// exited. `generation` is the launch the surface was created for: a
+    /// close from an earlier launch changes nothing, and nil closes the
+    /// current one. A close that would kill a running process asks first, as
+    /// for any Ghostty terminal.
     func surfaceClosed(id: UUID, generation: UUID?, processAlive: Bool) {
         guard !isTerminating, let agent = agents[id] else { return }
         if let generation, agent.launchGeneration != generation {
             diagnose(.debug, "ignored close of an earlier surface of \(id)")
             return
         }
-        diagnose(.info, "surface death: \(id)\(processAlive ? ", process running" : "")")
+        // A surface closes once, however many reports of it arrive.
+        guard agent.surfaceState == .open else { return }
+        if processAlive, let surfaceHost {
+            surfaceHost.confirmClose(id: id) { [weak self] in
+                // Agreed, so nothing is left to ask; the launch may have
+                // changed while the question was open.
+                self?.surfaceClosed(id: id, generation: generation, processAlive: false)
+            }
+            return
+        }
+        diagnose(.info, "surface death: \(id)")
         destroySurface(id: id)
     }
 

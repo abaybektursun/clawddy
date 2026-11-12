@@ -142,6 +142,27 @@ enum AgentViewingPolicy {
     }
 }
 
+/// What quitting says about agents. Their terminals are not terminal
+/// windows, so Ghostty's own quit confirmation does not count them.
+enum AgentQuitConfirmation {
+    /// The sentence for the agents quitting would stop; nil when none run,
+    /// and then the agents need no confirmation.
+    static func notice(runningAgents: Int) -> String? {
+        switch runningAgents {
+        case ...0: return nil
+        case 1: return "1 agent is running. Its session can be resumed."
+        default: return "\(runningAgents) agents are running. Their sessions can be resumed."
+        }
+    }
+
+    /// Ghostty's quit text for terminal windows, followed by the sentence for
+    /// running agents as its own paragraph.
+    static func informativeText(_ terminalText: String, runningAgents: Int) -> String {
+        guard let notice = notice(runningAgents: runningAgents) else { return terminalText }
+        return terminalText + "\n\n" + notice
+    }
+}
+
 struct AgentListEmptyPresentation: Equatable, Sendable {
     var title: String
     var message: String

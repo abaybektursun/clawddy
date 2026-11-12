@@ -41,6 +41,7 @@ final class AgentDetailViewController: NSViewController {
     private var headerModel = AgentDetailHeaderModel()
 
     private var keyObservers: [NSObjectProtocol] = []
+    private var closeAlert: NSAlert?
 
     /// Activates an agent by id. Wired once by the workspace owner; the header
     /// invokes it with the currently displayed agent's id at click time, so a
@@ -282,6 +283,32 @@ final class AgentDetailViewController: NSViewController {
     func reportExitedSurfaces() {
         for (id, pane) in panesByID where pane.surface.processExited {
             bridge.surfaceClosed(id: id, generation: pane.generation, processAlive: false)
+        }
+    }
+
+    /// Asks before closing an agent terminal whose process is still running,
+    /// in the words and form of Ghostty's terminal windows
+    /// (`BaseTerminalController.closeSurface`): one sheet at a time, and with
+    /// no window to ask in, the close goes ahead.
+    func confirmClose(id: UUID, then close: @escaping @MainActor () -> Void) {
+        guard closeAlert == nil, panesByID[id] != nil else { return }
+        guard let window = view.window else {
+            close()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Close Terminal?"
+        alert.informativeText = "The terminal still has a running process. If you close the terminal the process will be killed."
+        alert.addButton(withTitle: "Close")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        closeAlert = alert
+        Task {
+            let response = await alert.beginSheetModal(for: window)
+            // Keeps focus where it was under Stage Manager (Ghostty #8336).
+            alert.window.orderOut(nil)
+            closeAlert = nil
+            if response == .alertFirstButtonReturn { close() }
         }
     }
 

@@ -296,6 +296,79 @@ struct AgentBridgeLifecycleTests {
         #expect(h.host.hasSurface(id: other))
     }
 
+    /// Flipped from `knownWrong_closeWithLiveProcessDestroysWithoutConfirmation`
+    /// (P3.3): closing an agent terminal whose process is alive asks first.
+    /// Cancel keeps the terminal; Close ends the launch.
+    @Test func closeWithLiveProcessAsksFirst() async throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.launch(id)
+        let surface = try #require(h.host.surfaces[id])
+        let agent = try h.agent(id)
+        let closeWhileRunning = {
+            NotificationCenter.default.post(
+                name: Ghostty.Notification.ghosttyCloseSurface,
+                object: surface,
+                userInfo: ["process_alive": true])
+        }
+
+        closeWhileRunning()
+
+        // The close reaches the bridge through a main-actor task, so nothing
+        // has happened when the post returns.
+        #expect(h.host.calls == [.select(id), .present(id)])
+        await yieldToMainActor(until: { h.host.calls.last == .confirmClose(id) })
+        #expect(h.host.calls == [.select(id), .present(id), .confirmClose(id)])
+        #expect(agent.surfaceState == .open)
+        #expect(h.surfaceDeaths.isEmpty)
+
+        h.host.answerClose(confirmed: false)
+        #expect(agent.displayState == .idle)
+        #expect(h.host.hasSurface(id: id))
+        #expect(h.surfaceDeaths.isEmpty)
+
+        closeWhileRunning()
+        await yieldToMainActor(until: { h.host.calls.filter { $0 == .confirmClose(id) }.count == 2 })
+        #expect(h.host.calls.last == .confirmClose(id))
+        h.host.answerClose(confirmed: true)
+        #expect(agent.displayState == .dead)
+        #expect(agent.surfaceState == .closed)
+        #expect(h.surfaceDeaths == [id])
+        #expect(h.host.calls.last == .remove(id))
+    }
+
+    /// Quitting stops the agents whose provider is starting or running, so
+    /// it asks and names them; agents that exited or never started do not
+    /// count. The sentence follows Ghostty's own text for terminal windows.
+    @Test func quitWithRunningAgentsAsks() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let running = try h.addAgent("Running")
+        let starting = try h.addAgent("Starting")
+        let exited = try h.addAgent("Exited")
+        try h.addAgent("Never Started")
+        h.start()
+        #expect(h.bridge.runningAgentCount == 0)
+        #expect(AgentQuitConfirmation.notice(runningAgents: h.bridge.runningAgentCount) == nil)
+
+        try h.launch(running)
+        try h.activate(starting)
+        try h.launch(exited)
+        try h.providerExited(exited, status: 0)
+
+        #expect(h.bridge.runningAgentCount == 2)
+        #expect(AgentQuitConfirmation.notice(runningAgents: h.bridge.runningAgentCount)
+            == "2 agents are running. Their sessions can be resumed.")
+        #expect(AgentQuitConfirmation.notice(runningAgents: 1)
+            == "1 agent is running. Its session can be resumed.")
+        let terminalText = "The terminal still has a running process. If you quit, the process will be killed."
+        #expect(AgentQuitConfirmation.informativeText(terminalText, runningAgents: 2)
+            == terminalText + "\n\n2 agents are running. Their sessions can be resumed.")
+        #expect(AgentQuitConfirmation.informativeText(terminalText, runningAgents: 0) == terminalText)
+    }
+
     /// A close the host reports for an earlier launch, here one that was
     /// still on its way when the agent restarted, changes nothing.
     @Test func closeFromEarlierLaunchIsIgnored() throws {
