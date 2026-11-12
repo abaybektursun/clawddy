@@ -31,18 +31,25 @@ def main [
     --scheme: string = "Ghostty"       # Xcode scheme (Ghostty, DockTilePlugin)
     --configuration: string = "Release" # Build configuration (Debug, Release, ReleaseLocal)
     --action: string = "build"         # xcodebuild action (build, test, clean, etc.)
+    --identity: string = "production"  # App identity (production, dev); tests always use their own
     --build-root: string                # Override GHOSTTY_MACOS_BUILD_ROOT
     --show-paths                        # Print resolved storage paths without building
 ] {
+    if $identity not-in ["production" "dev"] {
+        error make { msg: $"Unknown identity ($identity); expected production or dev" }
+    }
     let project = ($env.FILE_PWD | path join "Ghostty.xcodeproj")
     let root = (external-root $build_root)
-    # Tests require an @testable Release module and inject XCTest frameworks
-    # into the app bundle. Keep that graph physically separate so a test can
-    # never mutate the production Release product or its incremental state.
-    let action_root = if $action == "test" {
-        $root | path join "tests"
-    } else {
-        $root
+    # A test run always builds the test identity, whatever --identity says, so
+    # a test host never shares a bundle ID, data folder or products with a
+    # runnable app. Each identity has its own build graph, so building one can
+    # never mutate another's product or incremental state. Tests also need an
+    # @testable Release module with XCTest frameworks injected into the app.
+    let build_identity = if $action == "test" { "test" } else { $identity }
+    let action_root = match $build_identity {
+        "test" => ($root | path join "tests")
+        "dev" => ($root | path join "dev")
+        _ => $root
     }
     let products = ($action_root | path join "products")
     let objects = ($action_root | path join "objects")
@@ -75,6 +82,7 @@ def main [
 
     if $show_paths {
         print ({
+            identity: $build_identity
             build_root: $root
             app: ($products | path join $configuration "Ghostty.app")
             objects: $objects
@@ -94,18 +102,27 @@ def main [
     # optimized but must explicitly emit a testable module; it is never used as
     # the runnable production bundle. Restrict the action to unit tests so
     # Xcode does not build or launch the permission-gated UI-test target.
-    # The test host always gets its own bundle ID and data folder name, so a
-    # test run can never share preferences, notifications or data with the
-    # live app, whatever other flags are given.
     let test_arguments = if $action == "test" {
-        [
-            "-only-testing:GhosttyTests"
-            "ENABLE_TESTABILITY=YES"
+        ["-only-testing:GhosttyTests" "ENABLE_TESTABILITY=YES"]
+    } else {
+        []
+    }
+
+    # The bundle ID separates preferences, notifications and permissions; the
+    # data folder name selects ~/.config/<name>. The production identity uses
+    # the project's own values. The app enables the global hot key and the
+    # updater only under the production bundle ID.
+    let identity_arguments = match $build_identity {
+        "test" => [
             "CLAWDDY_BUNDLE_IDENTIFIER=com.mitchellh.ghostty.clawddy-tests"
             "CLAWDDY_DATA_DIRECTORY_NAME=clawddy-tests"
         ]
-    } else {
-        []
+        "dev" => [
+            "CLAWDDY_BUNDLE_IDENTIFIER=com.mitchellh.ghostty.clawddy-dev"
+            "CLAWDDY_DISPLAY_NAME=Clawddy Dev"
+            "CLAWDDY_DATA_DIRECTORY_NAME=clawddy-dev"
+        ]
+        _ => []
     }
 
     (^env -i
@@ -132,5 +149,6 @@ def main [
         $"CODE_SIGN_IDENTITY=($code_sign_identity)"
         $"DEVELOPMENT_TEAM=($development_team)"
         ...$test_arguments
+        ...$identity_arguments
         $action)
 }

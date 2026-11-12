@@ -148,8 +148,11 @@ final class ClawddyController: NSObject {
 
         setupMenu()
 
-        // Global hotkey
-        registerSearchHotKey()
+        // Option-Space belongs to whichever app registers it first, so only
+        // the production app claims it.
+        if AgentDataRoot.isProductionBundle(Bundle.main.bundleIdentifier) {
+            registerSearchHotKey()
+        }
     }
 
     func shutdown() {

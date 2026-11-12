@@ -519,6 +519,13 @@ is paired with any other root than `~/.config/ghostty-agents`, or another
 bundle ID with that root. A lock file, `<root>/clawddy.lock`, refuses a second
 instance on the same root. There is no environment override.
 
+`macos/build.nu --identity dev` builds a side-by-side app: bundle ID
+`com.mitchellh.ghostty.clawddy-dev`, name "Clawddy Dev", root
+`~/.config/clawddy-dev`, products under `<build root>/dev`. `--action test`
+always builds the test identity (`com.mitchellh.ghostty.clawddy-tests`,
+products under `<build root>/tests`), whatever `--identity` says. Only the
+production bundle ID registers Option-Space and starts the updater.
+
 It contains provider-tagged unread and last-applied completion identities,
 pending provider renames, and per-agent event-journal byte offsets. The durable
 last-applied identity makes replay idempotent even after unread state is

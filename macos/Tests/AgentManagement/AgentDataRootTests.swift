@@ -56,6 +56,24 @@ struct AgentDataRootTests {
         #expect(mismatch(nil, production) != nil)
     }
 
+    @Test @MainActor func onlyProductionBundleTakesHotKeyAndUpdater() throws {
+        #expect(AgentDataRoot.isProductionBundle("com.mitchellh.ghostty"))
+        #expect(!AgentDataRoot.isProductionBundle("com.mitchellh.ghostty.clawddy-dev"))
+        #expect(!AgentDataRoot.isProductionBundle("com.mitchellh.ghostty.clawddy-tests"))
+        #expect(!AgentDataRoot.isProductionBundle("com.mitchellh.ghostty.debug"))
+        #expect(!AgentDataRoot.isProductionBundle(nil))
+
+        // The test host is not the production bundle, so launch hid the item.
+        func items(_ menu: NSMenu) -> [NSMenuItem] {
+            menu.items.flatMap { [$0] + ($0.submenu.map(items) ?? []) }
+        }
+        let mainMenu = try #require(NSApp.mainMenu)
+        let checkForUpdates = try #require(items(mainMenu).first {
+            $0.action == #selector(AppDelegate.checkForUpdates(_:))
+        })
+        #expect(checkForUpdates.isHidden)
+    }
+
     @Test func xctestUsesTemporaryRoot() {
         let first = AgentDataRoot.resolve(
             directoryName: "ghostty-agents",

@@ -25,6 +25,12 @@ struct AgentDataRoot: Equatable, Sendable {
         environment["XCTestConfigurationFilePath"] != nil
     }
 
+    /// Only the production bundle takes machine-wide resources: the global
+    /// hot key and the updater. Dev, test and debug bundles leave them to it.
+    static func isProductionBundle(_ bundleIdentifier: String?) -> Bool {
+        bundleIdentifier == productionBundleIdentifier
+    }
+
     /// Under XCTest a fresh temporary folder, so a test host never shares
     /// data with anything; otherwise `~/.config/<directoryName>`.
     static func resolve(
@@ -57,10 +63,9 @@ struct AgentDataRoot: Equatable, Sendable {
         let productionRoot = homeDirectory
             .appendingPathComponent(".config", isDirectory: true)
             .appendingPathComponent(productionDirectoryName, isDirectory: true)
-        let isProductionBundle = bundleIdentifier == productionBundleIdentifier
         let isProductionRoot = root.url.standardizedFileURL.path
             == productionRoot.standardizedFileURL.path
-        switch (isProductionBundle, isProductionRoot) {
+        switch (isProductionBundle(bundleIdentifier), isProductionRoot) {
         case (true, false):
             return "\(productionBundleIdentifier) must use \(productionRoot.path), not \(root.url.path)."
         case (false, true):

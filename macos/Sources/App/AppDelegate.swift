@@ -241,9 +241,13 @@ class AppDelegate: NSObject,
 
         // An isolated visual-audit process must remain inert outside its own
         // window so it cannot prompt, update, or compete with the user's app.
-        if !visualAuditMode {
+        // Only the production bundle updates itself: the update feed is stock
+        // Ghostty's, and a dev or test build must never replace itself.
+        let isProductionBundle = AgentDataRoot.isProductionBundle(Bundle.main.bundleIdentifier)
+        if !visualAuditMode && isProductionBundle {
             updateController.startUpdater()
         }
+        menuCheckForUpdates?.isHidden = !isProductionBundle
 
         // Register our service provider. This must happen after everything is initialized.
         NSApp.servicesProvider = ServiceProvider()
