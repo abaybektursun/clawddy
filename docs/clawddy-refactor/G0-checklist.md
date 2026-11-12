@@ -9,8 +9,8 @@ notes in `$G0`.
 
 ```sh
 cd ~/projects/ghostty
-macos/build.nu --identity dev   # P0.8 left a fresh build; rerun only if the source changed
-APP=/Volumes/Xcode/GhosttyBuilds/ghostty/macos/dev/products/Release/Ghostty.app
+# The app under gates/G0 is a frozen copy of the P0.8 dev build, so later builds cannot replace it while it runs.
+APP=/Volumes/Xcode/GhosttyBuilds/ghostty/gates/G0/Ghostty.app
 plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist"   # com.mitchellh.ghostty.clawddy-dev
 B=~/.config/ghostty-agents-backups/20261112-081548-baseline
 G0=/Volumes/Xcode/GhosttyBuilds/ghostty/logs/g0
@@ -41,13 +41,13 @@ kept in memory, not on disk, so start this before launching. Use the full
 path: in zsh, a bare `log` is a different, built-in command.
 
 ```sh
-/usr/bin/log stream --level info --style compact --predicate 'subsystem == "com.mitchellh.ghostty" AND category == "Clawddy" AND processImagePath CONTAINS "/macos/dev/products/"'
+/usr/bin/log stream --level info --style compact --predicate 'subsystem == "com.mitchellh.ghostty" AND category == "Clawddy" AND processImagePath CONTAINS "/gates/G0/"'
 ```
 
 Launch Clawddy Dev:
 
 ```sh
-env -u NO_COLOR open -na /Volumes/Xcode/GhosttyBuilds/ghostty/macos/dev/products/Release/Ghostty.app
+env -u NO_COLOR open -na /Volumes/Xcode/GhosttyBuilds/ghostty/gates/G0/Ghostty.app
 ```
 
 The log shows, in this order:
