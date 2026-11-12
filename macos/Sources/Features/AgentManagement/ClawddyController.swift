@@ -70,7 +70,12 @@ final class ClawddyController: NSObject {
 
         self.ghostty = ghostty
         config = AgentConfig(root: root)
-        bridge = AgentBridge(root: root, isProduction: isProduction)
+        bridge = AgentBridge(
+            root: root,
+            providers: AgentProviderTable(registry: AgentProviderRegistry(
+                root: root,
+                codexHooksFile: AgentConfig.codexConfigDir.appendingPathComponent("hooks.json"),
+                isProduction: isProduction)))
         workspaceModel = AgentWorkspaceModel(
             defaults: isTestHost || AgentVisualAuditPolicy.isEnabled(
                 environment: environment) ? nil : .standard)

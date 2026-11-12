@@ -316,7 +316,7 @@ private final class AgentDetailReference: @unchecked Sendable {
 }
 
 struct AgentLaunchCoordinator: Sendable {
-    let providerRegistry: AgentProviderRegistry
+    let providers: AgentProviderTable
     let root: AgentDataRoot
 
     func prepare(_ initialRequest: AgentLaunchRequest) -> AgentSurfaceLaunchOutcome {
@@ -325,7 +325,6 @@ struct AgentLaunchCoordinator: Sendable {
         let name = request.name
         let provider = request.provider
         let generation = request.launchGeneration
-        let adapter = providerRegistry.adapter(for: provider)
         request.session = AgentSessionStore.session(
             for: agentID,
             provider: provider,
@@ -335,7 +334,7 @@ struct AgentLaunchCoordinator: Sendable {
             provider: provider,
             directory: root.statusDir)
         let prepared: AgentPreparedLaunch
-        switch adapter.prepareLaunch(request) {
+        switch providers.prepareLaunch(request) {
         case .success(let launch): prepared = launch
         case .failure(let issue):
             return .failure(
@@ -355,7 +354,7 @@ struct AgentLaunchCoordinator: Sendable {
                 integrationIssue: nil)
         }
         let integrationIssue: String?
-        switch adapter.prepareIntegration() {
+        switch providers.prepareIntegration(provider) {
         case .success(let preparation): integrationIssue = preparation.notice
         case .failure(let issue): integrationIssue = issue.localizedDescription
         }
@@ -453,7 +452,7 @@ final class AgentBridge {
     private var compactingTimers: [UUID: any AgentTimer] = [:]
     private var launchScripts: [UUID: URL] = [:]
     let root: AgentDataRoot
-    private let providerRegistry: AgentProviderRegistry
+    private let providers: AgentProviderTable
     private let scheduler: any AgentScheduler
     private let io: any AgentIOExecutor
     private let notifier: any AgentNotifier
@@ -485,16 +484,13 @@ final class AgentBridge {
 
     init(
         root: AgentDataRoot,
-        isProduction: Bool,
+        providers: AgentProviderTable,
         scheduler: any AgentScheduler = AgentRunLoopScheduler(),
         io: any AgentIOExecutor = AgentDispatchIO(),
         notifier: any AgentNotifier = AgentUserNotificationCenter()
     ) {
         self.root = root
-        providerRegistry = AgentProviderRegistry(
-            root: root,
-            codexHooksFile: AgentConfig.codexConfigDir.appendingPathComponent("hooks.json"),
-            isProduction: isProduction)
+        self.providers = providers
         self.scheduler = scheduler
         self.io = io
         self.notifier = notifier
@@ -585,12 +581,12 @@ final class AgentBridge {
         let path = effectiveEnvironmentPath
         let providers = targetProvider.map { [$0] } ?? AgentProviderID.allCases
         let io = self.io
+        let probe = self.providers.probe
         for provider in providers {
             let refreshGeneration = UUID()
             healthRefreshGenerations[provider] = refreshGeneration
-            let adapter = providerRegistry.adapter(for: provider)
             io.probe { [weak self] in
-                var health = adapter.probe(environmentPath: path)
+                var health = probe(provider, path)
                 io.onMainActor { [weak self] in
                     guard let self,
                           self.healthRefreshGenerations[provider] == refreshGeneration
@@ -608,7 +604,7 @@ final class AgentBridge {
     }
 
     func providerCapabilities(for provider: AgentProviderID) -> AgentProviderCapabilities {
-        providerRegistry.capabilities(for: provider)
+        providers.capabilities(provider)
     }
 
     private func reconcileInactiveAuthentication(
@@ -781,7 +777,7 @@ final class AgentBridge {
         let appHandle = AgentAppHandle(value: app)
         let detailReference = AgentDetailReference(detailVC)
         let launchCoordinator = AgentLaunchCoordinator(
-            providerRegistry: providerRegistry,
+            providers: providers,
             root: root)
         let launchRequest = AgentLaunchRequest(
             agentID: id,
@@ -920,7 +916,7 @@ final class AgentBridge {
         guard let source = agents[sourceId] else { return nil }
 
         // Read source session — abort if none
-        guard providerRegistry.capabilities(for: source.provider).fork.isSupported,
+        guard providers.capabilities(source.provider).fork.isSupported,
               let sourceSession = AgentSessionStore.session(
                   for: sourceId,
                   provider: source.provider,
@@ -977,7 +973,7 @@ final class AgentBridge {
         agent.name = safeName
         BridgeMetrics.shared.recordMutAgentName()
 
-        guard providerRegistry.capabilities(for: agent.provider).sessionRename.isSupported else {
+        guard providers.capabilities(agent.provider).sessionRename.isSupported else {
             pendingRenames.removeValue(forKey: id)
             persistState()
             return
@@ -1036,11 +1032,11 @@ final class AgentBridge {
         metadataFileData.removeValue(forKey: id)
 
         // Clean status files
-        let adapter = providerRegistry.adapter(for: agentProvider)
+        let cleanup = providers.cleanup
         let statusDir = statusDir
         io.async {
             AgentSessionStore.removeAll(for: id, directory: statusDir)
-            adapter.cleanup(agentID: id)
+            cleanup(agentProvider, id)
         }
     }
 
@@ -1226,8 +1222,7 @@ final class AgentBridge {
                     guard eventProvider == .claudeCode else { continue }
                     eventGeneration = currentGeneration
                 }
-                let domainEvents = providerRegistry.adapter(for: eventProvider)
-                    .normalize(rawEvent)
+                let domainEvents = providers.normalize(eventProvider, rawEvent)
                 guard !domainEvents.isEmpty else { continue }
 
                 let oldSnapshot = agent.runtimeSnapshot
@@ -1517,8 +1512,8 @@ final class AgentBridge {
         compactingTimers[id]?.invalidate()
         compactingTimers.removeValue(forKey: id)
         removeLaunchScript(for: id)
-        let adapter = providerRegistry.adapter(for: provider)
-        io.async { adapter.cleanup(agentID: id) }
+        let cleanup = providers.cleanup
+        io.async { cleanup(provider, id) }
         detailVC.removeSurface(id: id)
         updateMetricsSnapshot()
     }
@@ -1532,8 +1527,8 @@ final class AgentBridge {
         compactingTimers.removeValue(forKey: id)
         removeLaunchScript(for: id)
         if let provider = agents[id]?.provider {
-            let adapter = providerRegistry.adapter(for: provider)
-            io.async { adapter.cleanup(agentID: id) }
+            let cleanup = providers.cleanup
+            io.async { cleanup(provider, id) }
         }
 
         // Remove process exit observer

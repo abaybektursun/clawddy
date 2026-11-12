@@ -359,10 +359,10 @@ private struct HookSandbox {
     /// whose Codex file is a stand-in.
     func prepareSurfaceLaunch(_ request: AgentLaunchRequest) throws -> AgentPreparedSurfaceLaunch {
         let coordinator = AgentLaunchCoordinator(
-            providerRegistry: AgentProviderRegistry(
+            providers: AgentProviderTable(registry: AgentProviderRegistry(
                 root: root,
                 codexHooksFile: home.appendingPathComponent(".codex/hooks.json"),
-                isProduction: false),
+                isProduction: false)),
             root: root)
         switch coordinator.prepare(request) {
         case .success(let launch): return launch
