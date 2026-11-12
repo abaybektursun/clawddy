@@ -722,6 +722,9 @@ extension Ghostty {
             case GHOSTTY_ACTION_PROGRESS_REPORT:
                 progressReport(app, target: target, v: action.action.progress_report)
 
+            case GHOSTTY_ACTION_PROGRAM_STATUS:
+                programStatus(app, target: target, v: action.action.program_status)
+
             case GHOSTTY_ACTION_CONFIG_CHANGE:
                 configChange(app, target: target, v: action.action.config_change)
 
@@ -2264,6 +2267,44 @@ extension Ghostty {
                         surfaceView.progressReport = progressReport
                     }
                 }
+
+            default:
+                assertionFailure()
+            }
+        }
+
+        private static func programStatus(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s,
+            v: ghostty_action_program_status_s) {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                Ghostty.logger.warning("program status does nothing with an app target")
+                return
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return }
+                guard let surfaceView = self.surfaceView(from: surface) else { return }
+                guard let status = Ghostty.Action.ProgramStatus(c: v.report.pointee) else {
+                    Ghostty.logger.warning("program status with unknown state=\(v.report.pointee.state.rawValue, privacy: .public)")
+                    return
+                }
+
+                let kind = status.kind.map { String(describing: $0) } ?? "-"
+                let progress = status.progress.map { String($0) } ?? "-"
+                Ghostty.logger.debug(
+                    "program_status state=\(String(describing: status.state), privacy: .public) kind=\(kind, privacy: .public) progress=\(progress, privacy: .public) id=\(status.id ?? "-", privacy: .public) app=\(status.app ?? "-", privacy: .public)"
+                )
+
+                // We are on the main thread inside ghostty_app_tick. Post
+                // synchronously so observers get reports in order.
+                NotificationCenter.default.post(
+                    name: .ghosttyDidReceiveProgramStatus,
+                    object: surfaceView,
+                    userInfo: [
+                        SwiftUI.Notification.Name.ProgramStatusKey: status
+                    ]
+                )
 
             default:
                 assertionFailure()

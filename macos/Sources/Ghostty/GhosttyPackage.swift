@@ -332,6 +332,14 @@ extension Notification.Name {
     static let ghosttyDidUpdateScrollbar = Notification.Name("com.mitchellh.ghostty.didUpdateScrollbar")
     static let ScrollbarKey = ghosttyDidUpdateScrollbar.rawValue + ".scrollbar"
 
+    /// A program status report (OSC 7501). Object is the surface it came from;
+    /// userInfo holds a `Ghostty.Action.ProgramStatus`. Posted synchronously on
+    /// the main thread inside the app tick, once per report, in the order the
+    /// program sent them. Observers must not free a surface or tick the app
+    /// while handling it.
+    static let ghosttyDidReceiveProgramStatus = Notification.Name("com.mitchellh.ghostty.didReceiveProgramStatus")
+    static let ProgramStatusKey = ghosttyDidReceiveProgramStatus.rawValue + ".status"
+
     /// Focus the search field
     static let ghosttySearchFocus = Notification.Name("com.mitchellh.ghostty.searchFocus")
 }

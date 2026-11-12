@@ -110,6 +110,35 @@ extension Ghostty.Action {
         let progress: UInt8?
     }
 
+    /// A program status report (OSC 7501). See `apprt.action.ProgramStatus`.
+    struct ProgramStatus: Equatable {
+        enum State: Equatable {
+            case idle
+            case working
+            case done
+            case blocked
+            case error
+            /// Removes the record with `id` and every record beneath it, or
+            /// every record when `id` is nil.
+            case clear
+        }
+
+        enum Kind: Equatable {
+            case permission
+            case question
+            case auth
+        }
+
+        let state: State
+        let kind: Kind?
+        let progress: UInt8?
+        /// Nil is the root record, the program itself.
+        let id: String?
+        let app: String?
+        let title: String?
+        let message: String?
+    }
+
     struct Scrollbar {
         let total: UInt64
         let offset: UInt64
@@ -175,5 +204,49 @@ extension Ghostty.Action.ProgressReport {
     init(c: ghostty_action_progress_report_s) {
         self.state = State(c.state)
         self.progress = c.progress >= 0 ? UInt8(c.progress) : nil
+    }
+}
+
+extension Ghostty.Action.ProgramStatus {
+    init?(c: ghostty_action_program_status_report_s) {
+        switch c.state {
+        case GHOSTTY_ACTION_PROGRAM_STATUS_STATE_IDLE:
+            self.state = .idle
+        case GHOSTTY_ACTION_PROGRAM_STATUS_STATE_WORKING:
+            self.state = .working
+        case GHOSTTY_ACTION_PROGRAM_STATUS_STATE_DONE:
+            self.state = .done
+        case GHOSTTY_ACTION_PROGRAM_STATUS_STATE_BLOCKED:
+            self.state = .blocked
+        case GHOSTTY_ACTION_PROGRAM_STATUS_STATE_ERROR:
+            self.state = .error
+        case GHOSTTY_ACTION_PROGRAM_STATUS_STATE_CLEAR:
+            self.state = .clear
+        default:
+            return nil
+        }
+
+        switch c.kind {
+        case GHOSTTY_ACTION_PROGRAM_STATUS_KIND_PERMISSION:
+            self.kind = .permission
+        case GHOSTTY_ACTION_PROGRAM_STATUS_KIND_QUESTION:
+            self.kind = .question
+        case GHOSTTY_ACTION_PROGRAM_STATUS_KIND_AUTH:
+            self.kind = .auth
+        default:
+            self.kind = nil
+        }
+
+        self.progress = c.progress >= 0 ? UInt8(c.progress) : nil
+        self.id = Self.text(c.id)
+        self.app = Self.text(c.app)
+        self.title = Self.text(c.title)
+        self.message = Self.text(c.message)
+    }
+
+    private static func text(_ cString: UnsafePointer<CChar>?) -> String? {
+        guard let cString else { return nil }
+        let value = String(cString: cString)
+        return value.isEmpty ? nil : value
     }
 }
