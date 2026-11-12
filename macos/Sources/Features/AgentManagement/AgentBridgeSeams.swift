@@ -1,4 +1,8 @@
 import Foundation
+@preconcurrency import UserNotifications
+import os
+
+private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "AgentBridge")
 
 // What `AgentBridge` needs from outside itself. Each production
 // implementation is the code the bridge used to run inline, so behaviour is
@@ -100,5 +104,58 @@ struct AgentDispatchIO: AgentIOExecutor {
 
     func onMainQueue(_ work: @escaping @MainActor () -> Void) {
         DispatchQueue.main.async { work() }
+    }
+}
+
+// MARK: - Notifier
+
+/// Where the bridge's user notifications go.
+@MainActor
+protocol AgentNotifier {
+    func post(_ request: UNNotificationRequest)
+    func removeNotifications(withIdentifiers identifiers: [String])
+}
+
+/// The user notification center, asking for permission at the first post.
+struct AgentUserNotificationCenter: AgentNotifier {
+    // Nonisolated so it can be a default argument; the synthesized one
+    // would be main-actor isolated.
+    // swiftlint:disable:next unneeded_synthesized_initializer
+    nonisolated init() {}
+
+    func post(_ request: UNNotificationRequest) {
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                center.add(request) { error in
+                    if let error {
+                        logger.error("notification failed: \(error.localizedDescription)")
+                    }
+                }
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+                    if let error {
+                        logger.error("notification authorization failed: \(error.localizedDescription)")
+                    } else if granted {
+                        center.add(request) { error in
+                            if let error {
+                                logger.error("notification failed: \(error.localizedDescription)")
+                            }
+                        }
+                    }
+                }
+            case .denied:
+                break
+            @unknown default:
+                break
+            }
+        }
+    }
+
+    func removeNotifications(withIdentifiers identifiers: [String]) {
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
     }
 }

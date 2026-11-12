@@ -456,6 +456,7 @@ final class AgentBridge {
     private let providerRegistry: AgentProviderRegistry
     private let scheduler: any AgentScheduler
     private let io: any AgentIOExecutor
+    private let notifier: any AgentNotifier
     private var integrationIssues: [AgentProviderID: String] = [:]
     var environmentPath: String? {
         didSet {
@@ -486,7 +487,8 @@ final class AgentBridge {
         root: AgentDataRoot,
         isProduction: Bool,
         scheduler: any AgentScheduler = AgentRunLoopScheduler(),
-        io: any AgentIOExecutor = AgentDispatchIO()
+        io: any AgentIOExecutor = AgentDispatchIO(),
+        notifier: any AgentNotifier = AgentUserNotificationCenter()
     ) {
         self.root = root
         providerRegistry = AgentProviderRegistry(
@@ -495,6 +497,7 @@ final class AgentBridge {
             isProduction: isProduction)
         self.scheduler = scheduler
         self.io = io
+        self.notifier = notifier
     }
 
     // MARK: - Lifecycle
@@ -1589,37 +1592,7 @@ final class AgentBridge {
         let request = UNNotificationRequest(
             identifier: "clawddy.\(agentId.uuidString).\(kind.identifier)",
             content: content, trigger: nil)
-        deliverNotification(request)
-    }
-
-    private func deliverNotification(_ request: UNNotificationRequest) {
-        let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { settings in
-            switch settings.authorizationStatus {
-            case .authorized, .provisional, .ephemeral:
-                center.add(request) { error in
-                    if let error {
-                        logger.error("notification failed: \(error.localizedDescription)")
-                    }
-                }
-            case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-                    if let error {
-                        logger.error("notification authorization failed: \(error.localizedDescription)")
-                    } else if granted {
-                        center.add(request) { error in
-                            if let error {
-                                logger.error("notification failed: \(error.localizedDescription)")
-                            }
-                        }
-                    }
-                }
-            case .denied:
-                break
-            @unknown default:
-                break
-            }
-        }
+        notifier.post(request)
     }
 
     private func clearNotifications(for id: UUID) {
@@ -1628,9 +1601,7 @@ final class AgentBridge {
             "clawddy.\(id.uuidString).waiting",
             "clawddy.\(id.uuidString).error",
         ]
-        let center = UNUserNotificationCenter.current()
-        center.removeDeliveredNotifications(withIdentifiers: identifiers)
-        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        notifier.removeNotifications(withIdentifiers: identifiers)
     }
 
     // MARK: - Persistence
