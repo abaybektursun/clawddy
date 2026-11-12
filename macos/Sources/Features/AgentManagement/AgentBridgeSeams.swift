@@ -55,3 +55,50 @@ struct AgentRunLoopScheduler: AgentScheduler {
         }
     }
 }
+
+// MARK: - IO executor
+
+/// Where the bridge's file and process work runs, and how it returns to the
+/// main actor.
+protocol AgentIOExecutor: Sendable {
+    /// Runs `work` on the serial IO queue.
+    func async(_ work: @escaping @Sendable () -> Void)
+    /// Runs `work` on the serial IO queue and waits for it.
+    func sync(_ work: @Sendable () -> Void)
+    /// Runs a provider probe on the concurrent provider-health queue.
+    func probe(_ work: @escaping @Sendable () -> Void)
+    /// Runs `work` on the main actor in a new task.
+    func onMainActor(_ work: @escaping @MainActor () -> Void)
+    /// Runs `work` on the main dispatch queue.
+    func onMainQueue(_ work: @escaping @MainActor () -> Void)
+}
+
+/// A serial queue for file work and a concurrent queue for provider probes,
+/// one pair per bridge.
+struct AgentDispatchIO: AgentIOExecutor {
+    private let ioQueue = DispatchQueue(label: "clawddy.io", qos: .utility)
+    private let healthQueue = DispatchQueue(
+        label: "clawddy.provider-health",
+        qos: .utility,
+        attributes: .concurrent)
+
+    func async(_ work: @escaping @Sendable () -> Void) {
+        ioQueue.async(execute: work)
+    }
+
+    func sync(_ work: @Sendable () -> Void) {
+        ioQueue.sync(execute: work)
+    }
+
+    func probe(_ work: @escaping @Sendable () -> Void) {
+        healthQueue.async(execute: work)
+    }
+
+    func onMainActor(_ work: @escaping @MainActor () -> Void) {
+        Task { @MainActor in work() }
+    }
+
+    func onMainQueue(_ work: @escaping @MainActor () -> Void) {
+        DispatchQueue.main.async { work() }
+    }
+}

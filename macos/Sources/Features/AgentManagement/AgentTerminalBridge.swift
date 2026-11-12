@@ -449,17 +449,13 @@ final class AgentBridge {
 
     private var heartbeatTimer: (any AgentTimer)?
     private var statusDirWatcher: DispatchSourceFileSystemObject?
-    private let ioQueue = DispatchQueue(label: "clawddy.io", qos: .utility)
-    private let healthQueue = DispatchQueue(
-        label: "clawddy.provider-health",
-        qos: .utility,
-        attributes: .concurrent)
     private var healthRefreshGenerations: [AgentProviderID: UUID] = [:]
     private var compactingTimers: [UUID: any AgentTimer] = [:]
     private var launchScripts: [UUID: URL] = [:]
     let root: AgentDataRoot
     private let providerRegistry: AgentProviderRegistry
     private let scheduler: any AgentScheduler
+    private let io: any AgentIOExecutor
     private var integrationIssues: [AgentProviderID: String] = [:]
     var environmentPath: String? {
         didSet {
@@ -489,7 +485,8 @@ final class AgentBridge {
     init(
         root: AgentDataRoot,
         isProduction: Bool,
-        scheduler: any AgentScheduler = AgentRunLoopScheduler()
+        scheduler: any AgentScheduler = AgentRunLoopScheduler(),
+        io: any AgentIOExecutor = AgentDispatchIO()
     ) {
         self.root = root
         providerRegistry = AgentProviderRegistry(
@@ -497,6 +494,7 @@ final class AgentBridge {
             codexHooksFile: AgentConfig.codexConfigDir.appendingPathComponent("hooks.json"),
             isProduction: isProduction)
         self.scheduler = scheduler
+        self.io = io
     }
 
     // MARK: - Lifecycle
@@ -583,13 +581,14 @@ final class AgentBridge {
     func refreshProviderHealth(_ targetProvider: AgentProviderID? = nil) {
         let path = effectiveEnvironmentPath
         let providers = targetProvider.map { [$0] } ?? AgentProviderID.allCases
+        let io = self.io
         for provider in providers {
             let refreshGeneration = UUID()
             healthRefreshGenerations[provider] = refreshGeneration
             let adapter = providerRegistry.adapter(for: provider)
-            healthQueue.async { [weak self] in
+            io.probe { [weak self] in
                 var health = adapter.probe(environmentPath: path)
-                Task { @MainActor [weak self] in
+                io.onMainActor { [weak self] in
                     guard let self,
                           self.healthRefreshGenerations[provider] == refreshGeneration
                     else { return }
@@ -791,9 +790,10 @@ final class AgentBridge {
             launchGeneration: generation,
             session: nil,
             pendingFork: nil)
-        ioQueue.async { [weak self] in
+        let io = self.io
+        io.async { [weak self] in
             let outcome = launchCoordinator.prepare(launchRequest)
-            Task { @MainActor [weak self] in
+            io.onMainActor { [weak self] in
                 guard let self, let detailVC = detailReference.value else {
                     if case .success(let launch) = outcome {
                         DispatchQueue.global(qos: .utility).async {
@@ -1035,7 +1035,7 @@ final class AgentBridge {
         // Clean status files
         let adapter = providerRegistry.adapter(for: agentProvider)
         let statusDir = statusDir
-        ioQueue.async {
+        io.async {
             AgentSessionStore.removeAll(for: id, directory: statusDir)
             adapter.cleanup(agentID: id)
         }
@@ -1110,7 +1110,8 @@ final class AgentBridge {
         let knownMetadataData = metadataFileData
         let statusDir = statusDir
         let providers = agents.mapValues(\.provider)
-        ioQueue.async { [weak self] in
+        let io = self.io
+        io.async { [weak self] in
             var batches: [UUID: AgentEventJournalBatch] = [:]
             var metadataUpdates: [UUID: AgentMetadataFileUpdate] = [:]
             for id in ids {
@@ -1153,7 +1154,7 @@ final class AgentBridge {
                     data: metadataData,
                     snapshot: snapshot)
             }
-            Task { @MainActor [weak self] in
+            io.onMainActor { [weak self] in
                 self?.applyRawEvents(batches, metadataUpdates: metadataUpdates)
             }
         }
@@ -1263,7 +1264,7 @@ final class AgentBridge {
                     let provider = agent.provider
                     integrationIssues[provider] = nil
                     let root = root
-                    ioQueue.async {
+                    io.async {
                         AgentSessionStore.clearPendingFork(for: id, directory: root.statusDir)
                         if provider == .codex {
                             CodexProvider.clearHookReviewRequired(root: root)
@@ -1357,7 +1358,7 @@ final class AgentBridge {
                 launchGeneration: generation)
             let agentID = agent.id
             let statusDir = statusDir
-            ioQueue.async {
+            io.async {
                 _ = AgentSessionStore.write(binding, for: agentID, directory: statusDir)
             }
         }
@@ -1392,7 +1393,8 @@ final class AgentBridge {
         guard compactingJournals.insert(id).inserted else { return }
         let url = statusDir.appendingPathComponent("\(id.uuidString).events")
         let lockURL = statusDir.appendingPathComponent("\(id.uuidString).events.lock")
-        ioQueue.async { [weak self] in
+        let io = self.io
+        io.async { [weak self] in
             guard let self else { return }
             let compacted = AgentEventJournal.compact(
                 url: url,
@@ -1401,7 +1403,7 @@ final class AgentBridge {
             if !compacted {
                 logger.debug("journal compaction deferred for \(id)")
             }
-            DispatchQueue.main.async { [weak self] in
+            io.onMainQueue { [weak self] in
                 guard let self else { return }
                 if compacted, self.eventOffsets[id] == acknowledgedOffset {
                     self.eventOffsets[id] = 0
@@ -1513,7 +1515,7 @@ final class AgentBridge {
         compactingTimers.removeValue(forKey: id)
         removeLaunchScript(for: id)
         let adapter = providerRegistry.adapter(for: provider)
-        ioQueue.async { adapter.cleanup(agentID: id) }
+        io.async { adapter.cleanup(agentID: id) }
         detailVC.removeSurface(id: id)
         updateMetricsSnapshot()
     }
@@ -1528,7 +1530,7 @@ final class AgentBridge {
         removeLaunchScript(for: id)
         if let provider = agents[id]?.provider {
             let adapter = providerRegistry.adapter(for: provider)
-            ioQueue.async { adapter.cleanup(agentID: id) }
+            io.async { adapter.cleanup(agentID: id) }
         }
 
         // Remove process exit observer
@@ -1658,9 +1660,9 @@ final class AgentBridge {
             _ = AgentConfig.atomicWrite(data, to: stateFile)
         }
         if synchronously {
-            ioQueue.sync(execute: write)
+            io.sync(write)
         } else {
-            ioQueue.async(execute: write)
+            io.async(write)
         }
     }
 
@@ -1700,14 +1702,14 @@ final class AgentBridge {
             }
         }
         if synchronously {
-            ioQueue.sync(execute: remove)
+            io.sync(remove)
         } else {
-            ioQueue.async(execute: remove)
+            io.async(remove)
         }
     }
 
     private func removeFileOffMain(_ url: URL) {
-        ioQueue.async {
+        io.async {
             try? FileManager.default.removeItem(at: url)
         }
     }
