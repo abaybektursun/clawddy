@@ -181,8 +181,8 @@ struct AgentMigrationTests {
             ("launchProfile.modelID", config(agent: agent.merging([
                 "launchProfile": ["startMode": "unrestricted", "modelID": NSNull()] as [String: Any],
             ]) { $1 })),
-            ("projects[0].workingDirectory is missing", config(project: MigrationFixture.project(
-                900, "Project", tasks: []).filter { $0.key != "workingDirectory" })),
+            ("projects[0].workingDirectory", config(project: MigrationFixture.project(
+                900, "Project", tasks: []).merging(["workingDirectory": NSNull()]) { $1 })),
         ]
         for (path, config) in cases {
             var fixture = MigrationFixture()
@@ -193,6 +193,38 @@ struct AgentMigrationTests {
                 #expect(error?.message.contains(path) == true, "\(error?.message ?? "no error") should name \(path)")
             }
         }
+    }
+
+    /// `addProject` writes a project without a working directory when none is
+    /// chosen. Every mode accepts the app's own output and carries such a
+    /// project through without one.
+    @Test func projectWithoutWorkingDirectoryIsCarriedThrough() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        var fixture = MigrationFixture()
+        fixture.config = try #require(JSONSerialization.jsonObject(with: encoder.encode(AgentConfigFile(projects: [
+            AgentProject(id: fixtureID(900), name: "Chosen", tasks: [
+                AgentTask(id: fixtureID(500), name: "Task", agents: [AgentEntry(id: fixtureID(1), name: "One")]),
+            ], workingDirectory: "/work/900"),
+            AgentProject(id: fixtureID(901), name: "None", tasks: [
+                AgentTask(id: fixtureID(501), name: "Task", agents: [AgentEntry(id: fixtureID(2), name: "Two")]),
+            ]),
+        ]))) as? [String: Any])
+        let snapshot = try fixture.snapshot()
+        // The key is absent, as the app writes it, and stays absent.
+        func hasNoNull(_ data: Data) -> Bool { String(bytes: data, encoding: .utf8)?.contains("null") == false }
+        #expect(hasNoNull(snapshot.agentsJSON))
+
+        #expect(try planAgentMigration(snapshot, mode: .cleanupV5).agentsJSON == nil)
+        let flattenedJSON = try #require(planAgentMigration(snapshot, mode: .flattenV6).agentsJSON)
+        #expect(hasNoNull(flattenedJSON))
+        #expect(try JSONDecoder().decode(SchemaV6.self, from: flattenedJSON).projects.map(\.workingDirectory)
+            == ["/work/900", nil])
+        let seededJSON = try #require(planAgentMigration(snapshot, mode: .seedDevCopy).agentsJSON)
+        #expect(hasNoNull(seededJSON))
+        let seeded = try JSONDecoder().decode(AgentConfigFile.self, from: seededJSON)
+        #expect(seeded.projects.map(\.workingDirectory) == ["/work/900", nil])
+        #expect(seeded.projects.flatMap { $0.tasks.flatMap(\.agents) }.map(\.id) == [fixtureID(1), fixtureID(2)])
     }
 
     /// Inputs that only the legacy decoders read, which P1.5 deleted on the
@@ -783,7 +815,7 @@ private struct MigrationFixture {
 private struct SchemaV6: Decodable {
     struct Project: Decodable {
         var name: String
-        var workingDirectory: String
+        var workingDirectory: String?
         var agents: [Agent]
     }
 

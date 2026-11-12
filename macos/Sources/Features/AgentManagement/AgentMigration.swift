@@ -510,7 +510,9 @@ private func deletionReason(_ kind: StatusKind, isOrphan: Bool) -> AgentMigratio
 
 // The migration's own models of the files it rewrites, with every key that
 // the live data always has required. They do not follow the app's decoders,
-// so they keep reading schema 5 after the app moves on.
+// so they keep reading schema 5 after the app moves on. A project's
+// `workingDirectory` is optional: `addProject` writes a project without one
+// when none is chosen, and the key is then absent, never null.
 
 private struct LaunchProfileFormat: Codable {
     var modelID: String?
@@ -534,14 +536,14 @@ private struct TaskFormat: Codable {
 private struct ProjectV5: Codable {
     var id: UUID
     var name: String
-    var workingDirectory: String
+    var workingDirectory: String?
     var tasks: [TaskFormat]
 }
 
 private struct ProjectV6: Codable {
     var id: UUID
     var name: String
-    var workingDirectory: String
+    var workingDirectory: String?
     var agents: [AgentFormat]
 }
 
