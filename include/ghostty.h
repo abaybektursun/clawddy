@@ -914,6 +914,44 @@ typedef struct {
   int8_t progress;
 } ghostty_action_progress_report_s;
 
+// apprt.action.ProgramStatus.State
+typedef enum {
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_IDLE,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_WORKING,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_DONE,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_BLOCKED,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_ERROR,
+  GHOSTTY_ACTION_PROGRAM_STATUS_STATE_CLEAR,
+} ghostty_action_program_status_state_e;
+
+// apprt.action.ProgramStatus.Kind
+typedef enum {
+  GHOSTTY_ACTION_PROGRAM_STATUS_KIND_NONE,
+  GHOSTTY_ACTION_PROGRAM_STATUS_KIND_PERMISSION,
+  GHOSTTY_ACTION_PROGRAM_STATUS_KIND_QUESTION,
+  GHOSTTY_ACTION_PROGRAM_STATUS_KIND_AUTH,
+} ghostty_action_program_status_kind_e;
+
+// apprt.action.ProgramStatus.Report
+typedef struct {
+  ghostty_action_program_status_state_e state;
+  // NONE unless state is BLOCKED and the kind is known.
+  ghostty_action_program_status_kind_e kind;
+  // -1 if absent or indeterminate, otherwise 0-100 (WORKING/BLOCKED only).
+  int8_t progress;
+  // NUL-terminated, "" when absent. An empty id is the root record.
+  const char* id;
+  const char* app;
+  const char* title;
+  const char* message;
+} ghostty_action_program_status_report_s;
+
+// apprt.action.ProgramStatus
+typedef struct {
+  // Only valid for the duration of the action callback.
+  const ghostty_action_program_status_report_s* report;
+} ghostty_action_program_status_s;
+
 // apprt.action.CommandFinished.C
 typedef struct {
   // -1 if no exit code was reported, otherwise 0-255
@@ -1016,6 +1054,7 @@ typedef enum {
   GHOSTTY_ACTION_COPY_TITLE_TO_CLIPBOARD,
   GHOSTTY_ACTION_MOVE_TAB_TO_NEW_WINDOW,
   GHOSTTY_ACTION_RESIZE_WINDOW,
+  GHOSTTY_ACTION_PROGRAM_STATUS,
 } ghostty_action_tag_e;
 
 typedef union {
@@ -1054,6 +1093,7 @@ typedef union {
   ghostty_action_close_tab_mode_e close_tab_mode;
   ghostty_surface_message_childexited_s child_exited;
   ghostty_action_progress_report_s progress_report;
+  ghostty_action_program_status_s program_status;
   ghostty_action_command_finished_s command_finished;
   ghostty_action_start_search_s start_search;
   ghostty_action_search_total_s search_total;

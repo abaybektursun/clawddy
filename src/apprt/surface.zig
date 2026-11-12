@@ -140,6 +140,9 @@ pub const Message = union(enum) {
     /// Report the progress of an action using a GUI element
     progress_report: terminal.osc.Command.ProgressReport,
 
+    /// A program status report (OSC 7501).
+    program_status: ProgramStatus,
+
     /// A command has started in the shell, start a timer.
     start_command,
 
@@ -180,6 +183,14 @@ pub const Message = union(enum) {
 
             .none => void,
         };
+    };
+
+    pub const ProgramStatus = struct {
+        state: terminal.osc.Command.ProgramStatus.State,
+
+        /// A copy of the report body, already validated by the parser.
+        /// Empty for the `clear` sent on a full reset.
+        data: WriteReq,
     };
 };
 

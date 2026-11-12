@@ -364,6 +364,10 @@ pub const Action = union(Key) {
     /// split or the window is fullscreen.
     resize_window: ResizeWindow,
 
+    /// A program status report (OSC 7501) from the program running in the
+    /// target surface. See `ProgramStatus`.
+    program_status: ProgramStatus,
+
     /// Sync with: ghostty_action_tag_e
     pub const Key = enum(c_int) {
         quit,
@@ -436,6 +440,7 @@ pub const Action = union(Key) {
         copy_title_to_clipboard,
         move_tab_to_new_window,
         resize_window,
+        program_status,
 
         test "ghostty.h Action.Key" {
             try lib.checkGhosttyHEnum(Key, "GHOSTTY_ACTION_");
@@ -1025,6 +1030,182 @@ pub const CommandFinished = struct {
         };
     }
 };
+
+/// A program status report (OSC 7501). See `terminal.osc.program_status`.
+///
+/// Each action is one report. The core keeps no records: the apprt keeps
+/// one record per id and applies the specification's lifetime rules. A
+/// `clear` removes the addressed record and every record beneath it, or
+/// every record when the id is empty. A full reset (RIS) sends a `clear`
+/// with an empty id.
+pub const ProgramStatus = extern struct {
+    /// Only valid for the duration of the action.
+    report: *const Report,
+
+    // Sync with: ghostty_action_program_status_state_e
+    pub const State = enum(c_int) {
+        idle,
+        working,
+        done,
+        blocked,
+        @"error",
+        clear,
+
+        test "ghostty.h ProgramStatus.State" {
+            try lib.checkGhosttyHEnum(State, "GHOSTTY_ACTION_PROGRAM_STATUS_STATE_");
+        }
+    };
+
+    // Sync with: ghostty_action_program_status_kind_e
+    pub const Kind = enum(c_int) {
+        none,
+        permission,
+        question,
+        auth,
+
+        test "ghostty.h ProgramStatus.Kind" {
+            try lib.checkGhosttyHEnum(Kind, "GHOSTTY_ACTION_PROGRAM_STATUS_KIND_");
+        }
+    };
+
+    // Sync with: ghostty_action_program_status_report_s
+    pub const Report = extern struct {
+        state: State,
+        /// `none` unless the state is `blocked` and the kind is known.
+        kind: Kind,
+        /// 0 to 100, or -1 when absent or indeterminate. Only set for
+        /// `working` and `blocked`.
+        progress: i8,
+        /// NUL-terminated, empty when absent. An empty id is the root
+        /// record, the program itself.
+        id: [*:0]const u8,
+        app: [*:0]const u8,
+        title: [*:0]const u8,
+        message: [*:0]const u8,
+
+        const limits = terminal.osc.program_status;
+
+        /// Storage for the text of one report, sized for the longest
+        /// values the parser accepts.
+        pub const Text = struct {
+            id: [limits.max_id_bytes + 1]u8,
+            app: [limits.max_app_bytes + 1]u8,
+            title: [limits.max_title_bytes + 1]u8,
+            message: [limits.max_msg_bytes + 1]u8,
+        };
+
+        /// Decode a parsed report. The strings point into `text`.
+        pub fn init(
+            text: *Text,
+            parsed: terminal.osc.Command.ProgramStatus.Report,
+        ) Report {
+            return .{
+                .state = switch (parsed.state) {
+                    inline else => |tag| @field(State, @tagName(tag)),
+                },
+                .kind = if (parsed.readOption(.kind)) |kind| switch (kind) {
+                    inline else => |tag| @field(Kind, @tagName(tag)),
+                } else .none,
+                .progress = if (parsed.readOption(.progress)) |v| @intCast(v) else -1,
+                .id = copyZ(&text.id, parsed.readOption(.id) orelse ""),
+                .app = copyZ(&text.app, parsed.readOption(.app) orelse ""),
+                .title = writeTextZ(.title, &text.title, parsed),
+                .message = writeTextZ(.msg, &text.message, parsed),
+            };
+        }
+
+        fn copyZ(buf: []u8, value: []const u8) [*:0]const u8 {
+            @memcpy(buf[0..value.len], value);
+            buf[value.len] = 0;
+            return buf[0..value.len :0].ptr;
+        }
+
+        fn writeTextZ(
+            comptime option: terminal.osc.Command.ProgramStatus.Option,
+            buf: []u8,
+            parsed: terminal.osc.Command.ProgramStatus.Report,
+        ) [*:0]const u8 {
+            // The buffer holds the longest text the parser accepts.
+            var writer: std.Io.Writer = .fixed(buf[0 .. buf.len - 1]);
+            parsed.writeText(option, &writer) catch unreachable;
+            const len = writer.buffered().len;
+            buf[len] = 0;
+            return buf[0..len :0].ptr;
+        }
+    };
+};
+
+test "ghostty.h ProgramStatus.Report layout" {
+    const testing = std.testing;
+    const C = @import("ghostty.h").ghostty_action_program_status_report_s;
+    try testing.expectEqual(@sizeOf(C), @sizeOf(ProgramStatus.Report));
+    inline for (.{ "state", "kind", "progress", "id", "app", "title", "message" }) |name| {
+        try testing.expectEqual(@offsetOf(C, name), @offsetOf(ProgramStatus.Report, name));
+    }
+}
+
+test "program status: Report.init decodes every key" {
+    const testing = std.testing;
+    var p: terminal.osc.Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    // "Plan" and "Apply?"
+    p.nextSlice("7501;state=blocked:kind=permission:progress=40:id=tf/plan" ++
+        ":app=terraform:title=UGxhbg==:msg=QXBwbHk/");
+    var text: ProgramStatus.Report.Text = undefined;
+    const report: ProgramStatus.Report = .init(&text, p.end('\x1b').?.program_status.report);
+    try testing.expectEqual(ProgramStatus.State.blocked, report.state);
+    try testing.expectEqual(ProgramStatus.Kind.permission, report.kind);
+    try testing.expectEqual(@as(i8, 40), report.progress);
+    try testing.expectEqualStrings("tf/plan", std.mem.span(report.id));
+    try testing.expectEqualStrings("terraform", std.mem.span(report.app));
+    try testing.expectEqualStrings("Plan", std.mem.span(report.title));
+    try testing.expectEqualStrings("Apply?", std.mem.span(report.message));
+}
+
+test "program status: absent values and the reset clear" {
+    const testing = std.testing;
+    var text: ProgramStatus.Report.Text = undefined;
+    const Parsed = terminal.osc.Command.ProgramStatus.Report;
+    const cases = [_]struct { Parsed, ProgramStatus.State }{
+        // kind and progress only apply to blocked/working
+        .{ .{ .state = .done, .data = "state=done:kind=auth:progress=10" }, .done },
+        // what a full reset sends
+        .{ .{ .state = .clear }, .clear },
+    };
+    for (cases) |case| {
+        const report: ProgramStatus.Report = .init(&text, case[0]);
+        try testing.expectEqual(case[1], report.state);
+        try testing.expectEqual(ProgramStatus.Kind.none, report.kind);
+        try testing.expectEqual(@as(i8, -1), report.progress);
+        inline for (.{ "id", "app", "title", "message" }) |field| {
+            try testing.expectEqualStrings("", std.mem.span(@field(report, field)));
+        }
+    }
+}
+
+test "program status: Report.Text holds the longest values" {
+    const testing = std.testing;
+    const limits = terminal.osc.program_status;
+    var p: terminal.osc.Parser = .init(testing.allocator);
+    defer p.deinit();
+
+    @setEvalBranchQuota(4096);
+    const seg: [limits.max_id_segment_bytes]u8 = @splat('a');
+    const id = seg ++ "/" ++ seg ++ "/" ++ seg ++ "/" ++ @as([29]u8, @splat('a'));
+    const app: [limits.max_app_bytes]u8 = @splat('a');
+    // "QUFB" decodes to "AAA" and "QUE" to "AA".
+    const title: [limits.max_title_encoded_bytes]u8 = std.simd.repeat(limits.max_title_encoded_bytes, "QUFB".*);
+    const msg: [limits.max_msg_bytes / 3 * 4]u8 = std.simd.repeat(limits.max_msg_bytes / 3 * 4, "QUFB".*);
+    p.nextSlice("7501;state=done:id=" ++ id ++ ":app=" ++ app ++
+        ":title=" ++ title ++ ":msg=" ++ msg ++ "QUE");
+    var text: ProgramStatus.Report.Text = undefined;
+    const report: ProgramStatus.Report = .init(&text, p.end('\x1b').?.program_status.report);
+    try testing.expectEqual(limits.max_id_bytes, std.mem.span(report.id).len);
+    try testing.expectEqual(limits.max_app_bytes, std.mem.span(report.app).len);
+    try testing.expectEqual(limits.max_title_bytes, std.mem.span(report.title).len);
+    try testing.expectEqual(limits.max_msg_bytes, std.mem.span(report.message).len);
+}
 
 pub const StartSearch = struct {
     needle: [:0]const u8,

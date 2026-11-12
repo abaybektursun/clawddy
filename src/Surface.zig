@@ -1186,6 +1186,22 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             };
         },
 
+        .program_status => |v| {
+            defer v.data.deinit();
+            var text: apprt.action.ProgramStatus.Report.Text = undefined;
+            const report: apprt.action.ProgramStatus.Report = .init(&text, .{
+                .state = v.state,
+                .data = v.data.slice(),
+            });
+            _ = self.rt_app.performAction(
+                .{ .surface = self },
+                .program_status,
+                .{ .report = &report },
+            ) catch |err| {
+                log.warn("apprt failed to report program status err={}", .{err});
+            };
+        },
+
         .selection_scroll_tick => |active| {
             self.selection_scroll_active = active;
             try self.selectionScrollTick();

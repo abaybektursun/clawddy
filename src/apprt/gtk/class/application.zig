@@ -756,6 +756,9 @@ pub const Application = extern struct {
 
             .progress_report => return Action.progressReport(target, value),
 
+            // GTK has no consumer for program status reports yet.
+            .program_status => return false,
+
             .prompt_title => return Action.promptTitle(target, value),
 
             .quit => self.quit(),

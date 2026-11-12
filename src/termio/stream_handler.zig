@@ -345,6 +345,10 @@ pub const StreamHandler = struct {
             .report_pwd => try self.reportPwd(value.url),
             .show_desktop_notification => try self.showDesktopNotification(value.title, value.body),
             .progress_report => self.progressReport(value),
+            .program_status => switch (value) {
+                .report => |report| try self.programStatusReport(report),
+                .query => |terminator| self.programStatusQuery(terminator),
+            },
             .start_hyperlink => try self.startHyperlink(value.uri, value.id),
             .clipboard_contents => try self.clipboardContents(value.kind, value.data),
             .semantic_prompt => try self.semanticPrompt(value),
@@ -385,7 +389,6 @@ pub const StreamHandler = struct {
             .title_pop,
             .kitty_dnd,
             .osc_unknown,
-            .program_status,
             => {},
         }
     }
@@ -942,6 +945,12 @@ pub const StreamHandler = struct {
 
         // Clear the progress bar
         self.progressReport(.{ .state = .remove });
+
+        // A full reset removes every program status record (OSC 7501).
+        self.surfaceMessageWriter(.{ .program_status = .{
+            .state = .clear,
+            .data = .{ .stable = "" },
+        } });
     }
 
     /// Record a Kitty clipboard protocol session grant so future
@@ -1840,6 +1849,32 @@ pub const StreamHandler = struct {
         });
     }
 
+    /// Forward a program status report (OSC 7501) to the surface. The core
+    /// keeps no records. See apprt.action.ProgramStatus.
+    fn programStatusReport(
+        self: *StreamHandler,
+        report: terminal.osc.Command.ProgramStatus.Report,
+    ) !void {
+        // The report points into the parser's buffer, so send a copy of
+        // its already validated body.
+        self.surfaceMessageWriter(.{ .program_status = .{
+            .state = report.state,
+            .data = try apprt.surface.Message.WriteReq.init(self.alloc, report.data),
+        } });
+    }
+
+    /// Answer `OSC 7501 ; ?`. The reply is fixed bytes with nothing from
+    /// any report, ended with the query's terminator.
+    fn programStatusQuery(self: *StreamHandler, terminator: terminal.osc.Terminator) void {
+        switch (terminator) {
+            inline else => |t| self.messageWriter(.{
+                .write_stable = "\x1b]7501;" ++
+                    terminal.osc.program_status.query_reply ++
+                    comptime t.string(),
+            }),
+        }
+    }
+
     /// Send a report to the pty.
     pub fn sendSizeReport(self: *StreamHandler, style: terminal.SizeReportStyle) void {
         switch (style) {
@@ -1948,6 +1983,135 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.{ .progress_report = report });
     }
 };
+
+test "program status: reports are forwarded with a copy of the body" {
+    const testing = std.testing;
+    const App = @import("../App.zig");
+
+    var rt_app: apprt.App = .{};
+    const queue: *App.Mailbox.Queue = try .create(testing.allocator);
+    defer queue.destroy(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = undefined,
+    };
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.renderer_state = &renderer_state;
+    handler.surface_mailbox = .{
+        .surface = undefined,
+        .app = .{ .rt_app = &rt_app, .mailbox = queue },
+    };
+
+    // A short body is copied inline, a long one to the heap.
+    const long_msg: [400]u8 = std.simd.repeat(400, "QUFB".*);
+    const cases = [_]struct { terminal.osc.Command.ProgramStatus.State, []const u8 }{
+        .{ .working, "state=working:id=a" },
+        .{ .done, "state=done:msg=" ++ long_msg },
+    };
+    for (cases) |case| {
+        var buf: [512]u8 = undefined;
+        const data = buf[0..case[1].len];
+        @memcpy(data, case[1]);
+        handler.vt(.program_status, .{ .report = .{ .state = case[0], .data = data } });
+
+        // The parser reuses its buffer for the next sequence.
+        @memset(data, 0);
+
+        const msg = queue.pop(global.io()).?.surface_message.message.program_status;
+        defer msg.data.deinit();
+        try testing.expectEqual(case[0], msg.state);
+        try testing.expectEqualStrings(case[1], msg.data.slice());
+    }
+    try testing.expect(queue.pop(global.io()) == null);
+}
+
+test "program status: query reply ends with the query's terminator" {
+    const testing = std.testing;
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = undefined,
+    };
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.termio_mailbox = &mailbox;
+    handler.renderer_state = &renderer_state;
+
+    const reply = "\x1B]7501;?:states=idle,working,done,blocked,error" ++
+        ":kinds=permission,question,auth";
+    const cases = [_]struct { terminal.osc.Terminator, []const u8 }{
+        .{ .st, reply ++ "\x1B\\" },
+        .{ .bel, reply ++ "\x07" },
+    };
+    for (cases) |case| {
+        handler.vt(.program_status, .{ .query = case[0] });
+        const msg = mailbox.spsc.queue.pop(global.io()).?;
+        defer msg.deinit();
+        try testing.expectEqualStrings(case[1], msg.write_stable);
+    }
+    try testing.expect(mailbox.spsc.queue.pop(global.io()) == null);
+}
+
+test "program status: full reset sends one clear" {
+    const testing = std.testing;
+    const App = @import("../App.zig");
+
+    var t: terminal.Terminal = try .init(testing.io, testing.allocator, .{
+        .cols = 10,
+        .rows = 5,
+    });
+    defer t.deinit(testing.allocator);
+
+    var mailbox = try termio.Mailbox.initSPSC(testing.allocator);
+    defer mailbox.deinit(testing.allocator);
+
+    var rt_app: apprt.App = .{};
+    const queue: *App.Mailbox.Queue = try .create(testing.allocator);
+    defer queue.destroy(testing.allocator);
+
+    var mutex: std.Io.Mutex = .init;
+    mutex.lockUncancelable(global.io());
+    defer mutex.unlock(global.io());
+
+    var renderer_state: renderer.State = .{
+        .mutex = &mutex,
+        .terminal = undefined,
+    };
+    var handler: StreamHandler = undefined;
+    handler.alloc = testing.allocator;
+    handler.terminal = &t;
+    handler.termio_mailbox = &mailbox;
+    handler.renderer_state = &renderer_state;
+    handler.surface_mailbox = .{
+        .surface = undefined,
+        .app = .{ .rt_app = &rt_app, .mailbox = queue },
+    };
+    handler.kitty_clipboard_grants = .{};
+    defer handler.kitty_clipboard_grants.deinit(testing.allocator);
+
+    handler.vt(.full_reset, {});
+
+    // The progress bar is removed first, then every program status record.
+    const progress = queue.pop(global.io()).?.surface_message.message.progress_report;
+    try testing.expectEqual(.remove, progress.state);
+    const status = queue.pop(global.io()).?.surface_message.message.program_status;
+    try testing.expectEqual(.clear, status.state);
+    try testing.expectEqualStrings("", status.data.slice());
+    try testing.expect(queue.pop(global.io()) == null);
+}
 
 test "kitty clipboard read: targets-only never consumes a one-time grant" {
     const testing = std.testing;

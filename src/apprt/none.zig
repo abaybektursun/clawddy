@@ -6,6 +6,10 @@ const apprt = @import("../apprt.zig");
 pub const resourcesDir = internal_os.resourcesDir;
 
 pub const App = struct {
+    /// There is no app loop to wake up. This lets tests push to the app
+    /// mailbox.
+    pub fn wakeup(_: *const App) void {}
+
     /// Always return false as there is no apprt to communicate with.
     pub fn performIpc(
         _: Allocator,
