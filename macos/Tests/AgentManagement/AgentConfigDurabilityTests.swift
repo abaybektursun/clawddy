@@ -126,8 +126,8 @@ struct AgentConfigDurabilityTests {
     @Test func structurallyCorruptCollectionsFailInsteadOfDecodingEmpty() {
         // A null agent list is corruption, not an empty task.
         let nullAgents = decodeFailureMessage(nullAgentListConfiguration())
-        #expect(nullAgents?.contains("null agent list") == true)
-        #expect(throws: AgentConfigFormatError.self) {
+        #expect(nullAgents?.contains("projects[0].tasks[0].agents") == true)
+        #expect(throws: DecodingError.self) {
             try JSONDecoder().decode(
                 AgentConfigFile.self,
                 from: Data(nullAgentListConfiguration().utf8))
@@ -140,11 +140,11 @@ struct AgentConfigDurabilityTests {
         ]))
         #expect(nullEntry?.contains("projects[0].tasks[0].agents[1]") == true)
 
-        // A modern schema without its projects array is truncated.
+        // A schema without its projects array is truncated.
         let missingProjects = decodeFailureMessage(#"{ "schemaVersion": 5 }"#)
-        #expect(missingProjects?.contains("no projects array") == true)
+        #expect(missingProjects?.contains("projects is missing") == true)
 
-        // A task that never had agents is still a legitimate legacy shape.
+        // The app always writes a task's agent list, even an empty one.
         let taskWithoutAgents = """
         {
           "schemaVersion": 5,
@@ -157,10 +157,8 @@ struct AgentConfigDurabilityTests {
           ]
         }
         """
-        let decoded = try? JSONDecoder().decode(
-            AgentConfigFile.self,
-            from: Data(taskWithoutAgents.utf8))
-        #expect(decoded?.projects.first?.tasks.first?.agents.isEmpty == true)
+        let withoutAgents = decodeFailureMessage(taskWithoutAgents)
+        #expect(withoutAgents?.contains("projects[0].tasks[0].agents is missing") == true)
 
         // Unknown future fields are additive and must not fail the load.
         let forwardCompatible = """
@@ -180,6 +178,7 @@ struct AgentConfigDurabilityTests {
                     "id": "\(Self.agentID)",
                     "name": "Valid",
                     "provider": "claudeCode",
+                    "launchProfile": { "startMode": "unrestricted" },
                     "futureAgent": 1
                   }]
                 }
@@ -192,46 +191,6 @@ struct AgentConfigDurabilityTests {
             AgentConfigFile.self,
             from: Data(forwardCompatible.utf8))
         #expect(forwardDecoded?.projects.first?.tasks.first?.agents.map(\.name) == ["Valid"])
-    }
-
-    // MARK: - Legacy migration
-
-    @Test func legacyStringAgentsStillMigrateAndPersistTheirIdentity() throws {
-        let directory = try makeDataDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let file = directory.appendingPathComponent("agents.json")
-        let legacy = """
-        {
-          "projects": [
-            {
-              "name": "Legacy",
-              "tasks": [
-                { "name": "Task", "agents": ["alpha", "beta"] }
-              ]
-            }
-          ]
-        }
-        """
-        try Data(legacy.utf8).write(to: file)
-
-        let config = AgentConfig(root: AgentDataRoot(url: directory))
-        #expect(config.errorMessage == nil)
-        let project = try #require(config.projects.first)
-        let task = try #require(project.tasks.first)
-        #expect(task.agents.map(\.name) == ["alpha", "beta"])
-        #expect(task.agents.allSatisfy { $0.provider == .claudeCode })
-        #expect(task.agents.allSatisfy { $0.launchProfile == AgentLaunchProfile() })
-        #expect(Set(task.agents.map(\.id)).count == 2)
-
-        // Migration wrote the modern schema back with the generated identities.
-        let migrated = try JSONDecoder().decode(
-            AgentConfigFile.self,
-            from: Data(contentsOf: file))
-        #expect(migrated.schemaVersion == AgentConfigFile.currentSchemaVersion)
-        #expect(migrated.projects.first?.id == project.id)
-        #expect(migrated.projects.first?.tasks.first?.id == task.id)
-        #expect(migrated.projects.first?.tasks.first?.agents.map(\.id) == task.agents.map(\.id))
-        #expect(migrated.projects.first?.tasks.first?.agents.map(\.name) == ["alpha", "beta"])
     }
 
     // MARK: - Reload and save durability

@@ -35,7 +35,7 @@ integration points in `AppDelegate.swift` and the shared command palette. The
 
 ```
 macos/Sources/Features/AgentManagement/
-  AgentConfig.swift                — Config persistence and provider migration
+  AgentConfig.swift                — Config persistence and provider identity
   AgentPreferences.swift           — Provider default start modes and atomic persistence
   AgentProvider.swift              — Provider protocol, capabilities, health, and launch types
   ClaudeCodeProvider.swift         — Claude Code launch, hooks, auth, and event normalization
@@ -118,8 +118,7 @@ Agents are defined in `~/.config/ghostty-agents/agents.json`:
 }
 ```
 
-IDs and providers are stable identities; names may change. Older name-only
-configuration is migrated automatically and defaults to Claude Code. Hooks are
+IDs and providers are stable identities; names may change. Hooks are
 installed lazily for the selected provider without replacing unrelated user
 hooks. Codex requires the user to review a newly installed command hook with
 `/hooks` before Codex will run it.

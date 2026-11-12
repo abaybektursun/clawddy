@@ -195,9 +195,9 @@ struct AgentMigrationTests {
         }
     }
 
-    /// Inputs that only the legacy decoders read (P1.5 deletes them once the
-    /// preflight proves them unused), and a duplicate agent ID.
-    @Test func legacyInputsTheAppStillReadsAbort() throws {
+    /// Inputs that only the legacy decoders read, which P1.5 deleted on the
+    /// strength of these aborts, and a duplicate agent ID.
+    @Test func legacyInputsTheAppNoLongerReadsAbort() throws {
         let claude = MigrationFixture.claudeIDs[0]
         var forkFrom = MigrationFixture()
         forkFrom.status = ["\(claude.uuidString).forkFrom": "session\n"]
@@ -218,6 +218,46 @@ struct AgentMigrationTests {
                 #expect(throws: AgentMigrationAbort.self, "\(mode)") { try planAgentMigration(snapshot, mode: mode) }
             }
         }
+    }
+
+    /// The keys whose absence the app's decoders filled in for old formats
+    /// until P1.5. The preflight aborts without each of them, and the
+    /// configuration it accepts is one the app reads as it is: cleanupV5
+    /// leaves `agents.json` alone.
+    @Test func keysTheAppNoLongerDefaultsAbort() throws {
+        let agent = MigrationFixture.agent(1, name: "Agent")
+        let task = MigrationFixture.task(500, "Task", [agent])
+        let project = MigrationFixture.project(900, "Project", tasks: [task])
+        func without(_ key: String, _ object: [String: Any]) -> [String: Any] {
+            object.filter { $0.key != key }
+        }
+        func config(task: [String: Any]) -> [String: Any] {
+            MigrationFixture.config([MigrationFixture.project(900, "Project", tasks: [task])])
+        }
+        let cases: [(path: String, config: [String: Any])] = [
+            ("projects is missing", ["schemaVersion": 5]),
+            ("projects[0].id is missing", MigrationFixture.config([without("id", project)])),
+            ("projects[0].tasks is missing", MigrationFixture.config([without("tasks", project)])),
+            ("tasks[0].id is missing", config(task: without("id", task))),
+            ("tasks[0].agents is missing", config(task: without("agents", task))),
+            ("agents[0].id is missing", config(task: MigrationFixture.task(500, "Task", [without("id", agent)]))),
+            ("agents[0].launchProfile is missing", config(task: MigrationFixture.task(
+                500, "Task", [without("launchProfile", agent)]))),
+        ]
+        for (path, config) in cases {
+            var fixture = MigrationFixture()
+            fixture.config = config
+            let snapshot = try fixture.snapshot()
+            for mode in AgentMigrationMode.allCases {
+                let error = #expect(throws: AgentMigrationAbort.self) { try planAgentMigration(snapshot, mode: mode) }
+                #expect(error?.message.contains(path) == true, "\(error?.message ?? "no error") should name \(path)")
+            }
+        }
+
+        let accepted = try MigrationFixture.messy().snapshot()
+        #expect(try planAgentMigration(accepted, mode: .cleanupV5).agentsJSON == nil)
+        let read = try JSONDecoder().decode(AgentConfigFile.self, from: accepted.agentsJSON)
+        #expect(read.projects.flatMap { $0.tasks.flatMap(\.agents) }.map(\.id) == (1...69).map(fixtureID))
     }
 
     @Test func workspaceDefaultsMapTaskScopeToProject() throws {

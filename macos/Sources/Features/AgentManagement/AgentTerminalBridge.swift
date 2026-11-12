@@ -241,7 +241,7 @@ private struct PersistedState: Codable {
     var eventOffsets: [UUID: Int] = [:]
 
     private enum CodingKeys: String, CodingKey {
-        case unreadCompletions, unreadAgents, lastAppliedCompletions, pendingRenames, eventOffsets
+        case unreadCompletions, lastAppliedCompletions, pendingRenames, eventOffsets
     }
 
     init() {}
@@ -260,22 +260,7 @@ private struct PersistedState: Codable {
         eventOffsets = try container.decodeIfPresent(
             [UUID: Int].self,
             forKey: .eventOffsets) ?? [:]
-        // `unreadAgents` is intentionally decoded by AgentBridge.start because
-        // only the current config knows the migrated provider identity.
-        legacyUnreadAgents = try container.decodeIfPresent(
-            Set<UUID>.self,
-            forKey: .unreadAgents) ?? []
     }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(unreadCompletions, forKey: .unreadCompletions)
-        try container.encode(lastAppliedCompletions, forKey: .lastAppliedCompletions)
-        try container.encode(pendingRenames, forKey: .pendingRenames)
-        try container.encode(eventOffsets, forKey: .eventOffsets)
-    }
-
-    var legacyUnreadAgents: Set<UUID> = []
 }
 
 private struct AgentMetadataFileUpdate: Sendable {
@@ -515,18 +500,6 @@ final class AgentBridge {
             agent.unreadCompletion = persisted.unreadCompletions[entry.id]
             agent.lastAppliedCompletion = persisted.lastAppliedCompletions[entry.id]
                 ?? agent.unreadCompletion
-            if agent.unreadCompletion == nil, persisted.legacyUnreadAgents.contains(entry.id) {
-                agent.unreadCompletion = AgentCompletionID(
-                    provider: entry.provider,
-                    sessionID: AgentSessionStore.session(
-                        for: entry.id,
-                        provider: entry.provider,
-                        directory: statusDir)?.sessionID,
-                    turnID: nil,
-                    launchGeneration: UUID(),
-                    eventID: "legacy-unread")
-                agent.lastAppliedCompletion = agent.unreadCompletion
-            }
             agents[entry.id] = agent
         }
 
@@ -1171,37 +1144,23 @@ final class AgentBridge {
                     AgentRawProviderEvent.self,
                     from: data)
                 else { continue }
-                let eventProvider: AgentProviderID
-                if let taggedProvider = rawEvent.provider {
-                    guard taggedProvider == agent.provider else {
-                        diagnose(.error, "ignored provider-mismatched event for \(id)")
-                        continue
-                    }
-                    eventProvider = taggedProvider
-                } else {
-                    // Untagged journals predate provider support and can only
-                    // belong to migrated Claude Code agents.
-                    guard agent.provider == .claudeCode else { continue }
-                    eventProvider = .claudeCode
+                guard rawEvent.provider == agent.provider else {
+                    diagnose(.error, "ignored provider-mismatched event for \(id)")
+                    continue
                 }
-                guard rawEvent.hasSupportedSchema(for: eventProvider) else {
+                guard rawEvent.hasSupportedSchema else {
                     diagnose(
                         .error,
                         "ignored unsupported event schema for \(id): \(rawEvent.schemaVersion ?? -1)")
                     continue
                 }
                 guard let currentGeneration = agent.launchGeneration else { continue }
-                let eventGeneration: UUID
-                if let taggedGeneration = rawEvent.launchGeneration {
-                    guard taggedGeneration == currentGeneration else {
-                        diagnose(.debug, "ignored stale launch event for \(id)")
-                        continue
-                    }
-                    eventGeneration = taggedGeneration
-                } else {
-                    guard eventProvider == .claudeCode else { continue }
-                    eventGeneration = currentGeneration
+                guard rawEvent.launchGeneration == currentGeneration else {
+                    diagnose(.debug, "ignored stale launch event for \(id)")
+                    continue
                 }
+                let eventProvider = rawEvent.provider
+                let eventGeneration = rawEvent.launchGeneration
                 let domainEvents = providers.normalize(eventProvider, rawEvent)
                 guard !domainEvents.isEmpty else { continue }
 

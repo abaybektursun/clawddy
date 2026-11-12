@@ -104,30 +104,6 @@ struct AgentProviderTests {
             authentication: .unavailable("Probe failed")) == .permission)
     }
 
-    @Test func legacyAgentConfigMigratesToClaudeCode() throws {
-        let id = UUID()
-        let data = Data("""
-            {
-              "schemaVersion": 3,
-              "projects": [{
-                "id": "\(UUID().uuidString)",
-                "name": "Project",
-                "tasks": [{
-                  "id": "\(UUID().uuidString)",
-                  "name": "Task",
-                  "agents": [{"id": "\(id.uuidString)", "name": "Existing"}]
-                }]
-              }]
-            }
-            """.utf8)
-
-        let config = try JSONDecoder().decode(AgentConfigFile.self, from: data)
-        let agent = try #require(config.projects.first?.tasks.first?.agents.first)
-        #expect(agent.id == id)
-        #expect(agent.provider == .claudeCode)
-        #expect(agent.launchProfile == AgentLaunchProfile())
-    }
-
     @Test func mixedProviderConfigRoundTripsAtSchemaFive() throws {
         let agents = [
             AgentEntry(name: "Claude", provider: .claudeCode),
@@ -149,15 +125,6 @@ struct AgentProviderTests {
         let decodedAgents = try #require(decoded.projects.first?.tasks.first?.agents)
         #expect(decoded.schemaVersion == 5)
         #expect(decodedAgents == agents)
-    }
-
-    @Test func preStartModeLaunchProfileMigratesToUnrestricted() throws {
-        let profile = try JSONDecoder().decode(
-            AgentLaunchProfile.self,
-            from: Data("{\"modelID\":\"existing-model\",\"reasoningEffort\":\"high\"}".utf8))
-        #expect(profile.modelID == "existing-model")
-        #expect(profile.reasoningEffort == "high")
-        #expect(profile.startMode == .unrestricted)
     }
 
     @Test func defaultStartModesAreUnrestrictedAndPersistIndependently() throws {
@@ -273,7 +240,7 @@ struct AgentProviderTests {
             directory: directory) == nil)
     }
 
-    @Test func rawEventsDecodeTaggedAndLegacyPayloads() throws {
+    @Test func rawEventsDecodeOnlyTaggedRecords() throws {
         let generation = UUID()
         let tagged = try JSONDecoder().decode(
             AgentRawProviderEvent.self,
@@ -285,23 +252,21 @@ struct AgentProviderTests {
         #expect(tagged.launchGeneration == generation)
         #expect(tagged.hookEventName == "Stop")
         #expect(tagged.turnID == "t")
+        #expect(tagged.hasSupportedSchema)
 
-        let legacy = try JSONDecoder().decode(
-            AgentRawProviderEvent.self,
-            from: Data("{\"hook_event_name\":\"SessionStart\",\"session_id\":\"legacy\"}".utf8))
-        #expect(legacy.provider == nil)
-        #expect(legacy.hookEventName == "SessionStart")
-        #expect(legacy.sessionID == "legacy")
-        #expect(tagged.hasSupportedSchema(for: .codex))
-        #expect(legacy.hasSupportedSchema(for: .claudeCode))
-        #expect(!legacy.hasSupportedSchema(for: .codex))
+        // The pre-provider hook's untagged record.
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(
+                AgentRawProviderEvent.self,
+                from: Data("{\"hook_event_name\":\"SessionStart\",\"session_id\":\"legacy\"}".utf8))
+        }
     }
 
     @Test func unknownProviderEventSchemaIsRejected() throws {
         let event = try JSONDecoder().decode(
             AgentRawProviderEvent.self,
-            from: Data("{\"schemaVersion\":2,\"provider\":\"codex\",\"hookEventName\":\"Stop\"}".utf8))
-        #expect(!event.hasSupportedSchema(for: .codex))
+            from: Data("{\"schemaVersion\":2,\"provider\":\"codex\",\"launchGeneration\":\"\(UUID().uuidString)\",\"hookEventName\":\"Stop\"}".utf8))
+        #expect(!event.hasSupportedSchema)
     }
 
     @Test func codexLaunchUsesStableInteractiveResumeAndForkCommands() throws {
@@ -505,9 +470,11 @@ struct AgentProviderTests {
         }
     }
 
+    /// A record carrying only the hook name and the keys every record has;
+    /// the adapters read the name and ignore the provider.
     private func rawEvent(name: String) throws -> AgentRawProviderEvent {
         try JSONDecoder().decode(
             AgentRawProviderEvent.self,
-            from: Data("{\"hookEventName\":\"\(name)\"}".utf8))
+            from: Data("{\"provider\":\"claudeCode\",\"launchGeneration\":\"\(UUID().uuidString)\",\"hookEventName\":\"\(name)\"}".utf8))
     }
 }

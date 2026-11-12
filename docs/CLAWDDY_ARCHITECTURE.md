@@ -36,7 +36,7 @@ or process model.
 
 | Component                         | Responsibility                                                                                                    |
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `AgentConfig.swift`               | Versioned JSON model, atomic persistence, schema migration, and provider-identity recovery                        |
+| `AgentConfig.swift`               | Versioned JSON model, atomic persistence, and provider-identity recovery                                          |
 | `AgentPreferences.swift`          | Versioned provider start-mode defaults, isolated persistence, and canonical launch policy                         |
 | `AgentProvider.swift`             | Provider protocol, capability matrix, health/auth state, launch records, and provider event vocabulary           |
 | `ClaudeCodeProvider.swift`        | Claude Code command construction, per-agent overlay hooks, old global hook removal, auth probe, and normalization |
@@ -194,16 +194,18 @@ Current encoded shape:
 }
 ```
 
-The decoder accepts older project/task records without IDs and the original
-string-only agent array. It generates UUIDs, assigns pre-provider agents to
-Claude Code, and writes the migrated form back. Legacy name-keyed status files
-are moved to UUID-keyed names when possible. Once a tagged session or pending
+The decoder reads schema 5 only and requires every key the app writes; older
+shapes (records without IDs, string-only agent arrays, agents without a
+provider or launch profile) fail the load. The migration preflight aborts on
+them before switch-over, so live data never reaches the decoder in an old
+format. Once a tagged session or pending
 fork exists, its provider is authoritative; an external config edit cannot make
 another provider consume that identity.
 
-`AgentLaunchProfile.startMode` is durable per-agent launch policy. Missing
-values migrate to `unrestricted`, preserving Claude Code's established behavior
-and making Codex YOLO the requested product default. The native Settings window
+`AgentLaunchProfile.startMode` is durable per-agent launch policy and is
+required; `unrestricted` is the default for new agents, preserving Claude
+Code's established behavior and making Codex YOLO the requested product
+default. The native Settings window
 stores separate defaults for newly created Claude Code and Codex agents in
 `preferences.json`; the new-agent sheet snapshots the selected default, and
 forks retain the source agent's mode.
@@ -328,8 +330,8 @@ The hook depends only on macOS system tools. For each invocation it:
 ~/.config/ghostty-agents/status/<agent-uuid>.fork.json
 ```
 
-Legacy `.session` and `.forkFrom` inputs are accepted only as Claude Code state
-and are migrated to tagged records. A session or fork tagged for one provider is
+A legacy `.session` binding is accepted only as Claude Code state and is
+migrated to a tagged record. A session or fork tagged for one provider is
 never passed to another provider. The journal intentionally excludes prompts,
 tool inputs, tool results, and transcript content.
 
@@ -345,7 +347,8 @@ retains any concurrent suffix, resets the offset, and immediately repolls. A
 so filesystem notifications accelerate state changes but do not own correctness.
 This fallback reads authoritative records; it never infers a completion.
 
-Tagged records must use the supported event schema. Unknown schema versions and
+Every record must carry its provider and launch generation, and use the
+supported event schema; an untagged record does not decode and is skipped. Unknown schema versions and
 provider/generation mismatches are logged and skipped while their complete byte
 range is acknowledged, preventing an incompatible record from poisoning every
 later poll.
@@ -563,7 +566,7 @@ configuration, ordered hooks, and live surfaces.
 Startup order:
 
 1. Ensure config, hook, and status directories exist.
-2. Load and migrate configuration, including legacy Claude identities.
+2. Load configuration and restore provider identities from persisted bindings.
 3. Load persisted unread/last-applied completion and pending-rename state.
 4. Recreate inactive, provider-specific runtime instances.
 5. Start config and status directory watchers and consume unseen complete events.
@@ -705,7 +708,7 @@ Changes to this feature require the general macOS matrix in
 - Fresh, resumed, and forked launch for each provider, including mixed projects.
 - Signed-out first use, Codex hook review, disabled hooks, and late telemetry recovery.
 - Rename while idle and rename deferred during a blocking state.
-- External `agents.json` edit, provider-identity enforcement, and legacy-schema migration.
+- External `agents.json` edit and provider-identity enforcement.
 - Burst hook traffic, duplicate file events, and malformed event JSON.
 - Agent process exit, deletion, app termination, and next-launch cleanup.
 - Switching among multiple surfaces without hidden-surface focus or input.

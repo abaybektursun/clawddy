@@ -114,25 +114,6 @@ struct AgentLaunchProfile: Codable, Equatable, Sendable {
         self.startMode = startMode
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case modelID, reasoningEffort, startMode
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
-        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
-        startMode = try container.decodeIfPresent(AgentStartMode.self, forKey: .startMode)
-            ?? .unrestricted
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encodeIfPresent(modelID, forKey: .modelID)
-        try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
-        try container.encode(startMode, forKey: .startMode)
-    }
-
     var displayReasoningEffort: String? {
         guard let effort = reasoningEffort?.trimmingCharacters(
             in: .whitespacesAndNewlines),
@@ -314,11 +295,14 @@ struct AgentIntegrationPreparation: Equatable, Sendable {
     static let ready = Self(notice: nil)
 }
 
+/// One journal record, as every hook script and launch script since
+/// provider support writes it. A record without a provider or a launch
+/// generation does not decode.
 struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
     var schemaVersion: Int?
     var eventID: String?
-    var provider: AgentProviderID?
-    var launchGeneration: UUID?
+    var provider: AgentProviderID
+    var launchGeneration: UUID
     var hookEventName: String
     var sessionID: String?
     var turnID: String?
@@ -326,48 +310,7 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
     var permissionMode: String?
     var exitStatus: Int?
 
-    private enum CodingKeys: String, CodingKey {
-        case schemaVersion
-        case eventID
-        case provider
-        case launchGeneration
-        case hookEventName
-        case sessionID
-        case turnID
-        case model
-        case permissionMode
-        case exitStatus
-        case legacyHookEventName = "hook_event_name"
-        case legacySessionID = "session_id"
-        case legacyTurnID = "turn_id"
-        case legacyPermissionMode = "permission_mode"
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
-        eventID = try container.decodeIfPresent(String.self, forKey: .eventID)
-        provider = try container.decodeIfPresent(AgentProviderID.self, forKey: .provider)
-        launchGeneration = try container.decodeIfPresent(UUID.self, forKey: .launchGeneration)
-        hookEventName = try container.decodeIfPresent(String.self, forKey: .hookEventName)
-            ?? container.decode(String.self, forKey: .legacyHookEventName)
-        sessionID = try container.decodeIfPresent(String.self, forKey: .sessionID)
-            ?? container.decodeIfPresent(String.self, forKey: .legacySessionID)
-        turnID = try container.decodeIfPresent(String.self, forKey: .turnID)
-            ?? container.decodeIfPresent(String.self, forKey: .legacyTurnID)
-        model = try container.decodeIfPresent(String.self, forKey: .model)
-        permissionMode = try container.decodeIfPresent(String.self, forKey: .permissionMode)
-            ?? container.decodeIfPresent(String.self, forKey: .legacyPermissionMode)
-        exitStatus = try container.decodeIfPresent(Int.self, forKey: .exitStatus)
-    }
-
-    func hasSupportedSchema(for provider: AgentProviderID) -> Bool {
-        switch schemaVersion {
-        case 1: return true
-        case nil: return self.provider == nil && provider == .claudeCode
-        default: return false
-        }
-    }
+    var hasSupportedSchema: Bool { schemaVersion == 1 }
 }
 
 enum AgentDomainEvent: Equatable, Sendable {

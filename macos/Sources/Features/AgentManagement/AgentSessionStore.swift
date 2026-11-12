@@ -24,16 +24,14 @@ enum AgentSessionStore {
             return pending.provider
         }
 
-        // Untagged persistence predates provider support and is exclusively
-        // Claude Code state. Ignore malformed or empty legacy identifiers.
-        for suffix in ["session", "forkFrom"] {
-            let url = directory
-                .appendingPathComponent("\(agentID.uuidString).\(suffix)")
-            guard let raw = try? String(contentsOf: url, encoding: .utf8) else { continue }
-            let identifier = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            if valid(identifier) { return .claudeCode }
-        }
-        return nil
+        // An untagged binding predates provider support and is exclusively
+        // Claude Code state. Ignore a malformed or empty legacy identifier.
+        let legacyURL = directory
+            .appendingPathComponent("\(agentID.uuidString).session")
+        guard let raw = try? String(contentsOf: legacyURL, encoding: .utf8),
+              valid(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+        else { return nil }
+        return .claudeCode
     }
 
     static func session(
@@ -85,24 +83,14 @@ enum AgentSessionStore {
         provider: AgentProviderID,
         directory: URL
     ) -> AgentPendingFork? {
-        let taggedURL = directory
+        let url = directory
             .appendingPathComponent("\(agentID.uuidString).fork.json")
-        if let data = try? Data(contentsOf: taggedURL),
-           let pending = try? JSONDecoder().decode(AgentPendingFork.self, from: data),
-           pending.provider == provider,
-           valid(pending.sourceSessionID) {
-            return pending
-        }
-
-        guard provider == .claudeCode else { return nil }
-        let legacyURL = directory
-            .appendingPathComponent("\(agentID.uuidString).forkFrom")
-        guard let raw = try? String(contentsOf: legacyURL, encoding: .utf8) else { return nil }
-        let sessionID = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard valid(sessionID) else { return nil }
-        let migrated = AgentPendingFork(provider: .claudeCode, sourceSessionID: sessionID)
-        _ = write(migrated, for: agentID, directory: directory)
-        return migrated
+        guard let data = try? Data(contentsOf: url),
+              let pending = try? JSONDecoder().decode(AgentPendingFork.self, from: data),
+              pending.provider == provider,
+              valid(pending.sourceSessionID)
+        else { return nil }
+        return pending
     }
 
     @discardableResult
@@ -124,11 +112,9 @@ enum AgentSessionStore {
         for agentID: UUID,
         directory: URL
     ) {
-        for suffix in ["fork.json", "forkFrom"] {
-            try? FileManager.default.removeItem(
-                at: directory
-                    .appendingPathComponent("\(agentID.uuidString).\(suffix)"))
-        }
+        try? FileManager.default.removeItem(
+            at: directory
+                .appendingPathComponent("\(agentID.uuidString).fork.json"))
     }
 
     static func removeAll(
@@ -136,7 +122,7 @@ enum AgentSessionStore {
         directory: URL
     ) {
         for suffix in [
-            "session.json", "session", "fork.json", "forkFrom", "lastEvent",
+            "session.json", "session", "fork.json", "lastEvent",
             "events", "events.lock", "metadata.json",
         ] {
             try? FileManager.default.removeItem(

@@ -24,23 +24,6 @@ struct AgentEntry: Codable, Identifiable, Equatable, Sendable {
         self.provider = provider
         self.launchProfile = launchProfile
     }
-
-    private enum CodingKeys: String, CodingKey {
-        case id, name, provider, launchProfile
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        name = try container.decode(String.self, forKey: .name)
-        // Every persisted agent created before provider support was a Claude
-        // Code session. This default is the authoritative migration boundary.
-        provider = try container.decodeIfPresent(AgentProviderID.self, forKey: .provider)
-            ?? .claudeCode
-        launchProfile = try container.decodeIfPresent(
-            AgentLaunchProfile.self,
-            forKey: .launchProfile) ?? AgentLaunchProfile()
-    }
 }
 
 struct AgentProject: Codable, Identifiable, Equatable, Sendable {
@@ -54,17 +37,6 @@ struct AgentProject: Codable, Identifiable, Equatable, Sendable {
         self.name = name
         self.tasks = tasks
         self.workingDirectory = workingDirectory
-    }
-
-    // Migration: decode missing `id` (pre-UUID schema) → generate fresh UUID.
-    private enum CodingKeys: String, CodingKey { case id, name, tasks, workingDirectory }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        self.name = try c.decode(String.self, forKey: .name)
-        self.tasks = try c.decodeIfPresent([AgentTask].self, forKey: .tasks) ?? []
-        self.workingDirectory = try c.decodeIfPresent(String.self, forKey: .workingDirectory)
     }
 }
 
@@ -87,55 +59,6 @@ struct AgentTask: Codable, Identifiable, Equatable, Sendable {
         self.name = name
         self.agents = agents
     }
-
-    // Migration: decode missing `id` → fresh UUID; agents from [String] (v1) or [AgentEntry] (v2+).
-    private enum CodingKeys: String, CodingKey { case id, name, agents }
-
-    /// One persisted agent array element. The original schema stored bare
-    /// names; every later schema stores objects. Anything else is malformed.
-    private enum PersistedAgent: Decodable {
-        case legacyName(String)
-        case entry(AgentEntry)
-
-        init(from decoder: Decoder) throws {
-            if let name = try? decoder.singleValueContainer().decode(String.self) {
-                self = .legacyName(name)
-            } else {
-                self = .entry(try AgentEntry(from: decoder))
-            }
-        }
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
-        self.name = try c.decode(String.self, forKey: .name)
-        self.agents = try Self.decodeAgents(from: c, taskName: self.name)
-    }
-
-    private static func decodeAgents(
-        from container: KeyedDecodingContainer<CodingKeys>,
-        taskName: String
-    ) throws -> [AgentEntry] {
-        // A missing key is the legitimate pre-agent shape (empty task).
-        guard container.contains(.agents) else { return [] }
-        // A null list is corruption, not an empty task. Treating it as empty
-        // would let the next save make the loss durable.
-        if try container.decodeNil(forKey: .agents) {
-            throw AgentConfigFormatError(
-                message: "Task \"\(taskName)\" has a null agent list; refusing to replace it with an empty list.")
-        }
-        // Decode every element strictly. A single malformed entry fails the
-        // entire decode with the offending coding path, so the caller keeps
-        // its previous model instead of observing a truncated agent list.
-        let persisted = try container.decode([PersistedAgent].self, forKey: .agents)
-        return persisted.map { persistedAgent in
-            switch persistedAgent {
-            case .legacyName(let name): return AgentEntry(id: UUID(), name: name)
-            case .entry(let entry): return entry
-            }
-        }
-    }
 }
 
 struct AgentConfigFile: Codable {
@@ -153,20 +76,17 @@ struct AgentConfigFile: Codable {
         self.projects = projects
     }
 
+    /// Every key is required, as the app writes them all, and only the
+    /// current schema is read. The migration preflight aborts on any other
+    /// shape, so the live data never needs an old format's defaults.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
-        if container.contains(.projects) {
-            projects = try container.decode([AgentProject].self, forKey: .projects)
-        } else if schemaVersion >= 2 {
-            // Schema versions at or above 2 always encode `projects`. Its
-            // absence means the file is truncated; decoding it as an empty
-            // list would silently discard the hierarchy on the next save.
+        schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+        guard schemaVersion == Self.currentSchemaVersion else {
             throw AgentConfigFormatError(
-                message: "Configuration declares schemaVersion \(schemaVersion) but has no projects array.")
-        } else {
-            projects = []
+                message: "Configuration has schemaVersion \(schemaVersion); this version reads \(Self.currentSchemaVersion).")
         }
+        projects = try container.decode([AgentProject].self, forKey: .projects)
     }
 }
 
@@ -318,14 +238,7 @@ class AgentConfig {
             lastConfigData = data
             projects = config.projects
             errorMessage = nil
-            migrateStatusFiles()
-            let restoredProviderIdentity = Self.enforcePersistedProviderBindings(
-                in: &projects,
-                statusDirectory: root.statusDir)
-
-            if config.schemaVersion < AgentConfigFile.currentSchemaVersion
-                || restoredProviderIdentity {
-                logger.info("schema migration from v\(config.schemaVersion)")
+            if Self.enforcePersistedProviderBindings(in: &projects, statusDirectory: root.statusDir) {
                 save()
             }
 
@@ -377,36 +290,6 @@ class AgentConfig {
             }
         }
         return result
-    }
-
-    /// Migrate old v1 status files (keyed by sanitized name) to UUID-keyed names.
-    /// Safe to run every load — skips if new file already exists.
-    private func migrateStatusFiles() {
-        let fm = FileManager.default
-        for project in projects {
-            for task in project.tasks {
-                for entry in task.agents {
-                    let oldKey = Self.v1AgentKey(project: project.name, task: task.name, agent: entry.name)
-                    let newKey = entry.id.uuidString
-                    for ext in [
-                        "session", "session.json", "state", "heartbeat", "forkFrom",
-                        "fork.json", "lastEvent", "events", "events.lock", "json", "metadata.json",
-                    ] {
-                        let oldURL = root.statusDir.appendingPathComponent("\(oldKey).\(ext)")
-                        let newURL = root.statusDir.appendingPathComponent("\(newKey).\(ext)")
-                        if fm.fileExists(atPath: oldURL.path) && !fm.fileExists(atPath: newURL.path) {
-                            try? fm.moveItem(at: oldURL, to: newURL)
-                            logger.info("migrated \(oldKey).\(ext) → \(newKey).\(ext)")
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private static func v1AgentKey(project: String, task: String, agent: String) -> String {
-        "\(project)/\(task)/\(agent)"
-            .replacingOccurrences(of: "[^a-zA-Z0-9._-]", with: "_", options: .regularExpression)
     }
 
     /// A provider becomes part of an agent's durable identity as soon as a

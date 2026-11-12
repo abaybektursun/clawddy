@@ -363,7 +363,7 @@ private func readBindings(
 ) throws -> AgentBindings {
     let id = agent.id.uuidString
     if snapshot.statusFileNames.contains("\(id).forkFrom") {
-        throw AgentMigrationAbort("status/\(id).forkFrom: the app still reads this legacy fork marker.")
+        throw AgentMigrationAbort("status/\(id).forkFrom: a legacy fork marker, which the app no longer reads.")
     }
     func check(_ sessionID: String, _ provider: AgentProviderID, file: String) throws {
         guard AgentSessionStore.valid(sessionID) else {
@@ -399,8 +399,8 @@ private func readBindings(
     return bindings
 }
 
-/// The app still reads each journal from its persisted offset. A record
-/// there without a provider would still need the legacy decoder.
+/// The app reads each journal from its persisted offset and drops a record
+/// without a provider, which only the pre-provider hook wrote.
 private func requireTaggedJournalTails(
     _ snapshot: AgentDataSnapshot,
     configured: Set<UUID>
@@ -425,9 +425,9 @@ private func requireTaggedJournalTails(
     }
 }
 
-/// The app still moves a schema 1 file of a configured agent to its
-/// UUID-keyed name when that name is free (`AgentConfig.migrateStatusFiles`).
-/// Deleting such a file would lose it.
+/// A schema 1 file of a configured agent whose UUID-keyed name is free is
+/// that agent's only copy. The app no longer moves it to that name, and the
+/// sweep would delete it.
 private func requireNoMovableV1Files(_ config: ConfigV5, statusFileNames: Set<String>) throws {
     for project in config.projects {
         for task in project.tasks {
@@ -438,7 +438,7 @@ private func requireNoMovableV1Files(_ config: ConfigV5, statusFileNames: Set<St
                 where statusFileNames.contains("\(key).\(ext)")
                     && !statusFileNames.contains("\(agent.id.uuidString).\(ext)") {
                     throw AgentMigrationAbort(
-                        "status/\(key).\(ext) is a schema 1 file of agent \(agent.id.uuidString) that the app would still move.")
+                        "status/\(key).\(ext) is a schema 1 file of agent \(agent.id.uuidString) with no UUID-keyed copy.")
                 }
             }
         }
