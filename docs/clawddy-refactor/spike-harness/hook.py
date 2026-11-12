@@ -17,7 +17,7 @@ try:
     payload = json.loads(raw)
 except ValueError:
     payload = {"_unparsed": raw[:2000]}
-env_names = sorted(k for k in os.environ if k.startswith(("CLAUDE", "GHOSTTY", "CODEX", "TERM")))
+env_names = sorted(k for k in os.environ if k.startswith(("CLAUDE", "CLAWDDY", "GHOSTTY", "CODEX", "TERM")))
 with open(log, "a") as f:
     f.write(json.dumps({"t": time.time(), "pid": os.getpid(), "ppid": os.getppid(), "argv": args,
                         "env_names": env_names, "payload": payload}) + "\n")

@@ -15,7 +15,7 @@ Steps (JSON list), run in order:
   {"quiet": seconds}             wait until the child is silent this long
   {"sleep": seconds}
   {"type": "text"}               type text one char at a time, 20ms apart
-  {"key": "enter"|"esc"|"ctrl-c"|"ctrl-d"|"down"|"up"|"tab"}
+  {"key": "enter"|"esc"|"ctrl-c"|"ctrl-d"|"ctrl-z"|"ctrl-g"|"down"|"up"|"tab"}
   {"mark": "label"}              just logs a label
 """
 import argparse, fcntl, json, os, pty, re, select, signal, struct, sys, termios, time
@@ -47,6 +47,7 @@ for kv in a.env:
         env[k] = v
 
 T0 = time.monotonic()
+WALL0 = time.time()  # lets decode.py place hook records (wall clock) on this timeline
 logf = open(os.path.join(a.out, "log.jsonl"), "w")
 rawf = open(os.path.join(a.out, "out.bin"), "wb")
 
@@ -63,7 +64,7 @@ if pid == 0:
     os.execvpe(cmd[0], cmd, env)
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", a.rows, a.cols, a.cols * 8, a.rows * 16))
 open(os.path.join(a.out, "pid"), "w").write(str(pid))
-log("step", json.dumps({"spawn": cmd, "pid": pid, "osc7501": a.osc7501}))
+log("step", json.dumps({"spawn": cmd, "pid": pid, "osc7501": a.osc7501, "wall": WALL0}))
 
 kitty_stack = [0]
 buf = b""          # unparsed tail for query detection
@@ -81,13 +82,13 @@ def answer(chunk):
     buf = (buf + chunk)[-8192:]
     out = []
     consumed = 0
-    for m in re.finditer(rb"\x1b\[(\??)(>?)([0-9;]*)([\$]?)([a-zA-Z~])|\x1b\](\d+);([^\x07\x1b]*)(\x07|\x1b\\)|\x1bP\+q([0-9a-fA-F;]*)\x1b\\", buf):
+    for m in re.finditer(rb"\x1b\[(\??)([<>]?)([0-9;]*)([\$]?)([a-zA-Z~])|\x1b\](\d+);([^\x07\x1b]*)(\x07|\x1b\\)|\x1bP\+q([0-9a-fA-F;]*)\x1b\\", buf):
         consumed = m.end()
         if m.group(5):
             q, gt, params, dollar, final = m.group(1), m.group(2), m.group(3), m.group(4), m.group(5)
             if final == b"c" and not q and not gt and params in (b"", b"0"):
                 out.append(b"\x1b[?62;22c")
-            elif final == b"c" and gt:
+            elif final == b"c" and gt == b">":
                 out.append(b"\x1b[>1;10;0c")
             elif final == b"n" and not q and params == b"6":
                 out.append(b"\x1b[1;1R")
@@ -95,15 +96,16 @@ def answer(chunk):
                 out.append(b"\x1b[0n")
             elif final == b"n" and q and params == b"996":
                 out.append(b"\x1b[?997;1n")
-            elif final == b"q" and gt:
+            elif final == b"q" and gt == b">":
                 out.append(b"\x1bP>|ghostty 1.3.2-dev\x1b\\")
             elif final == b"u" and q and not params:
                 out.append(b"\x1b[?%du" % kitty_stack[-1])
-            elif final == b"u" and gt:
+            elif final == b"u" and gt == b">":
                 kitty_stack.append(int(params or b"0"))
-            elif final == b"u" and buf[m.start() + 2:m.start() + 3] == b"<":
-                if len(kitty_stack) > 1:
-                    kitty_stack.pop()
+            elif final == b"u" and gt == b"<":
+                for _ in range(int(params or b"1")):
+                    if len(kitty_stack) > 1:
+                        kitty_stack.pop()
             elif final == b"p" and q and dollar:
                 mode = int(params or b"0")
                 supported = {1, 7, 25, 47, 1000, 1002, 1003, 1004, 1006, 1047, 1049, 2004, 2026, 2027, 2031, 2048}
@@ -164,9 +166,11 @@ def pump(timeout):
     return time.monotonic() - last
 
 KEYS = {"enter": b"\r", "esc": b"\x1b", "ctrl-c": b"\x03", "ctrl-d": b"\x04", "tab": b"\t",
-        "down": b"\x1b[B", "up": b"\x1b[A", "shift-tab": b"\x1b[Z", "backspace": b"\x7f", "ctrl-u": b"\x15", "focus-in": b"\x1b[I", "focus-out": b"\x1b[O"}
+        "down": b"\x1b[B", "up": b"\x1b[A", "shift-tab": b"\x1b[Z", "backspace": b"\x7f", "ctrl-u": b"\x15", "focus-in": b"\x1b[I", "focus-out": b"\x1b[O",
+        "ctrl-z": b"\x1a", "ctrl-g": b"\x07"}
 KITTY = {"enter": b"\x1b[13u", "esc": b"\x1b[27u", "ctrl-c": b"\x1b[99;5u", "ctrl-d": b"\x1b[100;5u", "tab": b"\x1b[9u",
-         "ctrl-u": b"\x1b[117;5u"}
+         "ctrl-u": b"\x1b[117;5u", "ctrl-z": b"\x1b[122;5u", "ctrl-g": b"\x1b[103;5u"}
+CTRL_KEYS = ("esc", "ctrl-c", "ctrl-d", "ctrl-u", "ctrl-z", "ctrl-g")  # CSI u once flag 1 (disambiguate) is on
 
 for st in steps:
     if not alive:
@@ -200,7 +204,7 @@ for st in steps:
     elif "key" in st:
         k = st["key"]
         flags = kitty_stack[-1]
-        data = KITTY[k] if (flags & 1 and k in ("esc", "ctrl-c", "ctrl-d", "ctrl-u")) or (flags & 8 and k in KITTY) else KEYS[k]
+        data = KITTY[k] if (flags & 1 and k in CTRL_KEYS) or (flags & 8 and k in KITTY) else KEYS[k]
         write(data)
     since = b"" if st.get("reset", True) else since
     pump(0.05)

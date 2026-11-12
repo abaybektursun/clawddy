@@ -672,3 +672,357 @@ exp4:
   python3 $H/decode.py $SPIKE_DIR/exp2/cap
   ```
   The `mkdir -p $SPIKE_DIR/exp2/cap` must happen before `mk_settings.py`. Steps files are JSON lists, as described in the `harness.py` docstring. A new working directory brings up Claude's trust dialog, whose default is "No, exit", so steps must send `down` then `enter`.
+
+---
+
+## P3.5a captures (2026-11-12)
+
+Plan step P3.5a: the open cases captured before P3.5 is written. Same machine, same Claude Code (2.1.322), same harness, run from this shell (not inside a Clawddy agent). Nine Claude sessions, all with one-line prompts and one-word answers.
+
+**Harness additions** (in `spike-harness/`):
+- `harness.py`: keys `ctrl-z` and `ctrl-g`, sent as CSI u (`ESC[122;5u`, `ESC[103;5u`) while kitty flag 1 is on, the same as Esc and Ctrl-C (Claude pushes flags 5). The kitty pop `ESC[<u` is now tracked; the old pattern never matched it, so after a suspend the harness still thought the flags were pushed. The spawn record now carries the wall-clock time.
+- `decode.py`: if `hooks.jsonl` sits next to the log, hook records are shown as `HOOK` rows on the same timeline. The time is when the hook process wrote its record, a few ms after Claude started it.
+- `run.sh`: `WORK_DIR` overrides the working folder, so two runs can share one project folder (needed for resume and fork).
+- `clean-env` also removes `CLAWDDY_*`; `hook.py` also records `CLAWDDY*` variable names.
+- `editor.sh`: a stand-in `$EDITOR` that logs its file argument and exits at once without touching the file.
+
+**Safety:**
+- Before the first session, `env` run as the harness child showed no `GHOSTTY_AGENT_*`, `CLAWDDY_*`, `CLAUDE*` or `CODEX_*` names.
+- None of the 59 hook records (10 session ids) lists a `GHOSTTY_AGENT_*` or `CLAWDDY*` name.
+- `run.sh` saw status-folder changes only in two live agents' files, from the owner's own sessions running at the time. None of my 10 session ids appears anywhere in that folder.
+- No global configuration was touched. Per-session differences came only from command-line flags and variables set for the child process: `ANTHROPIC_MODEL` (a name that does not exist), `HTTPS_PROXY`/`HTTP_PROXY` (a closed local port), `CLAUDE_CODE_MAX_RETRIES=0`, `BASH_DEFAULT_TIMEOUT_MS=300000`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `EDITOR`/`VISUAL`. Every session other than the first case 2 run used the user's configured model.
+
+**Where things are:**
+- Captures: `/Volumes/Xcode/GhosttyBuilds/ghostty/tmp/p35a/<run>/`, holding `steps.json`, `settings.json` and `cap/` (`log.jsonl`, `out.bin`, `hooks.jsonl`, `statusline.jsonl`, `claude-debug.log`).
+- Transcripts: under `<CLAUDE_CONFIG>/projects/-Volumes-Xcode-GhosttyBuilds-ghostty-tmp-p35a-*`.
+
+**Timeline format:**
+- Times are seconds since spawn.
+- `MARK` is a harness step label. `KEY enter` is the Enter that submits.
+- `HOOK` is a record from the `--settings` hooks.
+- Only OSC 7501 is shown (no `9;4` progress and no titles), with `msg` decoded in brackets.
+- Session ids are replaced by `<sid-…>` / `<uuid-…>`.
+
+### Case 1: a prompt submitted within 2 s of `done`
+
+Three points, in three sessions:
+
+| Run | First `done` | Next Enter | Gap | Summary `done` of the first turn |
+|---|---|---|---|---|
+| c3 | 12.617 | 12.916 | 0.30 s | never arrived |
+| c1 | 13.841 | 14.880 | 1.04 s | never arrived |
+| c4 | 15.137 | 16.860 | 1.72 s | never arrived |
+| c1, turn 2 (control) | 17.060 | 19.234 | 2.17 s | arrived at 18.775, 1.72 s after `done`, while the next prompt was still being typed, so it came before the new `working` |
+
+When no prompt followed, the summary came 1.45 to 2.0 s after the first `done` (eight turns).
+
+c1 (follow-ups at 1.04 s and 2.17 s, then `/clear`, which is case 7):
+```
+   8.796 MARK  prompt1
+  10.130 KEY   enter
+  10.224 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  10.535 HOOK  UserPromptSubmit sid=<sid-c1>
+  13.826 HOOK  Stop sid=<sid-c1>
+  13.841 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  14.096 MARK  prompt2-at-once-after-done
+  14.880 KEY   enter
+  14.912 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  14.933 HOOK  UserPromptSubmit sid=<sid-c1>
+  17.049 HOOK  Stop sid=<sid-c1>
+  17.060 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  18.475 MARK  prompt3-1.2s-after-done
+  18.775 OSC   '\x1b]7501;state=done:app=claude-code:msg=cmVwbGllZCAneWVzJyBhcyByZXF1ZXN0ZWQ=\x07'  [msg="replied 'yes' as requested"]
+  19.234 KEY   enter
+  19.277 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  19.300 HOOK  UserPromptSubmit sid=<sid-c1>
+  21.172 HOOK  Stop sid=<sid-c1>
+  21.189 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  22.852 OSC   '\x1b]7501;state=done:app=claude-code:msg=cmVwbGllZCAnbm8nIGFzIHJlcXVlc3RlZA==\x07'  [msg="replied 'no' as requested"]
+  23.926 HOOK  SubagentStop sid=<sid-c1>
+```
+c3 (follow-up at 0.30 s; the rest of c3 is case 3):
+```
+   9.921 KEY   enter
+   9.970 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+   9.992 HOOK  UserPromptSubmit sid=<sid-c3>
+  12.604 HOOK  Stop sid=<sid-c3>
+  12.617 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  12.672 MARK  prompt2-at-once-short
+  12.916 KEY   enter
+  12.931 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  12.951 HOOK  UserPromptSubmit sid=<sid-c3>
+  15.207 HOOK  Stop sid=<sid-c3>
+  15.220 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  16.665 OSC   '\x1b]7501;state=done:app=claude-code:msg=Z3JlZXRlZCB1c2VyOyBubyB0YXNrIHBlbmRpbmc=\x07'  [msg='greeted user; no task pending']
+```
+c4 (follow-up at 1.72 s; the step label says 1.45 s, but typing took longer than planned):
+```
+  12.807 KEY   enter
+  12.838 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  12.856 HOOK  UserPromptSubmit sid=<sid-c4>
+  15.125 HOOK  Stop sid=<sid-c4>
+  15.137 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  16.614 MARK  prompt2-1.45s-after-done
+  16.860 KEY   enter
+  16.887 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  16.908 HOOK  UserPromptSubmit sid=<sid-c4>
+  19.559 HOOK  Stop sid=<sid-c4>
+  19.569 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  21.166 OSC   '\x1b]7501;state=done:app=claude-code:msg=Z3JlZXRlZCB0aGUgdXNlcjsgbm90aGluZyBwZW5kaW5n\x07'  [msg='greeted the user; nothing pending']
+```
+**Conclusion:** submitting a prompt before the summary arrives cancels it. It arrived neither before nor after the new `working`. A summary that is ready while the user is still typing comes before the new `working`. No summary `done` ever landed inside the next turn, and each turn's completing `done` had no `msg`.
+
+### Case 2: a failing turn
+
+Two ways, both with zero tokens spent:
+- **c2:** a model name that does not exist, given through the harness's `--env` mechanism (`ANTHROPIC_MODEL=p35a-invalid-model`, for that child only).
+- **c2b:** no route to the API, using `HTTPS_PROXY=http://127.0.0.1:9` and `HTTP_PROXY` for that child only, plus `CLAUDE_CODE_MAX_RETRIES=0`.
+
+c2:
+```
+   9.935 KEY   enter
+   9.987 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  10.011 HOOK  UserPromptSubmit sid=<sid-c2>
+  10.426 OSC   '\x1b]7501;state=error:app=claude-code:msg=VGhlcmUncyBhbiBpc3N1ZSB3aXRoIHRoZSBzZWxlY3RlZCBtb2RlbCAocDM1YS1pbnZhbGlkLW1vZGVsKS4gSXQgbWF5IG5vdCBleGlzdCBvciB5b3UgbWF5IG5vdCBoYXZlIGFjY2VzcyB0byBpdC4gUnVuIC9tb2RlbCB0byBwaWNrIGEgZGlmZmVyZW50IG1vZGVsLg==\x07'  [msg="There's an issue with the selected model (p35a-invalid-model). It may not exist or you may not have access to it. Run /model to pick a different model."]
+  10.441 HOOK  StopFailure sid=<sid-c2> error=model_not_found
+  16.708 MARK  prompt2
+  18.059 KEY   enter
+  18.093 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  18.120 HOOK  UserPromptSubmit sid=<sid-c2>
+  18.487 OSC   '\x1b]7501;state=error:app=claude-code:msg=<same as above>\x07'
+  18.509 HOOK  StopFailure sid=<sid-c2> error=model_not_found
+  24.629 MARK  exit
+  25.605 KEY   enter
+  25.631 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  25.641 OSC   '\x1b]7501;state=clear\x07'   (three times)
+  26.162 HOOK  SessionEnd sid=<sid-c2> reason=prompt_input_exit
+```
+c2b (no trust dialog: same folder as c2):
+```
+   0.243 HOOK  SessionStart sid=<sid-c2b> source=startup
+   0.415 OSC   '\x1b]7501;state=idle:app=claude-code\x07'
+   7.393 KEY   enter
+   7.445 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+   7.464 HOOK  UserPromptSubmit sid=<sid-c2b>
+   7.551 OSC   '\x1b]7501;state=error:app=claude-code:msg=QVBJIEVycm9yOiBDb25uZWN0aW9uIHJlZnVzZWQg4oCUIGEgZmlyZXdhbGwgb3IgcHJveHkgbWF5IGJlIGJsb2NraW5nIGl0IChFQ09OTlJFRlVTRUQp\x07'  [msg='API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)']
+   7.578 HOOK  StopFailure sid=<sid-c2b> error=server_error
+```
+- **StopFailure payload keys:** `cwd`, `effort`, `error`, `hook_event_name`, `last_assistant_message` (the on-screen error text), `prompt_id`, `scratchpad_dir`, `session_id`, `transcript_path`.
+- **No `Stop` and no `done`** in any failed turn.
+- **`error` stays** until the next prompt, which starts with `working` as usual.
+- **Timing:** `error` came 106 ms (no network) and 394–439 ms (bad model) after `working`. The `StopFailure` record was written 15–27 ms after the in-band `error`.
+- **Read in the binary, not captured:** the mapping inside Claude sends `error` for a failed last turn unless the error kind is an auth kind. For an auth kind it sends `blocked kind=auth`, or `idle` if the user has signed in since.
+
+**Conclusion:** yes, `StopFailure` fires, and `error` is reported over OSC 7501 with the error text in `msg`. The `error` arrives first, by 15–27 ms, and can come as soon as 106 ms after `working`.
+
+### Case 3: compaction (`/compact` on a short session)
+
+c3, continued after case 1:
+```
+  15.220 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  16.665 OSC   '\x1b]7501;state=done:app=claude-code:msg=Z3JlZXRlZCB1c2VyOyBubyB0YXNrIHBlbmRpbmc=\x07'  [msg='greeted user; no task pending']
+  21.508 MARK  compact
+  22.562 KEY   enter
+  22.627 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  22.653 HOOK  PreCompact sid=<sid-c3> trigger=manual
+  35.734 HOOK  SubagentStop sid=<sid-c3>
+  35.787 HOOK  SessionStart sid=<sid-c3> source=compact
+  35.819 HOOK  PostCompact sid=<sid-c3> trigger=manual
+  35.840 OSC   '\x1b]7501;state=done:app=claude-code:msg=Z3JlZXRlZCB1c2VyOyBubyB0YXNrIHBlbmRpbmc=\x07'  [msg='greeted user; no task pending']
+  44.132 MARK  exit
+```
+- **`/compact` is reported as one long `working`** (13.2 s here), ended by a `done` whose bytes match the previous summary report exactly.
+- **What is missing:** no bare `done`, no `Stop`, no `UserPromptSubmit`.
+- **Hooks:**
+  - `PreCompact` ran 26 ms after `working`.
+  - The compaction runs as a subagent: a `SubagentStop` with `agent_type: ""`, whose `last_assistant_message` is the compaction summary.
+  - `SessionStart` with `source: "compact"` keeps the same session id.
+  - `PostCompact` ran 21 ms before the `done`.
+- **Payload keys:**
+  - `PreCompact`: `custom_instructions`, `trigger`, `prompt_id`, plus the common fields.
+  - `PostCompact`: `compact_summary`, `trigger`, `prompt_id`, plus the common fields.
+  - `SessionStart (compact)`: `model`, `prompt_id`, `source`, plus the common fields.
+
+**Conclusion:** over OSC 7501 a manual compaction looks like a 13-second turn that ends in `done` with the old summary. Only the hooks show it was a compaction. Automatic compaction was not captured.
+
+### Case 4: Ctrl-Z then `fg`, and the external editor
+
+c4 ran Claude from an interactive `zsh -f -i` inside the PTY, through a one-line `exec claude …` script. That gives Ctrl-Z a job-control parent: Claude suspends by sending `SIGTSTP` to its own process group, which the kernel ignores for an orphaned group such as a PTY session leader. `EDITOR` and `VISUAL` pointed at `editor.sh`. The editor binding in 2.1.322 is `ctrl+g` (also `ctrl+x ctrl+e`).
+```
+  21.166 OSC   '\x1b]7501;state=done:app=claude-code:msg=Z3JlZXRlZCB0aGUgdXNlcjsgbm90aGluZyBwZW5kaW5n\x07'  [msg='greeted the user; nothing pending']
+  25.869 MARK  type-draft
+  26.765 MARK  ctrl-g
+  26.820 IN    '\x1b[103;5u'          screen: "Save and close editor to continue..."; editor.log: one call with /tmp/claude-501/claude-prompt-<uuid>.md
+  30.935 MARK  clear-input
+  30.989 IN    '\x1b[117;5u'
+  32.100 MARK  ctrl-z
+  32.154 IN    '\x1b[122;5u'          screen: "Claude Code has been suspended. Run `fg` to bring Claude Code back." then "zsh: suspended"
+  35.320 MARK  fg
+  35.478 KEY   enter                  screen: Claude redraws
+  39.588 MARK  prompt3-after-fg
+  40.930 KEY   enter
+  40.952 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  40.971 HOOK  UserPromptSubmit sid=<sid-c4>
+  43.164 HOOK  Stop sid=<sid-c4>
+  43.176 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  44.764 OSC   '\x1b]7501;state=done:app=claude-code:msg=cmVwbGllZCAnb2snIGFzIHJlcXVlc3RlZA==\x07'  [msg="replied 'ok' as requested"]
+```
+- **Raw scan from 21.2 to 40.9 s:** no `7501` bytes at all. The only mode traffic is the kitty pop and push around the editor (`ESC[<u`, `ESC[>5u`) and around the suspend and resume.
+- **Hooks:** none in that window.
+- **After `fg`:** the next turn reports normally.
+- **Not captured:** Ctrl-Z during a turn.
+
+**Conclusion:** neither suspend/`fg` nor the external editor reports anything. The last report (`done` with its summary) stays in force throughout.
+
+### Case 5: a turn longer than 120 s
+
+**Attempt 1 (c5): user defaults, `--allowedTools 'Bash(sleep:*)'`, child-only `BASH_DEFAULT_TIMEOUT_MS=300000`.** The prompt asked for `sleep 130` in the foreground. Claude ran it in the background anyway, and the turn ended after 12 s:
+```
+  12.381 KEY   enter
+  12.434 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  12.459 HOOK  UserPromptSubmit sid=<sid-c5>
+  16.216 OSC   '\x1b]7501;state=working:app=claude-code:msg=V2FpdGluZyAxMzAgc2Vjb25kcw==\x07'  [msg='Waiting 130 seconds']
+  22.600 HOOK  PreToolUse sid=<sid-c5> tool_name=Bash
+  22.651 OSC   '\x1b]7501;state=working:app=claude-code:msg=V2FpdGluZyAxMzAgc2Vjb25kcyBpbiB0aGUgYmFja2dyb3VuZA==\x07'  [msg='Waiting 130 seconds in the background']
+  22.695 HOOK  PostToolUse sid=<sid-c5> tool_name=Bash
+  24.733 HOOK  Stop sid=<sid-c5>
+  24.746 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  26.355 OSC   '\x1b]7501;state=done:app=claude-code:msg=c2xlZXAgMTMwIHJ1bm5pbmcgaW4gYmFja2dyb3VuZDsgd2lsbCByZXBseSB3aGVuIGRvbmU=\x07'  [msg='sleep 130 running in background; will reply when done']
+  30.946 MARK  exit
+  31.929 KEY   enter
+  31.952 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  31.966 OSC   '\x1b]7501;state=done:app=claude-code:msg=<same summary as 26.355>\x07'
+                                        screen: "Background work is running · The following will stop when you exit: shell · sleep …"
+  39.040 STEP  {"signal": 1, "pid": …}     (the harness ends its own child with SIGHUP)
+  39.048 OSC   '\x1b]7501;state=clear\x07'   (three times)
+  39.681 HOOK  SessionEnd sid=<sid-c5> reason=other
+```
+Side finding: `/exit` while background work runs shows a confirmation dialog. It is reported as `working` and then, 14 ms later, a `done` that repeats the previous summary. It is not reported as `blocked`. Ending the session by SIGHUP gives `SessionEnd` with `reason: "other"`. No `sleep 130` process was left afterwards.
+
+**Attempt 2 (c5b): as attempt 1, plus child-only `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so the command had to run in the foreground.** Same folder, no trust dialog:
+```
+   9.700 KEY   enter
+   9.762 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+   9.783 HOOK  UserPromptSubmit sid=<sid-c5b>
+  13.295 HOOK  PreToolUse sid=<sid-c5b> tool_name=Bash
+  13.737 OSC   '\x1b]7501;state=working:app=claude-code:msg=V2FpdGluZyBmb3IgMTMwIHNlY29uZHM=\x07'  [msg='Waiting for 130 seconds']
+ 143.472 HOOK  PostToolUse sid=<sid-c5b> tool_name=Bash
+ 145.043 HOOK  Stop sid=<sid-c5b>
+ 145.060 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+ 146.749 OSC   '\x1b]7501;state=done:app=claude-code:msg=cmFuIHNsZWVwIDEzMCBpbiBmb3JlZ3JvdW5kOyByZXBsaWVkIGZpbmlzaGVk\x07'  [msg='ran sleep 130 in foreground; replied finished']
+ 152.329 KEY   enter      (/exit)
+ 152.366 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+ 152.375 OSC   '\x1b]7501;state=clear\x07'   (three times)
+ 152.878 HOOK  SessionEnd sid=<sid-c5b> reason=prompt_input_exit
+```
+- **Raw scan from 13.8 to 145.0 s:** no OSC sequence of any kind. No 7501, no title, no `9;4` progress.
+- **Screen redraws continued**, with no gap longer than 0.24 s (1420 output chunks), so silence in the program-status channel does not mean the process is quiet.
+- **Hooks:** none fired between `PreToolUse` and `PostToolUse`.
+
+**Conclusion:** there are no periodic reports. After one `working` with `msg` at the start of the tool call, the channel was silent for 131 s until `done`. Also, with default settings Claude may move a long command to the background by itself and end the turn with `done` while the work goes on. What happens when that background task later finishes was not captured.
+
+### Case 6: fork binding
+
+- **Session A (c6a):** `claude --session-id <uuid-A>`, one prompt, `/exit`.
+- **Then the fork (c6b), in the same folder:** `claude --resume <uuid-A> --fork-session --session-id <uuid-B> --settings <c6b settings>`, one prompt, `/exit`.
+- **A's transcript, before the fork and after the fork exited:** identical (sha256 `11322e3b…d32b`, 381216 bytes, same mtime). A new file `<uuid-B>.jsonl` appeared next to it.
+```
+c6a
+   2.615 HOOK  SessionStart sid=<uuid-A> source=startup
+   2.635 OSC   '\x1b]7501;state=idle:app=claude-code\x07'
+   9.986 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  10.003 HOOK  UserPromptSubmit sid=<uuid-A>
+  12.328 HOOK  Stop sid=<uuid-A>
+  12.342 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  14.138 OSC   '\x1b]7501;state=done:app=claude-code:msg=cmVwbGllZCAib2siIGFzIHJlcXVlc3RlZA==\x07'  [msg='replied "ok" as requested']
+  18.087 HOOK  SessionEnd sid=<uuid-A> reason=prompt_input_exit
+c6b
+   0.284 HOOK  SessionStart sid=<uuid-B> source=fork
+   0.471 OSC   '\x1b]7501;state=idle:app=claude-code\x07'
+   9.407 KEY   enter
+   9.430 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+   9.447 HOOK  UserPromptSubmit sid=<uuid-B>
+  13.528 HOOK  Stop sid=<uuid-B>
+  13.540 OSC   '\x1b]7501;state=done:app=claude-code\x07'
+  15.534 OSC   '\x1b]7501;state=done:app=claude-code:msg=cmVwbGllZCAnb2snIGFzIHJlcXVlc3RlZA==\x07'  [msg="replied 'ok' as requested"]
+  19.404 HOOK  SessionEnd sid=<uuid-B> reason=prompt_input_exit
+```
+- **SessionStart (fork) payload keys:** `context_tokens`, `cwd`, `estimated_cache_write_usd`, `hook_event_name`, `prompt_cache_likely_expired`, `scratchpad_dir`, `seconds_since_last_response`, `session_id` (= `<uuid-B>`), `source` (= `"fork"`), `transcript_path` (= `…/<uuid-B>.jsonl`).
+- **No hook payload in the fork mentions `<uuid-A>`.** All 4 fork hook records carry `<uuid-B>`.
+- **Inside `<uuid-B>.jsonl`:**
+  - Every entry's `sessionId` is `<uuid-B>`.
+  - `<uuid-A>` survives only inside the copied history: in a secondary `session_id` field of copied attachment, assistant and system entries, and in copied text.
+
+**Conclusion:** the fork's `SessionStart` carries the new id `<uuid-B>` with `source: "fork"`, and session A's transcript is not modified. A forked agent binds to its own new id, never to its source session.
+
+### Case 7: `/clear` in a session started with `--session-id`
+
+Re-confirmed in c1:
+```
+  28.423 KEY   enter      (/clear)
+  28.470 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  28.504 HOOK  SessionEnd sid=<sid-c1> reason=clear
+  28.533 OSC   '\x1b]7501;state=idle:app=claude-code\x07'
+  28.548 HOOK  SessionStart sid=<sid-c1-after-clear> source=clear
+  37.517 KEY   enter      (/exit)
+  37.584 OSC   '\x1b]7501;state=working:app=claude-code\x07'
+  37.595 OSC   '\x1b]7501;state=clear\x07'   (three times)
+  38.176 HOOK  SessionEnd sid=<sid-c1-after-clear> reason=prompt_input_exit
+```
+**Conclusion:** `SessionStart` with `source: "clear"` carries a new random id, not the one given by `--session-id`. Later hooks use the new id. The `working` blip lasted 63 ms.
+
+### Against the P3.5 mapping
+
+The mapping under review (plan row P3.5):
+- `working` starts or continues a turn.
+- `done` completes the active turn; a `done` with no active turn only updates the summary.
+- `idle` ends an active turn as interrupted.
+- `clear` resets.
+- `error` fails the turn.
+- A `working` followed by `idle` or `clear` within 250 ms raises no effects.
+
+Each point below is either a contradiction or a refinement.
+
+1. **Refinement (late summary): the mapping holds, and one more guard is available.**
+   - A summary `done` never landed inside a following turn (case 1). Submitting before it arrives cancels it, and a summary that is ready first comes before the new `working`. `secondDoneIsNotASecondCompletion` is right as written.
+   - In all 12 completed turns captured here (and all 8 in the first spike), the `done` that completed the turn had no `msg`. Every `done` with `msg` was either a summary or the end of something that was not a turn (points 2 and 3).
+   - So "a `done` carrying `msg` never completes a turn" is a cheap second guard.
+
+2. **Contradiction (`/compact`).**
+   - What happens: `/compact` is reported as `working` for the whole compaction (13.2 s), then a `done` repeating the previous summary. There is no `Stop` and no `UserPromptSubmit` (case 3).
+   - Under the mapping as written, that is a turn that completes: a false completion and a false "done" notification. The 250 ms rule does not cover it.
+   - Proposed fix: a `PreCompact` with `trigger: "manual"` (the hook is already in the reduced hook list) marks the current `working` as a compaction. The `done` that ends it completes nothing.
+   - Use `PreCompact`, not `PostCompact`. `PreCompact` was written 26 ms after `working` and 13 s before `done`. `PostCompact` was written only 21 ms before the in-band `done`, so it can lose the race through the file watcher.
+   - The `msg` guard from point 1 also covers this capture. It would not cover a compaction run when the previous turn has no summary; going by the code, Claude would then send a bare `done`. That case was not captured.
+   - Automatic compaction (`trigger: "auto"`) was not captured. It happens inside a real turn, so it must not suppress that turn's completion.
+
+3. **Contradiction (a `working` blip ending in `done`).**
+   - What happens: `/exit` while background work runs opens a "Background work is running" confirmation. It is reported as `working`, then 14 ms later a `done` repeating the old summary (case 5, attempt 1).
+   - The 250 ms rule names only `idle` and `clear`, so as written this is a turn that completes.
+   - Proposed fix: the rule should read "a `working` followed by `idle`, `clear` or `done` within 250 ms raises no effects". It must not cover `error`: a real failure arrived 106 ms after `working` (case 2, no network).
+   - The confirmation waits for the user but is reported as `done`, not `blocked`, so the app cannot show it as waiting.
+
+4. **Refinement (`error`).**
+   - `error` is now observed, so F2's "Claude `error` was never seen" is out of date.
+   - What happens: a failed turn gives `working`, then `error` 106–440 ms later, with the on-screen error text in `msg`. No `Stop`, no `done`. `error` stays until the next prompt, and the next prompt starts with `working` as usual.
+   - `StopFailure` also fires, carrying `error` (`model_not_found`, `server_error`), `prompt_id` and `last_assistant_message`. Its record was written 15–27 ms after the in-band `error`, and nothing guarantees that order across the two channels.
+   - So the failure notification must be raised once per failed turn, whichever of `error` and `StopFailure` arrives first. The `error` report alone could carry the notification, since it is earlier and includes the message.
+   - Read in the binary, not captured: auth failures are reported as `blocked kind=auth` instead of `error`.
+
+5. **Confirmed (suspend and external editor).**
+   - Ctrl-Z, the stopped period, `fg`, and Ctrl-G with its editor produce no report at all (case 4). The last report stays in force.
+   - Nothing in the mapping needs to change. The app cannot tell a suspended Claude from one waiting at its prompt.
+   - Ctrl-Z during a turn was not captured; it would presumably leave `working` standing with no reports.
+
+6. **Confirmed (long turns).**
+   - A 135-second turn produced one `working` with `msg` near its start and then 131 s of silence until `done` (case 5).
+   - The plan's statement that the 120-second "status delayed" rule does not apply to this source is required: any timer on `working` would fire falsely on every long tool call.
+
+7. **Refinement (identity, for P3.6 and F5).**
+   - `SessionStart` arrives with `source` set to `startup`, `resume` (first spike), `clear`, `compact` or `fork`.
+   - `compact` keeps the id. `clear` and `fork` bring a new one: a random id for `clear`, the `--session-id` value for `fork`.
+   - The P3.6 handler must accept all five. F5 should add that a fork reports `source: "fork"` with the new id and leaves the source transcript untouched (case 6). `claudeForkAnnouncesNewSessionID` matches what Claude does.
+
+8. **Note (liveness).**
+   - In an already-trusted folder, `SessionStart` can run before Claude even sends the 7501 query (c2b: hook at 0.243 s, query at 0.386 s, `idle` at 0.415 s; c5b the same).
+   - This does not conflict with "first report within 10 s marks the provider alive": every session's first report came within 0.5 s of spawn, or within 0.35 s of accepting the trust dialog.

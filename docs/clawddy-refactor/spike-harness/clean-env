@@ -3,7 +3,7 @@
 # Claude Code session var removed, so global hooks treat it as a non-agent.
 set -e
 UNSET="-u GHOSTTY_AGENT_ID -u GHOSTTY_AGENT_PROVIDER -u GHOSTTY_AGENT_LAUNCH_GENERATION -u GHOSTTY_AGENT_STATUS_DIR -u GHOSTTY_AGENT_NAME -u GHOSTTY_AGENT_DATA_DIR -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT"
-for n in $(env | sed -n 's/^\(GHOSTTY_AGENT_[A-Za-z0-9_]*\)=.*/\1/p; s/^\(CLAUDE[A-Za-z0-9_]*\)=.*/\1/p; s/^\(CODEX_[A-Za-z0-9_]*\)=.*/\1/p'); do
+for n in $(env | sed -n 's/^\(GHOSTTY_AGENT_[A-Za-z0-9_]*\)=.*/\1/p; s/^\(CLAWDDY_[A-Za-z0-9_]*\)=.*/\1/p; s/^\(CLAUDE[A-Za-z0-9_]*\)=.*/\1/p; s/^\(CODEX_[A-Za-z0-9_]*\)=.*/\1/p'); do
   UNSET="$UNSET -u $n"
 done
 exec env $UNSET "$@"

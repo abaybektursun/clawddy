@@ -1,17 +1,19 @@
 #!/bin/sh
 # usage: run.sh EXPDIR STEPS.json OSCMODE(reply|none) [--env K=V ...] -- cmd args...
-# Runs the harness with agent identity stripped. EXPDIR/work is the child's cwd,
+# Runs the harness with agent identity stripped. EXPDIR/work is the child's cwd
+# (WORK_DIR overrides it, so two runs can share one project folder),
 # EXPDIR/cap holds the capture. SPIKE_DIR (required) is the scratch directory
 # that receives pids.log; keep EXPDIR inside it too.
 set -e
 SPIKE=${SPIKE_DIR:?set SPIKE_DIR to a scratch directory}
 BIN=$(cd "$(dirname "$0")" && pwd)
 EXP=$1; STEPS=$2; MODE=$3; shift 3
-mkdir -p "$EXP/work" "$EXP/cap"
+WORK=${WORK_DIR:-$EXP/work}
+mkdir -p "$WORK" "$EXP/cap"
 (cd "$HOME/.config/ghostty-agents/status" && stat -f '%N %z %m' *) > "$EXP/cap/status_before.txt"
 echo "$(date '+%H:%M:%S') start $EXP" >> "$SPIKE/pids.log"
 "$BIN/clean-env" /opt/homebrew/bin/python3 -I "$BIN/harness.py" \
-  --out "$EXP/cap" --cwd "$EXP/work" --steps "$STEPS" --osc7501 "$MODE" "$@" || true
+  --out "$EXP/cap" --cwd "$WORK" --steps "$STEPS" --osc7501 "$MODE" "$@" || true
 PID=$(cat "$EXP/cap/pid")
 echo "$(date '+%H:%M:%S') child pid $PID for $EXP" >> "$SPIKE/pids.log"
 sleep 1

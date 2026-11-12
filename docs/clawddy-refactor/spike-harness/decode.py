@@ -4,8 +4,10 @@
 usage: decode.py DIR [--all-osc] [--text]
   default shows OSC 0/1/2 (titles), 7501, 9, 777, 99, 7, 133, 1337 and steps.
   --text also prints visible text snippets per output chunk.
+  If DIR/hooks.jsonl exists and the log records the spawn wall time, hook
+  records appear as HOOK rows on the same timeline (time the hook ran).
 """
-import base64, json, re, sys
+import base64, json, os, re, sys
 
 d = sys.argv[1]
 show_all = "--all-osc" in sys.argv
@@ -62,6 +64,13 @@ for r in recs:
         v = vis(r["b"])
         if v:
             events.append((r["t"], "TEXT", v[:200]))
+spawn = next((json.loads(r["b"]) for r in recs if r["dir"] == "step" and r["b"].startswith('{"spawn"')), {})
+if "wall" in spawn and os.path.exists(d + "/hooks.jsonl"):
+    for line in open(d + "/hooks.jsonl"):
+        h = json.loads(line)
+        p = h["payload"]
+        fields = " ".join(f"{k}={p[k]}" for k in ("source", "reason", "error", "trigger", "notification_type", "tool_name") if k in p)
+        events.append((round(h["t"] - spawn["wall"], 3), "HOOK", f"{p.get('hook_event_name')} sid={p.get('session_id')} {fields}".rstrip()))
 events.sort(key=lambda e: e[0])
 last_in = None
 for t, kind, s in events:
