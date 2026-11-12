@@ -35,7 +35,8 @@ final class AgentDetailViewController: NSViewController {
     private let bridge: AgentBridge
 
     private var panesByID: [UUID: Pane] = [:]
-    private(set) var activeID: UUID?
+    /// The agent the pane presents: the header's agent.
+    var activeID: UUID? { headerModel.agent?.id }
 
     private var placeholderView: NSView?
     private var headerHosting: NSHostingView<AgentDetailHeaderView>?
@@ -143,8 +144,6 @@ final class AgentDetailViewController: NSViewController {
         }
         headerModel.agent = agent
         headerModel.projectName = projectName
-        headerModel.isActive = true
-        activeID = agent.id
         refreshPresentation()
         installWindowKeyObserversIfNeeded()
     }
@@ -179,7 +178,7 @@ final class AgentDetailViewController: NSViewController {
         let id = agent.id
         // First: detaches the previous container, drops the previous host's
         // logical focus, and resets header state — before the new surface
-        // claims anything. Also sets activeID.
+        // claims anything. Also sets the header's agent, which is activeID.
         if select {
             selectAgent(agent, projectName: projectName)
         }
@@ -318,8 +317,6 @@ final class AgentDetailViewController: NSViewController {
     }
 
     func showPlaceholder() {
-        activeID = nil
-        headerModel.isActive = false
         headerModel.agent = nil
         headerModel.showsAgentDetails = false
         refreshPresentation()
@@ -364,9 +361,9 @@ final class AgentDetailViewController: NSViewController {
 
 @Observable
 class AgentDetailHeaderModel {
+    /// The agent the pane presents, or nil for the placeholder.
     var agent: AgentInstance?
     var projectName: String = ""
-    var isActive: Bool = false
     var hasSurface: Bool = false
     var showsAgentDetails: Bool = false
     var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
@@ -382,7 +379,7 @@ private struct AgentDetailHeaderView: View {
     var body: some View {
         @Bindable var bindableModel = model
         VStack(spacing: 0) {
-            if model.isActive, let agent = model.agent {
+            if let agent = model.agent {
                 HStack(spacing: 8) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(agent.name)

@@ -41,7 +41,6 @@ final class ClawddyController: NSObject {
     private var detailVC: AgentDetailViewController?
     private var searchPanel: AgentSearchPanel?
     private var workspaceObservers: [NSObjectProtocol] = []
-    private var explicitlyViewedAgentID: UUID?
     private var searchHotKeyRef: EventHotKeyRef?
     private var eventHandlerRef: EventHandlerRef?
 
@@ -149,6 +148,9 @@ final class ClawddyController: NSObject {
         bridge.onSurfacePresentationChanged = { [weak self] _ in
             self?.updateViewingState()
         }
+        bridge.isViewed = { [weak self] id in
+            self?.currentlyViewedAgentID() == id
+        }
         config.onReloaded = { [weak self] in
             guard let self else { return }
             self.bridge.reconcileWithConfig(self.config)
@@ -240,8 +242,7 @@ final class ClawddyController: NSObject {
     func presentationOptions(for notification: UNNotification) -> UNNotificationPresentationOptions? {
         guard notification.request.identifier.hasPrefix("clawddy.") else { return nil }
         let rawID = notification.request.content.userInfo["clawddy_agent_id"] as? String
-        let id = rawID.flatMap(UUID.init(uuidString:))
-        if id == bridge.currentlyViewedAgentId, workspaceWindow?.isVisible == true {
+        if let id = rawID.flatMap(UUID.init(uuidString:)), currentlyViewedAgentID() == id {
             return []
         }
         if notification.request.identifier.hasSuffix(".completed") {
@@ -553,10 +554,6 @@ final class ClawddyController: NSObject {
         detailVC: AgentDetailViewController,
         intent: AgentSelectionIntent
     ) {
-        if explicitlyViewedAgentID != id {
-            explicitlyViewedAgentID = nil
-            bridge.setCurrentlyViewedAgent(nil)
-        }
         if intent == .inspect, let task = config.task(forAgent: id) {
             workspaceModel.recordExplicitSelection(
                 agentID: id,
@@ -565,15 +562,14 @@ final class ClawddyController: NSObject {
         }
         detailVC.selectAgent(agent, projectName: project.name)
         if intent == .inspect, detailVC.hasSurface(id: id) {
-            explicitlyViewedAgentID = id
+            workspaceModel.setViewingSelectedAgent(true)
         }
         updateViewingState()
         workspaceWindow?.title = "\(project.name) — \(agent.name)"
     }
 
     private func renderPlaceholder() {
-        explicitlyViewedAgentID = nil
-        bridge.setCurrentlyViewedAgent(nil)
+        workspaceModel.setViewingSelectedAgent(false)
         detailVC?.showPlaceholder()
         workspaceWindow?.title = "Clawddy"
     }
@@ -618,24 +614,12 @@ final class ClawddyController: NSObject {
             preferredID: workspaceModel.preferredAgentID(for: scope))
     }
 
+    /// Viewing can begin when the window becomes key or comes back from
+    /// the Dock. Its end needs no notice: `isViewed` reads the window as it
+    /// is when a completion arrives.
     private func installWorkspaceObservers(for window: NSWindow) {
         let center = NotificationCenter.default
         let reference = ControllerReference(self)
-        for name in [
-            NSWindow.willCloseNotification,
-            NSWindow.didResignKeyNotification,
-            NSWindow.didMiniaturizeNotification,
-        ] {
-            workspaceObservers.append(center.addObserver(
-                forName: name,
-                object: window,
-                queue: .main,
-                using: { [reference] _ in
-                    Task { @MainActor in
-                        reference.value?.bridge.setCurrentlyViewedAgent(nil)
-                    }
-                }))
-        }
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didDeminiaturizeNotification] {
             workspaceObservers.append(center.addObserver(
                 forName: name,
@@ -649,26 +633,27 @@ final class ClawddyController: NSObject {
         }
     }
 
-    /// Reconciles the bridge's viewed agent from the surface the workspace
-    /// actually presents. Activation intent survives asynchronous launch
-    /// preparation in `explicitlyViewedAgentID`, but it only becomes viewing
-    /// once that pane owns a live surface and the window can show it. Called
-    /// after selection, presentation, death, and window key transitions.
-    private func updateViewingState() {
-        guard let window = workspaceWindow, let detailVC else {
-            bridge.setCurrentlyViewedAgent(nil)
-            return
-        }
+    /// The agent whose completions count as seen now: the workspace
+    /// model's viewed agent, checked against the pane and the window as
+    /// they are. Activation intent survives asynchronous launch preparation
+    /// in the model, but it only becomes viewing once the pane presents a
+    /// live surface and the window can show it.
+    private func currentlyViewedAgentID() -> UUID? {
+        guard let window = workspaceWindow, let detailVC else { return nil }
         let presentedID = detailVC.activeID
-        bridge.setCurrentlyViewedAgent(AgentViewingPolicy.viewedAgentID(
-            in: AgentViewingContext(
-                explicitAgentID: explicitlyViewedAgentID,
-                selectedAgentID: workspaceModel.selectedAgentID,
-                presentedAgentID: presentedID,
-                presentedSurfaceIsLive: presentedID.map(detailVC.hasSurface(id:)) ?? false,
-                windowIsVisible: window.isVisible,
-                windowIsKey: window.isKeyWindow,
-                windowIsMiniaturized: window.isMiniaturized)))
+        return workspaceModel.viewedAgent(
+            presentedAgentID: presentedID,
+            presentedSurfaceIsLive: presentedID.map(detailVC.hasSurface(id:)) ?? false,
+            windowIsVisible: window.isVisible,
+            windowIsKey: window.isKeyWindow,
+            windowIsMiniaturized: window.isMiniaturized)
+    }
+
+    /// Acknowledges the agent the user has just begun to view. Called after
+    /// selection, presentation, death, and the window becoming key.
+    private func updateViewingState() {
+        guard let id = currentlyViewedAgentID() else { return }
+        bridge.agentViewed(id)
     }
 
     /// `startFresh` replaces a missing saved session with a new one.
@@ -685,7 +670,7 @@ final class ClawddyController: NSObject {
         // surface is being created and only becomes viewed once the bridge
         // reports the presented surface, so the first start and restarts are
         // focused and acknowledged without a second activation.
-        explicitlyViewedAgentID = id
+        workspaceModel.setViewingSelectedAgent(true)
         if startFresh {
             bridge.startFresh(id: id, host: detailVC, project: project)
         } else {

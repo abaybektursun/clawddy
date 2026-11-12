@@ -52,7 +52,7 @@ struct AgentBridgeActivityTests {
         let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
-        h.bridge.setCurrentlyViewedAgent(id)
+        h.view(id)
 
         try h.hook(id, "UserPromptSubmit")
         try h.hook(id, "Stop")
@@ -75,7 +75,7 @@ struct AgentBridgeActivityTests {
         try h.hook(id, "Stop")
         #expect(Set(try h.persisted("unreadCompletions").keys) == [id])
 
-        h.bridge.setCurrentlyViewedAgent(id)
+        h.view(id)
 
         let agent = try h.agent(id)
         #expect(agent.unreadCompletion == nil)

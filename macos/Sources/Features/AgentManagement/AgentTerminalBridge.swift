@@ -412,11 +412,15 @@ final class AgentBridge {
     var onAggregateStateChanged: ((AggregateState) -> Void)?
     var onSurfaceDeath: ((UUID) -> Void)?
     /// Fires when the set of presented agent surfaces changes, after the
-    /// presentation and after death teardown. The workspace owner owns
-    /// `currentlyViewedAgentId`, so it must reconcile from the surface that
-    /// actually exists rather than from launch intent.
+    /// presentation and after death teardown. The workspace owner decides
+    /// what is viewed, so it must reconcile from the surface that actually
+    /// exists rather than from launch intent.
     var onSurfacePresentationChanged: ((UUID) -> Void)?
-    private(set) var currentlyViewedAgentId: UUID?
+    /// Whether the user is looking at the agent now, answered by the
+    /// workspace owner from its one record of viewing. A completion that
+    /// arrives while its agent is viewed leaves no unread mark, and nothing
+    /// is notified about a viewed agent.
+    var isViewed: (UUID) -> Bool = { _ in false }
 
     /// Files of the data root that could not be read, saved or removed,
     /// each with what went wrong; the workspace shows them with the
@@ -684,7 +688,7 @@ final class AgentBridge {
 
     /// Starts or reveals an agent. This never declares the agent viewed:
     /// viewing requires a presented live surface and a key workspace window,
-    /// which only the workspace owner can reconcile.
+    /// which only the workspace owner can judge.
     func activateAgent(id: UUID, host: any AgentSurfaceHost, project: AgentProject) {
         activate(id: id, host: host, project: project, discardingSession: false)
     }
@@ -968,9 +972,9 @@ final class AgentBridge {
         persistState()
     }
 
-    func setCurrentlyViewedAgent(_ id: UUID?) {
-        currentlyViewedAgentId = id
-        guard let id else { return }
+    /// The workspace owner reports that the user now looks at the agent:
+    /// its completion is acknowledged and its notifications are cleared.
+    func agentViewed(_ id: UUID) {
         acknowledgeCompletion(id: id)
         clearNotifications(for: id)
     }
@@ -1098,7 +1102,7 @@ final class AgentBridge {
                     provider: record.provider,
                     eventID: "\(eventID):\(index)",
                     event: domainEvent,
-                    isViewed: currentlyViewedAgentId == id),
+                    isViewed: isViewed(id)),
                 to: agent)
             applyMetadata(record, domainEvent: domainEvent, provider: record.provider, to: agent)
         }
@@ -1142,7 +1146,7 @@ final class AgentBridge {
         }
         updateCompactingTimer(for: agent)
 
-        if currentlyViewedAgentId != id {
+        if !isViewed(id) {
             if effects.contains(.completed) {
                 postNotification(agentId: id, kind: .finished,
                     title: "Agent completed", body: "\(agent.name) is ready for review")

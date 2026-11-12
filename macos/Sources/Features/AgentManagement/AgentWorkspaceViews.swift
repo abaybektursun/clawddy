@@ -56,6 +56,11 @@ final class AgentWorkspaceModel {
     private(set) var selection: AgentWorkspaceSelectionState
     var scope: Scope { selection.scope }
     var selectedAgentID: UUID? { selection.agentID }
+    /// The agent the user is looking at: the selected agent once they
+    /// inspect it with its terminal open, or start it, until the selection
+    /// moves to another agent. This is the one record of viewing; whether a
+    /// completion counts as seen also takes what `viewedAgent` checks.
+    private(set) var viewedAgentID: UUID?
     var searchQuery = ""
     private var preferredAgents: [String: UUID] = [:]
     private var collapsedProjectIDs: Set<UUID> = []
@@ -100,6 +105,7 @@ final class AgentWorkspaceModel {
         let transition = AgentWorkspaceSelectionReducer.reduce(selection, action: action)
         if transition.state != selection {
             selection = transition.state
+            if viewedAgentID != selection.agentID { viewedAgentID = nil }
             if case .task(let projectID, _) = selection.scope,
                collapsedProjectIDs.remove(projectID) != nil {
                 persistCollapsedProjects()
@@ -110,6 +116,34 @@ final class AgentWorkspaceModel {
                 forKey: DefaultsKey.selectedAgentID)
         }
         return transition.effect
+    }
+
+    /// Whether the user is looking at the selected agent.
+    func setViewingSelectedAgent(_ viewing: Bool) {
+        let viewed = viewing ? selectedAgentID : nil
+        if viewedAgentID != viewed { viewedAgentID = viewed }
+    }
+
+    /// The agent whose completions count as seen now, by
+    /// `AgentViewingPolicy`: the viewed agent, while it is the agent the
+    /// detail pane presents, its terminal is live, and the workspace window
+    /// is visible, key and not minimized. The caller reads the pane and the
+    /// window as they are now.
+    func viewedAgent(
+        presentedAgentID: UUID?,
+        presentedSurfaceIsLive: Bool,
+        windowIsVisible: Bool,
+        windowIsKey: Bool,
+        windowIsMiniaturized: Bool
+    ) -> UUID? {
+        AgentViewingPolicy.viewedAgentID(in: AgentViewingContext(
+            explicitAgentID: viewedAgentID,
+            selectedAgentID: selectedAgentID,
+            presentedAgentID: presentedAgentID,
+            presentedSurfaceIsLive: presentedSurfaceIsLive,
+            windowIsVisible: windowIsVisible,
+            windowIsKey: windowIsKey,
+            windowIsMiniaturized: windowIsMiniaturized))
     }
 
     func recordExplicitSelection(

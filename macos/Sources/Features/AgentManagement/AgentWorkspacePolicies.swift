@@ -115,11 +115,12 @@ enum AgentLaunchPresentationPolicy {
 /// a completion cannot be silently acknowledged behind a placeholder, another
 /// agent, a minimized window, or an inactive application.
 struct AgentViewingContext: Equatable, Sendable {
-    /// The user explicitly activated or inspected this agent.
+    /// The user explicitly activated or inspected this agent: the
+    /// workspace model's `viewedAgentID`.
     var explicitAgentID: UUID?
     /// The committed workspace selection.
     var selectedAgentID: UUID?
-    /// The pane the detail controller currently displays (`activeID`).
+    /// The agent the detail pane currently displays.
     var presentedAgentID: UUID?
     /// That pane owns a live surface; placeholder presentation owns none.
     var presentedSurfaceIsLive: Bool

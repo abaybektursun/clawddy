@@ -289,6 +289,12 @@ final class AgentBridgeHarness {
     let providers: FakeProviders
     private(set) var config: AgentConfig
     private(set) var bridge: AgentBridge
+    /// The workspace's selection and its one record of viewing, as
+    /// `ClawddyController` keeps them.
+    private(set) var workspace = AgentWorkspaceModel(defaults: nil)
+    /// Whether the workspace window is key. It is visible and not
+    /// minimized throughout, and its pane presents the selected agent.
+    private(set) var windowIsKey = true
     private(set) var aggregateChanges: [AggregateState] = []
     private(set) var surfaceDeaths: [UUID] = []
     private(set) var presentationChanges: [UUID] = []
@@ -357,6 +363,7 @@ final class AgentBridgeHarness {
         try betweenRuns()
         config = AgentConfig(root: root)
         host = FakeSurfaceHost()
+        workspace = AgentWorkspaceModel(defaults: nil)
         aggregateChanges = []
         surfaceDeaths = []
         presentationChanges = []
@@ -391,10 +398,30 @@ final class AgentBridgeHarness {
             self?.host.removeSurface(id: id)
         }
         bridge.onSurfacePresentationChanged = { [weak self] in self?.presentationChanges.append($0) }
+        bridge.isViewed = { [weak self] id in self?.viewedAgent() == id }
         config.onReloaded = { [weak self] in
             guard let self else { return }
             self.bridge.reconcileWithConfig(self.config)
+            self.workspace.reconcile(with: self.config)
         }
+    }
+
+    /// The agent whose completions count as seen, read as the controller
+    /// reads it.
+    private func viewedAgent() -> UUID? {
+        let presented = workspace.selectedAgentID
+        return workspace.viewedAgent(
+            presentedAgentID: presented,
+            presentedSurfaceIsLive: presented.map(host.hasSurface(id:)) ?? false,
+            windowIsVisible: true,
+            windowIsKey: windowIsKey,
+            windowIsMiniaturized: false)
+    }
+
+    /// Acknowledges what the user has just begun to view, as the controller
+    /// does after a selection or the window becoming key.
+    private func updateViewing() {
+        if let id = viewedAgent() { bridge.agentViewed(id) }
     }
 
     // MARK: Driving
@@ -410,6 +437,22 @@ final class AgentBridgeHarness {
     func activate(_ id: UUID, host: (any AgentSurfaceHost)? = nil) throws {
         let project = try #require(config.project(forAgent: id))
         bridge.activateAgent(id: id, host: host ?? self.host, project: project)
+    }
+
+    /// The user clicks the agent in the list, as `ClawddyController`
+    /// handles it: the agent is selected, and viewed once its terminal is
+    /// open.
+    func view(_ id: UUID) {
+        workspace.apply(.userSelectedAgent(id))
+        if host.hasSurface(id: id) { workspace.setViewingSelectedAgent(true) }
+        updateViewing()
+    }
+
+    /// The workspace window becomes key, or stops being key, as when the
+    /// user switches to another app and back.
+    func setWindowKey(_ key: Bool) {
+        windowIsKey = key
+        if key { updateViewing() }
     }
 
     /// Activates the agent and applies its `SessionStart`.
