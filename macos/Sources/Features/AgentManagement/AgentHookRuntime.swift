@@ -89,6 +89,7 @@ enum AgentHookRuntime {
         EVENT=$(sanitize "$(extract hook_event_name)")
         MODEL=$(sanitize "$(extract model)")
         PERMISSION=$(sanitize "$(extract permission_mode)")
+        TRIGGER=$(sanitize "$(extract trigger)")
         EVENT_ID=$(sanitize "$(/usr/bin/uuidgen 2>/dev/null)")
         PROVIDER=$(sanitize "$PROVIDER")
         GENERATION=$(sanitize "$GENERATION")
@@ -104,8 +105,8 @@ enum AgentHookRuntime {
         EVENTS="$DIR/$ID.events"
         LOCK="$DIR/$ID.events.lock"
         EVENT_LINE=$(printf \
-          '{"schemaVersion":1,"eventID":"%s","provider":"%s","launchGeneration":"%s","hookEventName":"%s","sessionID":"%s","turnID":"%s","model":"%s","permissionMode":"%s"}' \
-          "$EVENT_ID" "$PROVIDER" "$GENERATION" "$EVENT" "$SID" "$TURN" "$MODEL" "$PERMISSION")
+          '{"schemaVersion":1,"eventID":"%s","provider":"%s","launchGeneration":"%s","hookEventName":"%s","sessionID":"%s","turnID":"%s","model":"%s","permissionMode":"%s","trigger":"%s"}' \
+          "$EVENT_ID" "$PROVIDER" "$GENERATION" "$EVENT" "$SID" "$TURN" "$MODEL" "$PERMISSION" "$TRIGGER")
         export EVENTS EVENT_LINE
         /usr/bin/lockf -s -k "$LOCK" /bin/sh -c \
           'printf "%s\n" "$EVENT_LINE" >> "$EVENTS"' 2>/dev/null \

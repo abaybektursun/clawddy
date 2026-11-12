@@ -5,23 +5,22 @@ struct ClaudeCodeProvider: Sendable {
     let root: AgentDataRoot
 
     /// Claude's event table: each hook event it subscribes to, and what it
-    /// means. Claude never runs `Stop` for an interrupted turn.
+    /// means. Claude reports its turn activity and liveness in its terminal
+    /// (OSC 7501), so no hook here starts, continues or completes a turn.
     static let hookEvents: [String: AgentProviderEntry.Meaning] = [
-        "SessionStart": { [.sessionStarted(sessionID: $0.sessionID, model: $0.model, permissionMode: $0.permissionMode)] },
-        "UserPromptSubmit": { [.turnStarted(turnID: $0.turnID)] },
-        "PreToolUse": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.executing)] },
-        "SubagentStart": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.executing)] },
-        "PostToolUse": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)] },
-        // One tool call failed inside the turn, and Claude goes on with the
-        // same turn: activity, not a failed turn, which only `StopFailure`
-        // reports. Ending the turn here would drop the rest of its events.
-        "PostToolUseFailure": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)] },
-        "SubagentStop": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)] },
-        "PermissionRequest": { _ in [.turnInteractionChanged(.permission)] },
-        "Stop": { [.turnCompleted(turnID: $0.turnID)] },
+        // Every source (startup, resume, clear, compact, fork) names the
+        // session the next launch resumes.
+        "SessionStart": { [.sessionBound(sessionID: $0.sessionID)] },
+        // Claude's own `error` report usually comes first; the turn fails once.
         "StopFailure": { _ in [.turnFailed(nil)] },
-        "PreCompact": { _ in [.turnActivityChanged(.compacting)] },
-        "PostCompact": { _ in [.turnActivityChanged(.reasoning)] },
+        // A manual compaction is reported as a long `working` ending in a
+        // `done` that must complete nothing. An automatic one runs inside a
+        // real turn, whose completion stands.
+        "PreCompact": {
+            $0.trigger == "manual" ? [.manualCompactionStarted] : [.turnActivityChanged(.compacting)]
+        },
+        // Can arrive after the compaction's `done`; then it changes nothing.
+        "PostCompact": { _ in [.turnActivityChanged(.executing)] },
         // Not an exit: `/clear` ends a session in a running process. A
         // resume that ends its session before starting it found no such
         // session, which nothing else tells apart.
@@ -35,7 +34,7 @@ struct ClaudeCodeProvider: Sendable {
     /// Claude's entry in the provider table.
     var entry: AgentProviderEntry {
         AgentProviderEntry(
-            turnActivity: .hookJournal,
+            turnActivity: .surface,
             hookEvents: Self.hookEvents,
             recordsExit: true,
             prepareIntegration: { prepareIntegration() },

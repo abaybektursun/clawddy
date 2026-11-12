@@ -16,8 +16,8 @@ struct AgentBridgeStatusSeamTests {
     @Test func ingestDrivesSameTransitionsFromEitherSource() async throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let fromFile = try h.addAgent("From File")
-        let direct = try h.addAgent("Direct")
+        let fromFile = try h.addAgent("From File", provider: .codex)
+        let direct = try h.addAgent("Direct", provider: .codex)
         h.start()
         try h.activate(fromFile)
         try h.activate(direct)
@@ -32,9 +32,9 @@ struct AgentBridgeStatusSeamTests {
         }
 
         for event in ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop"] {
-            try h.append(fromFile, h.record(event, generation: try h.generation(fromFile), eventID: event))
+            try h.append(fromFile, h.record(event, generation: try h.generation(fromFile), provider: .codex, eventID: event))
             h.poll()
-            let line = h.record(event, generation: try h.generation(direct), eventID: event)
+            let line = h.record(event, generation: try h.generation(direct), provider: .codex, eventID: event)
             h.bridge.ingest(AgentStatusObservation(
                 agentID: direct,
                 generation: try h.generation(direct),
@@ -64,19 +64,20 @@ struct AgentBridgeStatusSeamTests {
 
     /// A hook record reaches the agent's state only when its provider's table
     /// allows that event from the event file. Codex subscribes to neither
-    /// `StopFailure` nor `SessionEnd`, and Claude not to `Notification`:
-    /// those records change nothing and say why, where the same
-    /// `StopFailure` fails a Claude turn.
+    /// `StopFailure` nor `SessionEnd`, and Claude, whose terminal reports its
+    /// turns, not to `Notification`, `UserPromptSubmit` or `Stop`: those
+    /// records change nothing and say why, where the same `StopFailure`
+    /// fails a Claude turn.
     @Test func ingestDropsEventItsProviderTableDoesNotAllow() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let claude = try h.addAgent("Claude")
         let codex = try h.addAgent("Codex", provider: .codex)
         h.start()
-        for id in [claude, codex] {
-            try h.launch(id)
-            try h.hook(id, "UserPromptSubmit")
-        }
+        try h.launch(claude)
+        try h.startTurn(claude)
+        try h.launch(codex)
+        try h.hook(codex, "UserPromptSubmit")
         func ingest(_ id: UUID, _ event: String) throws {
             let generation = try h.generation(id)
             let line = h.record(event, generation: generation, provider: try h.agent(id).provider)
@@ -91,10 +92,12 @@ struct AgentBridgeStatusSeamTests {
             try ingest(codex, event)
             #expect(h.diagnostics.messages.last == "ignored \(event) for \(codex): not in the Codex table")
         }
-        try ingest(claude, "Notification")
-        #expect(h.diagnostics.messages.last == "ignored Notification for \(claude): not in the Claude Code table")
+        for event in ["Notification", "UserPromptSubmit", "Stop"] {
+            try ingest(claude, event)
+            #expect(h.diagnostics.messages.last == "ignored \(event) for \(claude): not in the Claude Code table")
+        }
         #expect(try h.agent(codex).displayState == .thinking)
-        #expect(try h.agent(claude).displayState == .thinking)
+        #expect(try h.agent(claude).displayState == .working)
         #expect(h.notifier.posted.isEmpty)
 
         try ingest(claude, "StopFailure")

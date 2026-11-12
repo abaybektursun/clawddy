@@ -322,36 +322,31 @@ struct AgentProviderTests {
 
     @Test func eventTablesMapProviderSpecificHooksToSharedEvents() throws {
         #expect(try meaning(CodexProvider.hookEvents, "PermissionRequest") == [.turnInteractionChanged(.permission)])
-        #expect(try meaning(ClaudeCodeProvider.hookEvents, "PermissionRequest")
-            == [.turnInteractionChanged(.permission)])
-
         #expect(try meaning(CodexProvider.hookEvents, "PostToolUseFailure") == nil)
-        #expect(try meaning(ClaudeCodeProvider.hookEvents, "PostToolUseFailure") == [
-            .turnInteractionChanged(.none),
-            .turnActivityChanged(.reasoning),
-        ])
-
         #expect(try meaning(CodexProvider.hookEvents, "SubagentStop") == [
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])
-        #expect(try meaning(ClaudeCodeProvider.hookEvents, "SubagentStop") == [
-            .turnInteractionChanged(.none),
-            .turnActivityChanged(.reasoning),
-        ])
+        #expect(try meaning(CodexProvider.hookEvents, "SessionStart")
+            == [.sessionStarted(sessionID: nil, model: nil, permissionMode: nil)])
     }
 
-    @Test func claudeToolFailureDoesNotNormalizeToTurnFailureButStopFailureDoes() throws {
-        let normalizedFailure = try #require(try meaning(ClaudeCodeProvider.hookEvents, "PostToolUseFailure"))
-        #expect(!normalizedFailure.contains(.turnFailed(nil)))
-        #expect(!normalizedFailure.contains(.turnCompleted(turnID: nil)))
-        #expect(normalizedFailure == [
-            .turnInteractionChanged(.none),
-            .turnActivityChanged(.reasoning),
-        ])
-
+    /// Claude's terminal reports its turns (P3.5): no hook of Claude's starts,
+    /// continues or completes one. `SessionStart` only binds the session,
+    /// `StopFailure` fails the turn, and `PreCompact` tells a manual
+    /// compaction from an automatic one by its trigger.
+    @Test func claudeHooksCarryNoTurnActivity() throws {
+        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
+                      "SubagentStart", "SubagentStop", "PermissionRequest", "Stop"] {
+            #expect(try meaning(ClaudeCodeProvider.hookEvents, event) == nil, "\(event)")
+        }
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "SessionStart") == [.sessionBound(sessionID: nil)])
         #expect(try meaning(ClaudeCodeProvider.hookEvents, "StopFailure") == [.turnFailed(nil)])
-        #expect(try meaning(ClaudeCodeProvider.hookEvents, "Stop") == [.turnCompleted(turnID: nil)])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "PreCompact", trigger: "manual")
+            == [.manualCompactionStarted])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "PreCompact", trigger: "auto")
+            == [.turnActivityChanged(.compacting)])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "PostCompact") == [.turnActivityChanged(.executing)])
     }
 
     @Test func unreportableCodexTelemetrySaysWhy() {
@@ -455,14 +450,15 @@ struct AgentProviderTests {
 
     /// What the event table says a record of the hook event `name` means, or
     /// nil when the table has no such event. The record carries only the
-    /// hook name and the keys every record has.
+    /// hook name, the trigger, and the keys every record has.
     private func meaning(
         _ table: [String: AgentProviderEntry.Meaning],
-        _ name: String
+        _ name: String,
+        trigger: String = ""
     ) throws -> [AgentDomainEvent]? {
         let record = try JSONDecoder().decode(
             AgentRawProviderEvent.self,
-            from: Data("{\"provider\":\"claudeCode\",\"launchGeneration\":\"\(UUID().uuidString)\",\"hookEventName\":\"\(name)\"}".utf8))
+            from: Data("{\"provider\":\"claudeCode\",\"launchGeneration\":\"\(UUID().uuidString)\",\"hookEventName\":\"\(name)\",\"trigger\":\"\(trigger)\"}".utf8))
         return table[name]?(record)
     }
 }

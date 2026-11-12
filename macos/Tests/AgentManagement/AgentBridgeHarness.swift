@@ -106,9 +106,11 @@ final class InlineIO: AgentIOExecutor, @unchecked Sendable {
 final class RecordingNotifier: AgentNotifier {
     private(set) var posted: [UNNotificationRequest] = []
     private(set) var removed: [[String]] = []
+    private(set) var announced: [String] = []
 
     func post(_ request: UNNotificationRequest) { posted.append(request) }
     func removeNotifications(withIdentifiers identifiers: [String]) { removed.append(identifiers) }
+    func announce(_ message: String) { announced.append(message) }
 }
 
 /// Every message the bridge reported, in order. The sink may be called from
@@ -458,9 +460,14 @@ final class AgentBridgeHarness {
         if key { updateViewing() }
     }
 
-    /// Activates the agent and applies its `SessionStart`.
+    /// Activates the agent and brings it up as its provider does: Claude
+    /// reports `idle` in its terminal once ready, and its `SessionStart`
+    /// hook binds the session; Codex's `SessionStart` hook does both.
     func launch(_ id: UUID, session: String = "session-1") throws {
         try activate(id)
+        if try agent(id).provider == .claudeCode {
+            try osc(id, "state=idle:app=claude-code")
+        }
         try hook(id, "SessionStart", session: session)
     }
 
@@ -472,9 +479,10 @@ final class AgentBridgeHarness {
         provider: AgentProviderID = .claudeCode,
         session: String = "session-1",
         turn: String = "",
+        trigger: String = "",
         eventID: String = UUID().uuidString
     ) -> String {
-        #"{"schemaVersion":1,"eventID":"\#(eventID)","provider":"\#(provider.rawValue)","launchGeneration":"\#(generation.uuidString)","hookEventName":"\#(event)","sessionID":"\#(session)","turnID":"\#(turn)","model":"","permissionMode":""}"#
+        #"{"schemaVersion":1,"eventID":"\#(eventID)","provider":"\#(provider.rawValue)","launchGeneration":"\#(generation.uuidString)","hookEventName":"\#(event)","sessionID":"\#(session)","turnID":"\#(turn)","model":"","permissionMode":"","trigger":"\#(trigger)"}"#
     }
 
     /// Appends `text` to the agent's event file as it is.
@@ -500,6 +508,7 @@ final class AgentBridgeHarness {
         _ event: String,
         session: String = "session-1",
         turn: String = "",
+        trigger: String = "",
         eventID: String = UUID().uuidString
     ) throws {
         let provider = try agent(id).provider
@@ -510,8 +519,60 @@ final class AgentBridgeHarness {
             provider: provider,
             session: session,
             turn: turn,
+            trigger: trigger,
             eventID: eventID))
         poll()
+    }
+
+    /// One OSC 7501 report, given as the body `cli-facts.md` captures
+    /// (`state=done:app=claude-code:msg=<base64>`), posted by the agent's
+    /// terminal as Ghostty delivers it.
+    func osc(_ id: UUID, _ body: String) throws {
+        let surface = try #require(host.surfaces[id])
+        NotificationCenter.default.post(
+            name: .ghosttyDidReceiveProgramStatus,
+            object: surface,
+            userInfo: [Notification.Name.ProgramStatusKey: try programStatus(body)])
+    }
+
+    /// Claude starts a turn: `working`, standing for the turn-start delay.
+    func startTurn(_ id: UUID) throws {
+        try osc(id, "state=working:app=claude-code")
+        scheduler.advance(by: AgentBridge.turnStartDelay)
+    }
+
+    /// Claude starts a turn and completes it with a bare `done`.
+    func completeTurn(_ id: UUID) throws {
+        try startTurn(id)
+        try osc(id, "state=done:app=claude-code")
+    }
+
+    // MARK: Captured timelines
+
+    /// Zero of a captured timeline, the spawn; `spawn()` sets it to now.
+    private var spawnTime: Date?
+
+    func spawn() { spawnTime = scheduler.now }
+
+    /// Moves the clock forward to `seconds` after the spawn, running every
+    /// timer that falls due on the way.
+    func at(_ seconds: TimeInterval) throws {
+        let delta = try #require(spawnTime).addingTimeInterval(seconds).timeIntervalSince(scheduler.now)
+        try #require(delta >= -0.000_001, "the timeline runs forward")
+        scheduler.advance(by: max(delta, 0))
+    }
+
+    /// The report at `seconds` on the timeline.
+    func osc(_ id: UUID, at seconds: TimeInterval, _ body: String) throws {
+        try at(seconds)
+        try osc(id, body)
+    }
+
+    /// The hook record that reaches the bridge at `seconds` on the timeline:
+    /// its capture time plus the event file's delay.
+    func hook(_ id: UUID, at seconds: TimeInterval, _ event: String, session: String = "session-1", trigger: String = "") throws {
+        try at(seconds)
+        try hook(id, event, session: session, trigger: trigger)
     }
 
     /// Appends the record the launch script writes when the provider exits,
@@ -587,6 +648,36 @@ final class AgentBridgeHarness {
     func binding(_ id: UUID) throws -> AgentSessionBinding {
         try JSONDecoder().decode(AgentSessionBinding.self, from: Data(contentsOf: statusFile(id, "session.json")))
     }
+}
+
+/// The report Ghostty delivers for one OSC 7501 body as `cli-facts.md`
+/// captures it: `key=value` pairs joined by `:`, with `msg` and `title` in
+/// base64. In the app the terminal core decodes it.
+func programStatus(_ body: String) throws -> Ghostty.Action.ProgramStatus {
+    var fields: [Substring: Substring] = [:]
+    for pair in body.split(separator: ":") {
+        let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+        fields[parts[0]] = parts.count == 2 ? parts[1] : ""
+    }
+    func text(_ key: Substring) throws -> String? {
+        guard let value = fields[key] else { return nil }
+        return try #require(String(data: try #require(Data(base64Encoded: String(value))), encoding: .utf8))
+    }
+    let states: [Substring: Ghostty.Action.ProgramStatus.State] = [
+        "idle": .idle, "working": .working, "done": .done,
+        "blocked": .blocked, "error": .error, "clear": .clear,
+    ]
+    let kinds: [Substring: Ghostty.Action.ProgramStatus.Kind] = [
+        "permission": .permission, "question": .question, "auth": .auth,
+    ]
+    return Ghostty.Action.ProgramStatus(
+        state: try #require(fields["state"].flatMap { states[$0] }),
+        kind: try fields["kind"].map { try #require(kinds[$0]) },
+        progress: nil,
+        id: fields["id"].map(String.init),
+        app: fields["app"].map(String.init),
+        title: try text("title"),
+        message: try text("msg"))
 }
 
 /// Yields to the main actor until `condition` holds, at most `limit` times.

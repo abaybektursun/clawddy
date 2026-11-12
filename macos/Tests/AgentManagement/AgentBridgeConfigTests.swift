@@ -104,8 +104,7 @@ struct AgentBridgeConfigTests {
         let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
+        try h.completeTurn(id)
         let unread = try #require(try h.agent(id).unreadCompletion)
 
         try h.restart()

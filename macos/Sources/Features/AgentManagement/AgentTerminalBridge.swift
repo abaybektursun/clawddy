@@ -129,7 +129,9 @@ final class AgentInstance: Identifiable {
     private(set) var runtime: AgentRuntimeSnapshot
     var metadata: AgentSessionMetadata?
     var metadataAvailability: AgentMetadataAvailability = .notStarted
-    @ObservationIgnored var lastHookTime: Date?
+    /// When the source of the agent's turn activity (its provider table's
+    /// `turnActivity`) last reported in this launch; nil until it first does.
+    @ObservationIgnored var lastActivityReport: Date?
     /// Monotonic presentation evidence used only when the user deliberately
     /// asks the workspace to choose among equally urgent agents. It never
     /// changes list order or steals focus as runtime state evolves.
@@ -443,6 +445,7 @@ final class AgentBridge {
     @ObservationIgnored private(set) var journal: AgentHookJournalSource?
     private var healthRefreshGenerations: [AgentProviderID: UUID] = [:]
     private var compactingTimers: [UUID: any AgentTimer] = [:]
+    private var turnStartTimers: [UUID: any AgentTimer] = [:]
     private var telemetryDelayTimers: [UUID: any AgentTimer] = [:]
     private var launchScripts: [UUID: URL] = [:]
     let root: AgentDataRoot
@@ -464,14 +467,16 @@ final class AgentBridge {
     private static let compactingTimeout: TimeInterval = 30
     /// An active turn with no provider fact for this long shows as delayed.
     private static let telemetryDelay: TimeInterval = 120
+    /// How long a `working` report with no turn under way must stand before
+    /// the turn starts. The `working` blips of `/clear`, `/exit` and the
+    /// `/exit` confirmation end within 14 to 63 ms; a turn's failure can come
+    /// 106 ms after its `working`, and starts the turn at once.
+    static let turnStartDelay: TimeInterval = 0.25
 
     /// The host of the last activation. The surfaces are its own; the bridge
     /// keeps only this weak reference, to present launches that finish
     /// preparing and to have closes confirmed.
     @ObservationIgnored private weak var surfaceHost: (any AgentSurfaceHost)?
-    /// The last program-status report from each agent's current launch.
-    /// Nothing derives agent state from it yet.
-    @ObservationIgnored private(set) var lastProgramStatus: [UUID: Ghostty.Action.ProgramStatus] = [:]
     private var launchTimers: [UUID: any AgentTimer] = [:]
 
     private var statusDir: URL { root.statusDir }
@@ -739,7 +744,7 @@ final class AgentBridge {
                     interaction: .authentication),
                 to: agent)
         }
-        agent.lastHookTime = nil
+        agent.lastActivityReport = nil
         host.selectAgent(agent, projectName: project.name)
         scheduleLaunchTimeout(agentID: id, generation: generation)
 
@@ -785,13 +790,16 @@ final class AgentBridge {
         }
     }
 
+    /// A launch whose source of turn activity has not reported within 10 s
+    /// shows that its status is unavailable, as while Claude waits at its
+    /// folder trust dialog, before which it reports nothing.
     private func scheduleLaunchTimeout(agentID: UUID, generation: UUID) {
         launchTimers[agentID]?.invalidate()
         launchTimers[agentID] = scheduler.timer(interval: 10, repeats: false) { [weak self] in
             guard let self, let agent = self.agents[agentID],
                   agent.processState == .launching,
                   agent.launchGeneration == generation,
-                  agent.lastHookTime == nil
+                  agent.lastActivityReport == nil
             else { return }
             self.apply(.launchTimedOut(generation: generation), to: agent)
             self.launchTimers.removeValue(forKey: agentID)
@@ -1038,8 +1046,9 @@ final class AgentBridge {
     /// The one way an observation about an agent reaches its state: the
     /// records its hooks append to its event file, and its terminal's close
     /// and program-status reports. An observation from another launch, about
-    /// an agent that is gone, or a record the provider's table does not allow
-    /// in the event file, changes nothing.
+    /// an agent that is gone, a record the provider's table does not allow
+    /// in the event file, or a program-status report from a provider whose
+    /// table names its hooks as the source of turn activity, changes nothing.
     func ingest(_ observation: AgentStatusObservation) {
         guard !isTerminating else { return }
         let id = observation.agentID
@@ -1060,13 +1069,39 @@ final class AgentBridge {
         case .surfaceClosed(let processAlive):
             closeSurface(of: agent, generation: generation, processAlive: processAlive)
         case .programStatus(let report):
-            // Recorded only; nothing derives agent state from it yet.
-            lastProgramStatus[id] = report
-            let kind = report.kind.map { String(describing: $0) } ?? "-"
-            diagnose(
-                .debug,
-                "program status \(id) generation \(generation): \(report.state) kind=\(kind) id=\(report.id ?? "-")")
+            ingestProgramStatus(report, agent: agent, generation: generation)
         }
+    }
+
+    /// One report a program made in the agent's terminal. It arrives inside
+    /// the app tick: nothing here frees a surface.
+    private func ingestProgramStatus(
+        _ report: Ghostty.Action.ProgramStatus,
+        agent: AgentInstance,
+        generation: UUID
+    ) {
+        let id = agent.id
+        guard providers[agent.provider].turnActivity == .surface else {
+            // Codex reports too, but its turn activity comes from its hooks.
+            diagnose(.debug, "ignored program status for \(id): the \(agent.provider.displayName) table names its hooks")
+            return
+        }
+        // Only the program's own record counts. A record beneath it never
+        // changes the agent's state, and the launch script's `clawddy`
+        // record is P3.7's.
+        guard report.id == nil else { return }
+        let kind = report.kind.map { String(describing: $0) } ?? "-"
+        diagnose(.debug, "program status \(id) generation \(generation): \(report.state) kind=\(kind)")
+        agent.lastActivityReport = scheduler.now
+        let effects = apply(
+            .provider(
+                generation: generation,
+                provider: agent.provider,
+                eventID: UUID().uuidString,
+                event: .programStatus(report),
+                isViewed: isViewed(id)),
+            to: agent)
+        perform(effects, of: agent)
     }
 
     private func ingestHook(
@@ -1109,7 +1144,9 @@ final class AgentBridge {
                 to: agent)
             applyMetadata(record, domainEvent: domainEvent, provider: record.provider, to: agent)
         }
-        agent.lastHookTime = scheduler.now
+        if entry.turnActivity == .hookJournal {
+            agent.lastActivityReport = scheduler.now
+        }
         perform(effects, of: agent)
         if entry.turnActivity == .hookJournal {
             scheduleTelemetryDelay(for: agent)
@@ -1150,20 +1187,16 @@ final class AgentBridge {
             removeLaunchScript(for: id)
         }
         updateCompactingTimer(for: agent)
+        updateTurnStartTimer(for: agent)
 
-        if !isViewed(id) {
-            if effects.contains(.completed) {
-                postNotification(agentId: id, kind: .finished,
-                    title: "Agent completed", body: "\(agent.name) is ready for review")
-            }
-            if effects.contains(.waitingForUser) {
-                postNotification(agentId: id, kind: .permission,
-                    title: "Agent is waiting for you", body: "\(agent.name) needs your response")
-            }
-            if effects.contains(.failed) {
-                postNotification(agentId: id, kind: .error,
-                    title: "Agent needs attention", body: "\(agent.name) encountered an error")
-            }
+        if effects.contains(.completed) {
+            alert(agent, .finished, title: "Agent completed", body: "\(agent.name) is ready for review")
+        }
+        if effects.contains(.waitingForUser) {
+            alert(agent, .permission, title: "Agent is waiting for you", body: "\(agent.name) needs your response")
+        }
+        if effects.contains(.failed) {
+            alert(agent, .error, title: "Agent needs attention", body: "\(agent.name) encountered an error")
         }
 
         if effects.contains(.unreadChanged) {
@@ -1210,9 +1243,13 @@ final class AgentBridge {
         // of the current launch, whatever its source (startup, resume,
         // clear, compact, fork), names the session the next launch resumes.
         // After `/clear` that is the new session, not the one launched.
-        if case .sessionStarted(let sessionID, _, _) = domainEvent,
-           let sessionID,
-           let generation = agent.launchGeneration {
+        let sessionID: String?
+        switch domainEvent {
+        case .sessionStarted(let started, _, _): sessionID = started
+        case .sessionBound(let bound): sessionID = bound
+        default: sessionID = nil
+        }
+        if let sessionID, let generation = agent.launchGeneration {
             let binding = AgentSessionBinding(
                 provider: provider,
                 sessionID: sessionID,
@@ -1261,10 +1298,14 @@ final class AgentBridge {
         agent.apply(event, at: scheduler.now)
     }
 
+    /// A compaction the event file reports ends after 30 s at most, since its
+    /// `PostCompact` may never come. A program that reports its own activity
+    /// ends it with its next report.
     private func updateCompactingTimer(for agent: AgentInstance) {
         compactingTimers[agent.id]?.invalidate()
         compactingTimers.removeValue(forKey: agent.id)
         guard agent.activityState == .compacting,
+              providers[agent.provider].turnActivity == .hookJournal,
               let generation = agent.launchGeneration
         else { return }
 
@@ -1280,6 +1321,28 @@ final class AgentBridge {
             self.compactingTimers.removeValue(forKey: agent.id)
             self.updateAggregate()
             self.persistState()
+        }
+    }
+
+    /// While a `working` report may still prove a blip, its turn waits; it
+    /// starts when the report has stood for `turnStartDelay`, counted from
+    /// the first `working`. Waiting this way, rather than starting the turn
+    /// and undoing it, leaves the screen, the unread mark and the
+    /// notifications untouched by a blip.
+    private func updateTurnStartTimer(for agent: AgentInstance) {
+        let id = agent.id
+        guard agent.turnState == .starting, let generation = agent.launchGeneration else {
+            turnStartTimers.removeValue(forKey: id)?.invalidate()
+            return
+        }
+        guard turnStartTimers[id] == nil else { return }
+        turnStartTimers[id] = scheduler.timer(
+            interval: Self.turnStartDelay,
+            repeats: false
+        ) { [weak self, weak agent] in
+            guard let self, let agent else { return }
+            self.turnStartTimers.removeValue(forKey: id)
+            self.perform(self.apply(.turnStartSettled(generation: generation), to: agent), of: agent)
         }
     }
 
@@ -1353,7 +1416,6 @@ final class AgentBridge {
         host: any AgentSurfaceHost,
         provider: AgentProviderID
     ) {
-        lastProgramStatus.removeValue(forKey: id)
         invalidateTimers(for: id)
         removeLaunchScript(for: id)
         removeProviderFiles(of: id, provider: provider)
@@ -1375,11 +1437,11 @@ final class AgentBridge {
     private func invalidateTimers(for id: UUID) {
         launchTimers.removeValue(forKey: id)?.invalidate()
         compactingTimers.removeValue(forKey: id)?.invalidate()
+        turnStartTimers.removeValue(forKey: id)?.invalidate()
         telemetryDelayTimers.removeValue(forKey: id)?.invalidate()
     }
 
     private func destroySurface(id: UUID) {
-        lastProgramStatus.removeValue(forKey: id)
         invalidateTimers(for: id)
         removeLaunchScript(for: id)
         if let provider = agents[id]?.provider {
@@ -1407,6 +1469,16 @@ final class AgentBridge {
             case .error: return "error"
             }
         }
+    }
+
+    /// Announces a completion, a wait or a failure to VoiceOver, and, while
+    /// the agent is not viewed, posts it as a user notification. The
+    /// announcement is made for a viewed agent too, whose terminal holds a
+    /// VoiceOver user's focus while the status changes elsewhere on screen.
+    private func alert(_ agent: AgentInstance, _ kind: NotificationKind, title: String, body: String) {
+        notifier.announce(body)
+        guard !isViewed(agent.id) else { return }
+        postNotification(agentId: agent.id, kind: kind, title: title, body: body)
     }
 
     private func postNotification(agentId: UUID, kind: NotificationKind, title: String, body: String) {

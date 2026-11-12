@@ -9,7 +9,8 @@ import Testing
 @MainActor
 struct AgentViewingTests {
     /// A completion that arrives while its agent is viewed in the key
-    /// workspace window leaves no unread mark and posts nothing.
+    /// workspace window leaves no unread mark and posts nothing, but is
+    /// announced.
     @Test func completionWhileViewedLeavesNoUnread() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -19,8 +20,7 @@ struct AgentViewingTests {
         h.view(id)
         #expect(h.workspace.viewedAgentID == id)
 
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
+        try h.completeTurn(id)
 
         let agent = try h.agent(id)
         #expect(agent.lastAppliedCompletion != nil)
@@ -28,6 +28,8 @@ struct AgentViewingTests {
         #expect(agent.displayState == .idle)
         #expect(h.notifier.posted.isEmpty)
         #expect(try h.persisted("unreadCompletions").isEmpty)
+        // VoiceOver still hears it: the user's focus is in the terminal.
+        #expect(h.notifier.announced == ["Agent is ready for review"])
     }
 
     /// Once the user switches to another agent, a completion of the first
@@ -41,11 +43,11 @@ struct AgentViewingTests {
         try h.launch(id)
         try h.launch(other)
         h.view(id)
-        try h.hook(id, "UserPromptSubmit")
+        try h.startTurn(id)
 
         h.view(other)
         #expect(h.workspace.viewedAgentID == other)
-        try h.hook(id, "Stop")
+        try h.osc(id, "state=done:app=claude-code")
 
         let agent = try h.agent(id)
         #expect(agent.unreadCompletion != nil)
@@ -68,10 +70,10 @@ struct AgentViewingTests {
         h.start()
         try h.launch(id)
         h.view(id)
-        try h.hook(id, "UserPromptSubmit")
+        try h.startTurn(id)
 
         h.setWindowKey(false)
-        try h.hook(id, "Stop")
+        try h.osc(id, "state=done:app=claude-code")
 
         let agent = try h.agent(id)
         #expect(agent.unreadCompletion != nil)

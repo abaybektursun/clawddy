@@ -278,6 +278,8 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
     var turnID: String?
     var model: String?
     var permissionMode: String?
+    /// What started a compaction: `manual` (`/compact`) or `auto`.
+    var trigger: String?
     var exitStatus: Int?
 
     var hasSupportedSchema: Bool { schemaVersion == 1 }
@@ -286,7 +288,7 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
 extension AgentRawProviderEvent {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, eventID, provider, launchGeneration, hookEventName
-        case sessionID, turnID, model, permissionMode, exitStatus
+        case sessionID, turnID, model, permissionMode, trigger, exitStatus
     }
 
     /// The hook script writes "" for each field its payload did not carry;
@@ -308,12 +310,24 @@ extension AgentRawProviderEvent {
         turnID = try text(.turnID)
         model = try text(.model)
         permissionMode = try text(.permissionMode)
+        trigger = try text(.trigger)
         exitStatus = try container.decodeIfPresent(Int.self, forKey: .exitStatus)
     }
 }
 
 enum AgentDomainEvent: Equatable, Sendable {
+    /// A session started: the provider is alive, and no turn is under way.
     case sessionStarted(sessionID: String?, model: String?, permissionMode: String?)
+    /// The provider runs this session. Unlike `sessionStarted` it says
+    /// nothing about liveness or the turn, for a provider whose terminal
+    /// reports those.
+    case sessionBound(sessionID: String?)
+    /// One report the program made about itself in its terminal, for a
+    /// provider whose turn activity comes from there.
+    case programStatus(Ghostty.Action.ProgramStatus)
+    /// The user started a compaction (`/compact`): the program's `working`
+    /// is that compaction, which completes nothing.
+    case manualCompactionStarted
     case turnStarted(turnID: String?)
     case turnActivityChanged(AgentActivityState)
     case turnInteractionChanged(AgentInteractionState)
@@ -334,8 +348,11 @@ struct AgentProviderEntry: Sendable {
     /// What one record in the event file means for the agent.
     typealias Meaning = @Sendable (AgentRawProviderEvent) -> [AgentDomainEvent]
 
-    /// The source that reports the agent's turn activity. An active turn
-    /// shows as delayed after a silence of that source only.
+    /// The source that reports the agent's turn activity. The launch timeout
+    /// waits for its first report, and `ingest` drops program-status reports
+    /// for a provider whose turn activity comes from its hooks. Only the
+    /// event file's silence makes an active turn show as delayed: a program
+    /// reports nothing during a long tool call (131 s captured).
     var turnActivity: AgentStatusObservation.Source
     /// The hook events the provider subscribes to, each with what it means.
     /// The provider's hooks and the hook script's list of the events it

@@ -241,13 +241,28 @@ whose event is not in that table.
 
 Every observation, a hook record or a terminal's close or program-status
 report, enters through `AgentBridge.ingest`, which drops one from another
-generation. Exactly-once delivery lives in the transport: the journal source
+generation, and a program-status report for a provider whose table names its
+hooks as the source of turn activity (Codex).
+
+Claude's turn activity and liveness come from its terminal's OSC 7501 reports,
+the program's own record only (no `id`): its first report other than `clear`
+shows it alive. `working` starts a turn only once it has stood for 250 ms
+without `idle`, `clear` or `done`, so the blips of `/clear`, `/exit` and the
+`/exit` confirmation change nothing; `blocked` waits for permission, an answer
+or sign-in; a bare `done` completes the turn and a `done` with a summary only
+ends it; `idle` ends it as interrupted; `clear` resets the activity; `error`
+fails it at once. A `PreCompact` hook with `trigger: "manual"` makes the turn
+under way a compaction, which completes nothing. Claude's `error` report and
+its `StopFailure` hook fail a turn once, whichever comes first. Reports after
+the provider exited or the terminal closed change nothing. Exactly-once delivery lives in the transport: the journal source
 keeps byte offsets in memory, starts each journal at its end when the app
 starts, and resets an offset only after its own compaction.
 
-Telemetry freshness is confidence, not guessed activity. If an active turn has
-no provider fact for two minutes, presentation becomes **Status Delayed** while
-the reducer retains the last confirmed activity. A later provider fact restores
+Telemetry freshness is confidence, not guessed activity. If an active turn of
+a provider whose hooks report its activity (Codex) has no provider fact for two
+minutes, presentation becomes **Status Delayed** while the reducer retains the
+last confirmed activity. A program reports nothing during a long tool call, so
+the rule does not apply to Claude. A later provider fact restores
 live confidence. The timeout never manufactures idle or completion.
 
 Launch failures and runtime failures are separate facts. A provider executable
@@ -291,10 +306,8 @@ records only into `STATUS_DIR`. Without a complete identity it drains its input,
 records nothing and exits 0.
 
 - **Claude Code.** Each launch's settings overlay (see Session Metadata Pipeline)
-  hooks `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
-  `PostToolUseFailure`, `PermissionRequest`, `Stop`, `StopFailure`,
-  `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop` and `SessionEnd`
-  with all four arguments. No agent variable is exported, so a `claude` started
+  hooks `SessionStart`, `StopFailure`, `PreCompact`, `PostCompact` and
+  `SessionEnd` with all four arguments; Claude's terminal reports its turns. No agent variable is exported, so a `claude` started
   from an agent's tools, which does not receive the overlay, cannot report as
   that agent. Nothing is written to `<CLAUDE_CONFIG_DIR>/settings.json`; at
   startup the production app removes the global entries that older builds put
@@ -318,8 +331,8 @@ interactive terminal into a launch failure.
 The hook depends only on macOS system tools. For each invocation it:
 
 1. Reads the official hook payload from standard input into a private temporary file.
-2. Uses `plutil` to extract only session, event, turn, model, and permission
-   identifiers, the turn from the field the provider's event table names
+2. Uses `plutil` to extract only session, event, turn, model, permission and
+   compaction-trigger identifiers, the turn from the field the provider's event table names
    (`prompt_id` for Claude, `turn_id` for Codex). An event outside that table
    records nothing.
 3. Adds a stable event ID plus the provider and launch generation from its

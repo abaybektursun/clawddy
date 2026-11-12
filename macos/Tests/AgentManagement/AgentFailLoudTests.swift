@@ -16,8 +16,7 @@ struct AgentFailLoudTests {
         let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
+        try h.completeTurn(id)
         var corrupt = Data()
 
         try h.restart {
@@ -104,15 +103,15 @@ struct AgentFailLoudTests {
     @Test func undecodableRecordIsLoggedWithItsOffset() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         let events = h.statusFile(id, "events")
         let offset = try h.size(events)
         let before = h.diagnostics.messages.count
 
-        try h.append(id, h.record("UserPromptSubmit", generation: try h.generation(id))
-            .replacingOccurrences(of: #""provider":"claudeCode""#, with: #""provider":"""#))
+        try h.append(id, h.record("UserPromptSubmit", generation: try h.generation(id), provider: .codex)
+            .replacingOccurrences(of: #""provider":"codex""#, with: #""provider":"""#))
         h.poll()
 
         #expect(try h.agent(id).displayState == .idle)
@@ -128,7 +127,7 @@ struct AgentFailLoudTests {
     @Test func emptyTurnIDIsAbsent() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
 
@@ -198,8 +197,7 @@ struct AgentFailLoudTests {
         let fm = FileManager.default
         try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: h.root.url.path)
 
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
+        try h.completeTurn(id)
 
         let issue = try #require(h.bridge.storageErrors[h.root.stateFile])
         #expect(issue.hasPrefix("Unread marks could not be saved: "))

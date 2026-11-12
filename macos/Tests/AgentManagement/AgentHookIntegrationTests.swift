@@ -87,6 +87,13 @@ struct AgentHookIntegrationTests {
             "PermissionRequest", "PostCompact", "PostToolUse", "PreCompact", "PreToolUse",
             "SessionStart", "Stop", "SubagentStart", "SubagentStop", "UserPromptSubmit",
         ])
+        // Claude's terminal reports its turn activity; its hooks report the
+        // session, failures and compaction only (P3.5).
+        #expect(table.claudeCode.turnActivity == .surface)
+        #expect(table.codex.turnActivity == .hookJournal)
+        #expect(table.claudeCode.hookEvents.keys.sorted() == [
+            "PostCompact", "PreCompact", "SessionEnd", "SessionStart", "StopFailure",
+        ])
 
         // Every event either provider subscribes to, and one neither does.
         let candidates = Set(AgentProviderID.allCases.flatMap { table[$0].hookEvents.keys })

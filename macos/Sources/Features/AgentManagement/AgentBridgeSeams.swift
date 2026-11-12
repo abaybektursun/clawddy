@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 @preconcurrency import UserNotifications
@@ -116,14 +117,17 @@ struct AgentDispatchIO: AgentIOExecutor {
 
 // MARK: - Notifier
 
-/// Where the bridge's user notifications go.
+/// Where the bridge's user notifications and accessibility announcements go.
 @MainActor
 protocol AgentNotifier {
     func post(_ request: UNNotificationRequest)
     func removeNotifications(withIdentifiers identifiers: [String])
+    /// Asks VoiceOver to speak `message` now.
+    func announce(_ message: String)
 }
 
-/// The user notification center, asking for permission at the first post.
+/// The user notification center, asking for permission at the first post,
+/// and AppKit's accessibility announcements.
 struct AgentUserNotificationCenter: AgentNotifier {
     // Nonisolated so it can be a default argument; the synthesized one
     // would be main-actor isolated.
@@ -164,6 +168,16 @@ struct AgentUserNotificationCenter: AgentNotifier {
         let center = UNUserNotificationCenter.current()
         center.removeDeliveredNotifications(withIdentifiers: identifiers)
         center.removePendingNotificationRequests(withIdentifiers: identifiers)
+    }
+
+    func announce(_ message: String) {
+        NSAccessibility.post(
+            element: NSApplication.shared,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: message,
+                .priority: NSAccessibilityPriorityLevel.high.rawValue,
+            ])
     }
 }
 

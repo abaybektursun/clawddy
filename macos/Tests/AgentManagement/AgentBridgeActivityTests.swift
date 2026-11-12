@@ -3,16 +3,16 @@ import Testing
 import UserNotifications
 @testable import Ghostty
 
-/// Characterization of how `AgentBridge` turns hook records into activity,
-/// notifications, unread state and renames, as the code behaves after
-/// Phase 0. Records carry "" for absent fields, as the hook script writes
-/// them.
+/// Characterization of how `AgentBridge` turns observations into activity,
+/// notifications, unread state and renames. Hook records carry "" for absent
+/// fields, as the hook script writes them. Codex's turn activity comes from
+/// its hooks, Claude's from its terminal's program status (P3.5).
 @MainActor
 struct AgentBridgeActivityTests {
     @Test func promptToolPermissionStopSequence() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         let agent = try h.agent(id)
@@ -49,7 +49,7 @@ struct AgentBridgeActivityTests {
     @Test func stopWhileViewedNoUnreadNoNotification() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         h.view(id)
@@ -71,8 +71,7 @@ struct AgentBridgeActivityTests {
         let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
+        try h.completeTurn(id)
         #expect(Set(try h.persisted("unreadCompletions").keys) == [id])
 
         h.view(id)
@@ -89,13 +88,15 @@ struct AgentBridgeActivityTests {
         #expect(h.aggregateChanges.last == .idle)
     }
 
+    /// Claude's `StopFailure` hook fails the turn its terminal reported, and
+    /// the next turn clears the failure.
     @Test func stopFailureNeedsAttention() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
+        try h.startTurn(id)
 
         try h.hook(id, "StopFailure")
 
@@ -108,36 +109,15 @@ struct AgentBridgeActivityTests {
         #expect(error.identifier == "clawddy.\(id.uuidString).error")
         #expect(error.content.interruptionLevel == .active)
 
-        try h.hook(id, "UserPromptSubmit")
-        #expect(agent.displayState == .thinking)
+        try h.startTurn(id)
+        #expect(agent.displayState == .working)
         #expect(agent.runtimeErrorMessage == nil)
-    }
-
-    @Test func toolFailureKeepsTurn() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "PreToolUse")
-
-        try h.hook(id, "PostToolUseFailure")
-
-        let agent = try h.agent(id)
-        #expect(agent.displayState == .thinking)
-        // The harness's records name no turn.
-        #expect(agent.turnState == .active(turnID: nil))
-        #expect(agent.runtimeErrorMessage == nil)
-        #expect(h.notifier.posted.isEmpty)
-        try h.hook(id, "PermissionRequest")
-        #expect(agent.displayState == .permission)
     }
 
     @Test func compactionExpiresAfter30s() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         try h.hook(id, "UserPromptSubmit")
@@ -156,7 +136,7 @@ struct AgentBridgeActivityTests {
     @Test func silent120sIsDelayedAndRecovers() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         try h.hook(id, "UserPromptSubmit")
@@ -178,12 +158,12 @@ struct AgentBridgeActivityTests {
     @Test func partialLineWaitsForNewline() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         let agent = try h.agent(id)
 
-        try h.appendRaw(id, h.record("UserPromptSubmit", generation: try h.generation(id)))
+        try h.appendRaw(id, h.record("UserPromptSubmit", generation: try h.generation(id), provider: .codex))
         h.poll()
         #expect(agent.displayState == .idle)
 
@@ -195,7 +175,7 @@ struct AgentBridgeActivityTests {
     @Test func journalOver1MiBCompactsAndLaterEventsApply() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         let events = h.statusFile(id, "events")
@@ -205,6 +185,7 @@ struct AgentBridgeActivityTests {
         try h.append(id, h.record(
             "Padding",
             generation: try h.generation(id),
+            provider: .codex,
             session: String(repeating: "x", count: 1_048_576)))
         h.poll()
 
@@ -219,7 +200,7 @@ struct AgentBridgeActivityTests {
     @Test func compactionNeitherReplaysNorLoses() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         let agent = try h.agent(id)
@@ -227,13 +208,14 @@ struct AgentBridgeActivityTests {
         let waiting = "clawddy.\(id.uuidString).waiting"
         let completed = "clawddy.\(id.uuidString).completed"
 
-        try h.append(id, h.record("UserPromptSubmit", generation: launch))
-        try h.append(id, h.record("PermissionRequest", generation: launch))
+        try h.append(id, h.record("UserPromptSubmit", generation: launch, provider: .codex))
+        try h.append(id, h.record("PermissionRequest", generation: launch, provider: .codex))
         try h.append(id, h.record(
             "Padding",
             generation: launch,
+            provider: .codex,
             session: String(repeating: "x", count: 1_048_576)))
-        let unfinished = h.record("Stop", generation: launch)
+        let unfinished = h.record("Stop", generation: launch, provider: .codex)
         try h.appendRaw(id, unfinished)
         h.poll()
 
@@ -270,8 +252,7 @@ struct AgentBridgeActivityTests {
         #expect(h.config.renameAgent(id: id, newName: "New Name"))
         h.bridge.renameAgent(id: id, newName: "New Name")
         #expect(agent.name == "New Name")
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
+        try h.completeTurn(id)
         #expect(h.host.calls == hostCalls)
         let state = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: h.root.stateFile)) as? [String: Any])
@@ -286,7 +267,8 @@ struct AgentBridgeActivityTests {
 
     /// Status-line metadata is stamped with its file's modification time, and
     /// metadata from a hook record with the scheduler's time. A hook record
-    /// that carries no model leaves the status line's model as it is.
+    /// that carries no model, here the `SessionStart` of a compaction, leaves
+    /// the status line's model as it is.
     @Test func metadataFromStatusLineThenHook() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -305,7 +287,7 @@ struct AgentBridgeActivityTests {
         #expect(agent.metadata?.observedAt == written)
         #expect(agent.metadataAvailability == .available)
 
-        try h.hook(id, "UserPromptSubmit")
+        try h.hook(id, "SessionStart")
         #expect(agent.metadata?.observedAt == h.scheduler.now)
         #expect(agent.metadata?.modelID == "claude-test")
         #expect(agent.metadata?.displayModel == "Claude Test")
@@ -313,7 +295,9 @@ struct AgentBridgeActivityTests {
 
     /// The hook script the launch installs, run with the arguments of the
     /// agent's settings overlay and Claude's payload fields, writes records
-    /// the bridge applies.
+    /// the bridge applies: `SessionStart` binds the session, `PreCompact`
+    /// carries its trigger, and `StopFailure` fails the turn. Claude's
+    /// terminal reports the rest.
     @Test func realHookScriptFeedsTheBridge() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -325,7 +309,7 @@ struct AgentBridgeActivityTests {
             atPath: AgentHookRuntime.scriptURL(root: h.root).path))
         let overlay = ClaudeCodeProvider(root: h.root)
             .overlayHooks(agentID: id, generation: generation)
-        let groups = try #require(overlay["Stop"] as? [[String: Any]])
+        let groups = try #require(overlay["StopFailure"] as? [[String: Any]])
         let handlers = try #require(groups.first?["hooks"] as? [[String: Any]])
         let command = try #require(handlers.first?["command"] as? String)
         let session = "2f0c8b3e-6d43-4a51-9b7e-1c5d2a9e8f40"
@@ -336,29 +320,28 @@ struct AgentBridgeActivityTests {
         let agent = try h.agent(id)
 
         try run(#"{"session_id":"\#(session)","transcript_path":"/dev/null","cwd":"/","hook_event_name":"SessionStart","source":"startup","model":"claude-test"}"#)
-        #expect(agent.displayState == .idle)
         #expect(agent.sessionID == session)
-        #expect(try h.launchScripts().isEmpty)
         #expect(try h.binding(id) == AgentSessionBinding(
             provider: .claudeCode,
             sessionID: session,
             launchGeneration: generation))
+        // Liveness is the terminal's to report.
+        #expect(agent.displayState == .launching)
+        try h.osc(id, "state=idle:app=claude-code")
+        #expect(agent.displayState == .idle)
+        #expect(try h.launchScripts().isEmpty)
 
-        try run(#"{"session_id":"\#(session)","hook_event_name":"UserPromptSubmit","prompt":"hello","prompt_id":"prompt-1","permission_mode":"default"}"#)
-        #expect(agent.displayState == .thinking)
-        #expect(agent.turnState == .active(turnID: "prompt-1"))
+        try h.startTurn(id)
+        try run(#"{"session_id":"\#(session)","hook_event_name":"PreCompact","trigger":"manual","custom_instructions":"","prompt_id":"prompt-1"}"#)
+        #expect(agent.displayState == .compacting)
+        try h.osc(id, "state=done:app=claude-code")
+        #expect(agent.displayState == .idle)
+        #expect(agent.lastAppliedCompletion == nil)
 
-        try run(#"{"session_id":"\#(session)","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"},"prompt_id":"prompt-1","permission_mode":"default"}"#)
-        #expect(agent.displayState == .permission)
-
-        try run(#"{"session_id":"\#(session)","hook_event_name":"Stop","prompt_id":"prompt-1","stop_hook_active":false}"#)
-        #expect(agent.displayState == .finished)
-        #expect(agent.unreadCompletion?.sessionID == session)
-        #expect(agent.unreadCompletion?.turnID == "prompt-1")
-        #expect(h.notifier.posted.map(\.identifier) == [
-            "clawddy.\(id.uuidString).waiting",
-            "clawddy.\(id.uuidString).completed",
-        ])
+        try h.startTurn(id)
+        try run(#"{"session_id":"\#(session)","hook_event_name":"StopFailure","error":"server_error","last_assistant_message":"API Error","prompt_id":"prompt-2"}"#)
+        #expect(agent.displayState == .error)
+        #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
     }
 
     /// Every `SessionStart` the real hook script records rebinds the agent,
@@ -432,6 +415,7 @@ struct AgentBridgeActivityTests {
         let agent = try h.agent(id)
 
         try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionStart","source":"startup"}"#)
+        try h.osc(id, "state=idle:app=claude-code")
         #expect(agent.displayState == .idle)
 
         try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionEnd","reason":"clear"}"#)
@@ -447,8 +431,8 @@ struct AgentBridgeActivityTests {
             provider: .claudeCode,
             sessionID: cleared,
             launchGeneration: generation))
-        try run(#"{"session_id":"\#(cleared)","hook_event_name":"UserPromptSubmit","prompt_id":"prompt-1"}"#)
-        #expect(agent.displayState == .thinking)
+        try h.startTurn(id)
+        #expect(agent.displayState == .working)
 
         try h.providerExited(id, status: 0)
         #expect(agent.processState == .exited)

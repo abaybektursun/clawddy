@@ -5,7 +5,7 @@ import UserNotifications
 @testable import Ghostty
 
 /// Characterization of how `AgentBridge` launches agents, ends them, and
-/// filters the records it reads, as the code behaves after Phase 0.
+/// filters the records it reads.
 @MainActor
 struct AgentBridgeLifecycleTests {
     @Test func launchShowsStartingAndPresentsOneSurface() throws {
@@ -50,8 +50,7 @@ struct AgentBridgeLifecycleTests {
         let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
+        try h.completeTurn(id)
 
         try h.restart()
 
@@ -78,7 +77,11 @@ struct AgentBridgeLifecycleTests {
         #expect(try h.launchScripts().count == 1)
     }
 
-    @Test func noHookFor10sIsStatusUnavailable() throws {
+    /// Claude reports nothing before its folder trust dialog is accepted,
+    /// so a launch with no report within 10 s says that its status is
+    /// unavailable. The first report, once the dialog is accepted, shows
+    /// Claude ready.
+    @Test func noReportFor10sIsStatusUnavailable() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent")
@@ -96,12 +99,40 @@ struct AgentBridgeLifecycleTests {
         #expect(agent.processState == .launching)
         #expect(h.aggregateChanges == [.idle])
         #expect(h.notifier.posted.isEmpty)
+
+        h.scheduler.advance(by: 5)
+        try h.osc(id, "state=idle:app=claude-code")
+        #expect(agent.displayState == .idle)
+        #expect(agent.processState == .running)
     }
 
-    @Test func sessionStartIsReadyRemovesScriptWritesBinding() throws {
+    /// A hook is not a report: a `SessionStart` with no report, as from a
+    /// terminal that never answers Claude's query, binds the session but
+    /// leaves the status unavailable after 10 s.
+    @Test func sessionStartAloneIsNotAReport() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent")
+        h.start()
+        try h.activate(id)
+        let agent = try h.agent(id)
+        h.scheduler.advance(by: 3)
+
+        try h.hook(id, "SessionStart")
+        #expect(try h.binding(id).sessionID == "session-1")
+        #expect(agent.displayState == .launching)
+        h.scheduler.advance(by: 7.1)
+
+        #expect(agent.displayState == .statusUnavailable)
+        #expect(agent.processState == .launching)
+    }
+
+    /// Codex's `SessionStart` hook shows it ready; Claude's first report
+    /// does (`firstReportWithin10sPreventsStatusUnavailable`).
+    @Test func sessionStartIsReadyRemovesScriptWritesBinding() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.activate(id)
         #expect(try h.launchScripts().count == 1)
@@ -116,7 +147,7 @@ struct AgentBridgeLifecycleTests {
         #expect(agent.sessionID == "session-1")
         #expect(try h.launchScripts().isEmpty)
         #expect(try h.binding(id) == AgentSessionBinding(
-            provider: .claudeCode,
+            provider: .codex,
             sessionID: "session-1",
             launchGeneration: agent.launchGeneration))
         #expect(h.aggregateChanges == [.idle])
@@ -203,7 +234,9 @@ struct AgentBridgeLifecycleTests {
         #expect(h.aggregateChanges == [.idle, .attention])
     }
 
-    @Test func forkLaunchUsesPendingForkAndClearsItOnSessionStart() throws {
+    /// The fork marker stays until the forked Claude is seen alive, at its
+    /// first report; its `SessionStart` binds the fork's own session.
+    @Test func forkLaunchUsesPendingForkAndClearsItOnceAlive() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let sourceID = try h.addAgent("Source")
@@ -227,8 +260,10 @@ struct AgentBridgeLifecycleTests {
         #expect(request.session == nil)
 
         try h.hook(fork.id, "SessionStart", session: "fork-session")
-        #expect(!h.exists(h.statusFile(fork.id, "fork.json")))
         #expect(try h.binding(fork.id).sessionID == "fork-session")
+        #expect(h.exists(h.statusFile(fork.id, "fork.json")))
+        try h.osc(fork.id, "state=idle:app=claude-code")
+        #expect(!h.exists(h.statusFile(fork.id, "fork.json")))
     }
 
     /// A resume of a session Claude cannot find, as captured for P3.6: it
@@ -352,7 +387,7 @@ struct AgentBridgeLifecycleTests {
         h.start()
         #expect(!h.scheduler.hasRepeatingTimer)
         try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
+        try h.startTurn(id)
         let agent = try h.agent(id)
         let surface = try #require(h.host.surfaces[id])
 
@@ -504,9 +539,10 @@ struct AgentBridgeLifecycleTests {
     }
 
     /// Program status reaches the bridge inline, from the surface the host
-    /// presents, tagged with its agent and launch. A surface the host does
-    /// not present reaches nothing, and a report for an earlier launch is
-    /// ignored.
+    /// presents, tagged with its agent and launch: Claude's `working` from
+    /// its own terminal starts its turn, and no other agent's. A surface the
+    /// host does not present reaches nothing, and a report for an earlier
+    /// launch is ignored.
     @Test func programStatusReachesBridgeWithAgentAndGeneration() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -516,41 +552,32 @@ struct AgentBridgeLifecycleTests {
         try h.launch(id)
         try h.launch(other)
         let launch = try h.generation(id)
-        let surface = try #require(h.host.surfaces[id])
-        let working = Ghostty.Action.ProgramStatus(
-            state: .working, kind: nil, progress: nil, id: nil, app: nil, title: nil, message: nil)
-        let blocked = Ghostty.Action.ProgramStatus(
-            state: .blocked, kind: .permission, progress: nil, id: nil, app: nil, title: nil,
-            message: nil)
+        let blocked = try programStatus("state=blocked:kind=permission:app=claude-code")
 
-        NotificationCenter.default.post(
-            name: .ghosttyDidReceiveProgramStatus,
-            object: surface,
-            userInfo: [Notification.Name.ProgramStatusKey: working])
+        try h.startTurn(id)
 
-        #expect(h.bridge.lastProgramStatus == [id: working])
-        #expect(h.diagnostics.messages.last
-            == "program status \(id) generation \(launch): working kind=- id=-")
+        #expect(h.diagnostics.messages.contains(
+            "program status \(id) generation \(launch): working kind=-"))
+        #expect(try h.agent(id).displayState == .working)
+        #expect(try h.agent(other).displayState == .idle)
 
         let before = h.diagnostics.messages
         NotificationCenter.default.post(
             name: .ghosttyDidReceiveProgramStatus,
             object: NSObject(),
             userInfo: [Notification.Name.ProgramStatusKey: blocked])
-        #expect(h.bridge.lastProgramStatus == [id: working])
         #expect(h.diagnostics.messages == before)
 
         h.bridge.programStatus(id: id, generation: UUID(), report: blocked)
-        #expect(h.bridge.lastProgramStatus == [id: working])
         #expect(h.diagnostics.messages.last == "ignored program status for \(id)")
-        // Reporting changes no agent state yet.
-        #expect(try h.agent(id).displayState == .idle)
+        #expect(try h.agent(id).displayState == .working)
+        #expect(h.notifier.posted.isEmpty)
     }
 
     @Test func restartNewGenerationIgnoresOldEvents() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         let first = try h.generation(id)
@@ -568,7 +595,7 @@ struct AgentBridgeLifecycleTests {
         // The new launch resumes the session the first one bound.
         #expect(h.providers.launchRequests.last?.session?.sessionID == "session-1")
 
-        try h.append(id, h.record("UserPromptSubmit", generation: first))
+        try h.append(id, h.record("UserPromptSubmit", generation: first, provider: .codex))
         h.poll()
         #expect(try h.agent(id).displayState == .launching)
         #expect(h.diagnostics.messages.contains("ignored stale launch event for \(id)"))
@@ -580,13 +607,13 @@ struct AgentBridgeLifecycleTests {
     @Test func providerMismatchAndUnknownSchemaAreSkippedAndAcknowledged() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
         let launch = try h.generation(id)
 
-        try h.append(id, h.record("UserPromptSubmit", generation: launch, provider: .codex))
-        try h.append(id, h.record("UserPromptSubmit", generation: launch)
+        try h.append(id, h.record("UserPromptSubmit", generation: launch, provider: .claudeCode))
+        try h.append(id, h.record("UserPromptSubmit", generation: launch, provider: .codex)
             .replacingOccurrences(of: #""schemaVersion":1"#, with: #""schemaVersion":2"#))
         h.poll()
 
@@ -642,15 +669,14 @@ struct AgentBridgeLifecycleTests {
         let other = try h.addAgent("Other")
         h.start()
         try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
+        try h.startTurn(id)
         try h.launch(other)
-        try h.hook(other, "UserPromptSubmit")
-        try h.hook(other, "Stop")
+        try h.completeTurn(other)
         let generation = try h.generation(id)
         let posted = h.notifier.posted.count
 
         try h.restart {
-            try h.append(id, h.record("Stop", generation: generation))
+            try h.append(id, h.record("StopFailure", generation: generation))
         }
         h.poll()
 
