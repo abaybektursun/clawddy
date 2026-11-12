@@ -80,7 +80,7 @@ enum AgentKeyEventRoutingPolicy {
 final class AgentWorkspaceController: NSSplitViewController {
 
     private weak var detailVC: NSViewController?
-    private let onSearch: () -> Void
+    private let onFilterChanged: (String) -> Void
     private let onFocusTerminal: () -> Void
     private let canFocusTerminal: () -> Bool
     private let onShowAgentDetails: () -> Void
@@ -90,14 +90,14 @@ final class AgentWorkspaceController: NSSplitViewController {
         navigationView: NSView,
         agentListView: NSView,
         detailViewController: NSViewController,
-        onSearch: @escaping () -> Void,
+        onFilterChanged: @escaping (String) -> Void,
         onFocusTerminal: @escaping () -> Void,
         canFocusTerminal: @escaping () -> Bool,
         onShowAgentDetails: @escaping () -> Void,
         canShowAgentDetails: @escaping () -> Bool
     ) {
         self.detailVC = detailViewController
-        self.onSearch = onSearch
+        self.onFilterChanged = onFilterChanged
         self.onFocusTerminal = onFocusTerminal
         self.canFocusTerminal = canFocusTerminal
         self.onShowAgentDetails = onShowAgentDetails
@@ -137,7 +137,7 @@ final class AgentWorkspaceController: NSSplitViewController {
         }
     }
 
-    @objc private func showSearch() { onSearch() }
+    @objc private func filterChanged(_ sender: NSSearchField) { onFilterChanged(sender.stringValue) }
     @objc private func focusTerminal() { onFocusTerminal() }
     @objc private func showAgentDetails() { onShowAgentDetails() }
 
@@ -161,7 +161,7 @@ final class AgentWorkspaceController: NSSplitViewController {
 
 extension AgentWorkspaceController: NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .agentSearch, .agentDetails, .focusTerminal]
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .agentDetails, .focusTerminal, .agentFilter]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -170,9 +170,9 @@ extension AgentWorkspaceController: NSToolbarDelegate {
             .sidebarTrackingSeparator,
             .flexibleSpace,
             .space,
-            .agentSearch,
             .agentDetails,
             .focusTerminal,
+            .agentFilter,
         ]
     }
 
@@ -182,38 +182,55 @@ extension AgentWorkspaceController: NSToolbarDelegate {
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
         switch itemIdentifier {
-        case .agentSearch:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Search Agents"
-            item.paletteLabel = "Search Agents"
-            item.toolTip = "Search Agents"
-            item.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Search Agents")
-            item.target = self
-            item.action = #selector(showSearch)
+        case .agentFilter:
+            // AppKit owns the search chrome: native metrics, field editor,
+            // cancel/escape behavior. Typing filters the agent list live.
+            let item = NSSearchToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "Filter Agents"
+            item.paletteLabel = "Filter Agents"
+            item.toolTip = "Filter the agent list"
+            item.searchField.placeholderString = "Filter Agents"
+            item.searchField.sendsSearchStringImmediately = true
+            item.searchField.sendsWholeSearchString = false
+            item.searchField.target = self
+            item.searchField.action = #selector(filterChanged(_:))
             return item
         case .focusTerminal:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Focus Terminal"
-            item.paletteLabel = "Focus Terminal"
-            item.toolTip = "Focus Terminal"
-            item.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Focus Terminal")
-            item.target = self
-            item.action = #selector(focusTerminal)
-            return item
+            return makeItem(
+                itemIdentifier,
+                label: "Focus Terminal",
+                symbol: "terminal",
+                action: #selector(focusTerminal))
         case .agentDetails:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "Agent Details"
-            item.paletteLabel = "Agent Details"
-            item.toolTip = "Show Model, Effort, and Context"
-            item.image = NSImage(
-                systemSymbolName: "info.circle",
-                accessibilityDescription: "Agent Details")
-            item.target = self
-            item.action = #selector(showAgentDetails)
-            return item
+            return makeItem(
+                itemIdentifier,
+                label: "Agent Details",
+                symbol: "info.circle",
+                action: #selector(showAgentDetails),
+                toolTip: "Show Model, Effort, and Context")
         default:
             return nil
         }
+    }
+
+    private func makeItem(
+        _ identifier: NSToolbarItem.Identifier,
+        label: String,
+        symbol: String,
+        action: Selector,
+        toolTip: String? = nil
+    ) -> NSToolbarItem {
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.label = label
+        item.paletteLabel = label
+        item.toolTip = toolTip ?? label
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)
+        // Bordered items let AppKit size the symbol and draw the standard
+        // button, so every glyph matches instead of using its natural bounds.
+        item.isBordered = true
+        item.target = self
+        item.action = action
+        return item
     }
 }
 
@@ -228,13 +245,16 @@ extension AgentWorkspaceController: NSToolbarItemValidation {
 }
 
 private extension NSToolbarItem.Identifier {
-    static let agentSearch = NSToolbarItem.Identifier("ClawddySearchAgents")
+    static let agentFilter = NSToolbarItem.Identifier("ClawddyFilterAgents")
     static let focusTerminal = NSToolbarItem.Identifier("ClawddyFocusTerminal")
     static let agentDetails = NSToolbarItem.Identifier("ClawddyAgentDetails")
 }
 
 /// Creates the workspace window with proper Liquid Glass sidebar styling.
-func makeAgentWorkspaceWindow(controller: AgentWorkspaceController) -> AgentWorkspaceWindow {
+func makeAgentWorkspaceWindow(
+    controller: AgentWorkspaceController,
+    appearance: NSAppearance?
+) -> AgentWorkspaceWindow {
     let window = AgentWorkspaceWindow(
         contentRect: NSRect(x: 0, y: 0, width: 1100, height: 700),
         styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -242,10 +262,16 @@ func makeAgentWorkspaceWindow(controller: AgentWorkspaceController) -> AgentWork
         defer: false
     )
     window.contentViewController = controller
+    // The app-wide appearance is synchronized asynchronously to avoid an
+    // AppKit launch mutex. Pin this window before its first frame so the
+    // workspace never flashes in the system appearance.
+    window.appearance = appearance
     window.title = "Clawddy"
     window.subtitle = "Agent Workspace"
     window.titleVisibility = .visible
-    window.titlebarAppearsTransparent = false
+    // AppKit owns the chrome: with fullSizeContentView + a full-height
+    // sidebar item, the sidebar glass must run under the titlebar.
+    window.titlebarAppearsTransparent = true
     window.contentMinSize = NSSize(width: 900, height: 480)
     window.isReleasedWhenClosed = false
     window.identifier = NSUserInterfaceItemIdentifier("ClawddyAgentWorkspace")
@@ -258,7 +284,9 @@ func makeAgentWorkspaceWindow(controller: AgentWorkspaceController) -> AgentWork
     toolbar.delegate = controller
     toolbar.displayMode = .iconOnly
     window.toolbar = toolbar
-    window.toolbarStyle = .unifiedCompact
+    // The standard sidebar-app toolbar; on macOS 26 this is what lets AppKit
+    // render the sidebar as its native inset glass panel.
+    window.toolbarStyle = .unified
 
     if !window.setFrameUsingName("AgentWorkspace") {
         window.center()
@@ -281,6 +309,6 @@ final class AgentWorkspaceRestoration: NSObject, NSWindowRestoration {
             completionHandler(nil, error)
             return
         }
-        delegate.restoreAgentWorkspaceWindow(completionHandler: completionHandler)
+        delegate.clawddy.restoreWorkspaceWindow(completionHandler: completionHandler)
     }
 }

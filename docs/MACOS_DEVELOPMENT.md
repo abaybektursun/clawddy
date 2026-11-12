@@ -64,8 +64,8 @@ xcrun --sdk macosx --show-sdk-version
 ```
 
 If a change touches code outside `macos/`, rebuild the underlying Ghostty
-library first. The repository wrapper keeps the Zig prefix and both caches on
-external storage:
+library first. The repository wrapper keeps the Zig prefix, both caches, and
+downloaded packages on external storage:
 
 ```sh
 ./build.nu -Demit-macos-app=false
@@ -102,6 +102,24 @@ Both wrappers fail closed if the external volume is not mounted. Use
 `GHOSTTY_BUILD_ROOT`, `GHOSTTY_MACOS_BUILD_ROOT`, or `--build-root` only for an
 alternate path under `/Volumes`. Run either wrapper with `--show-paths` to audit
 its resolved locations without starting a build.
+
+Zig 0.17 is usually not the `zig` on `PATH`, so `./build.nu` selects its
+compiler from `GHOSTTY_ZIG` and falls back to `zig` on `PATH`. The selected
+executable is invoked by absolute path inside the sealed build environment, and
+`--show-paths` reports it together with the version it actually prints:
+
+```sh
+GHOSTTY_ZIG=/Volumes/Xcode/GhosttyBuilds/ghostty/tools/zig-0.17.0/zig ./build.nu --show-paths
+```
+
+The upstream build writes the XCFramework directly to
+`macos/GhosttyKit.xcframework` because the Xcode project links it there. The
+wrapper keeps that path as a symlink to
+`<build root>/xcframework/GhosttyKit.xcframework`, moves the real framework back
+to external storage after every build, and fails rather than leaving real build
+products in the worktree. Replaced copies are preserved under
+`<build root>/xcframework/history/` and can be removed manually when reclaiming
+disk space.
 
 The wrapper skips UI tests because they require interactive permissions. Run
 the `GhosttyUITests` target from the `Ghostty` scheme in Xcode when the change affects input,

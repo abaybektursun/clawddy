@@ -75,13 +75,18 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
             return [.turnStarted(turnID: event.turnID)]
         case "PreToolUse", "SubagentStart":
             return [.turnInteractionChanged(.none), .turnActivityChanged(.executing)]
-        case "PostToolUse", "SubagentStop":
+        case "PostToolUse", "PostToolUseFailure", "SubagentStop":
+            // PostToolUseFailure reports one tool call that failed inside the
+            // nested agentic loop. Claude continues the same turn, so this is
+            // activity evidence, not a terminal turn failure (StopFailure).
+            // Ending the turn here would emit a false error and drop every
+            // later permission/activity/stop event in that turn.
             return [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)]
         case "PermissionRequest":
             return [.turnInteractionChanged(.permission)]
         case "Stop":
             return [.turnCompleted(turnID: event.turnID)]
-        case "StopFailure", "PostToolUseFailure":
+        case "StopFailure":
             return [.turnFailed(nil)]
         case "PreCompact":
             return [.turnActivityChanged(.compacting)]

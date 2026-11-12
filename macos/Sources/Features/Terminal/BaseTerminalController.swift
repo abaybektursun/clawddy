@@ -30,7 +30,6 @@ class BaseTerminalController: NSWindowController,
                               NSWindowDelegate,
                               TerminalViewDelegate,
                               TerminalViewModel,
-                              ClipboardConfirmationViewDelegate,
                               FullscreenDelegate {
     /// Weak surface-to-controller ownership independent of AppKit's transient
     /// view and window attachment state.
@@ -70,8 +69,8 @@ class BaseTerminalController: NSWindowController,
     /// Non-nil when an alert is active so we don't overlap multiple.
     private var alert: NSAlert?
 
-    /// The clipboard confirmation window, if shown.
-    private var clipboardConfirmation: ClipboardConfirmationController?
+    /// Clipboard confirmation presentation, shared with agent surfaces.
+    private let clipboardConfirmationPresenter = ClipboardConfirmationPresenter()
 
     /// Fullscreen state management.
     private(set) var fullscreenStyle: FullscreenStyle?
@@ -155,6 +154,9 @@ class BaseTerminalController: NSWindowController,
 
         // Setup our bell state for the window
         setupBellNotificationPublisher()
+
+        // The sheet is anchored to this window, never to a global key window.
+        clipboardConfirmationPresenter.windowForSurface = { [weak self] _ in self?.window }
         setupClipboardConfirmationPublisher()
 
         // Setup our notifications for behaviors
@@ -1544,145 +1546,26 @@ extension BaseTerminalController: NSMenuItemValidation {
 extension BaseTerminalController {
     /// Presents clipboard confirmations published by surfaces in this controller.
     private func setupClipboardConfirmationPublisher() {
-        clipboardConfirmationCancellable = $surfaceTree
-            // Rebuild the merged publisher whenever the split tree changes.
-            .map { tree in
-                Publishers.MergeMany(tree.map { surface in
-                    // Carry the stable value-type ID rather than capturing the
-                    // surface in the operator chain. The subscription therefore
-                    // cannot extend the SurfaceView's lifetime.
-                    let id = surface.id
-                    return surface.$pendingClipboardConfirmation
-                        .map { (id, $0) }
-                        .eraseToAnyPublisher()
-                })
-                .eraseToAnyPublisher()
-            }
-            // Cancelling the old MergeMany releases every subscription for
-            // surfaces removed from the current tree.
-            .switchToLatest()
-            // Published emits synchronously from the libghostty callback. Hop
-            // to the main queue both for AppKit and so completing a request
-            // cannot invalidate callback state while that callback is active.
-            .receive(on: DispatchQueue.main)
-            // The cancellable is controller-owned, so capture it weakly here to
-            // avoid controller -> cancellable -> sink -> controller.
-            .sink { [weak self] id, request in
-                guard let self,
-                      let surface = surfaceTree.first(where: { $0.id == id }) else { return }
-                onConfirmClipboardRequest(request, for: surface)
-            }
-    }
-
-    private func onConfirmClipboardRequest(
-        _ request: Ghostty.ClipboardConfirmationRequest?,
-        for target: Ghostty.SurfaceView
-    ) {
-        guard let request else {
-            guard target.pendingClipboardConfirmation == nil,
-                  let confirmation = clipboardConfirmation,
-                  confirmation.confirmation.surface === target else { return }
-            dismissClipboardConfirmation(confirmation)
-            return
-        }
-
-        // Ignore values queued before a newer request replaced them.
-        guard target.pendingClipboardConfirmation === request else { return }
-
-        // SurfaceView.didSet has already cancelled the request that this one
-        // replaced. If that request owns the visible sheet, update the sheet
-        // in place. Dismissing it would briefly return focus to the terminal,
-        // which can produce another request and repeat the cycle. Requests
-        // from other surfaces cannot replace a window-modal sheet.
-        if let confirmation = clipboardConfirmation {
-            if confirmation.confirmation === request { return }
-            guard confirmation.confirmation.surface === target else {
-                target.pendingClipboardConfirmation = nil
-                return
-            }
-            confirmation.replaceConfirmation(with: request)
-            return
-        }
-
-        // A clipboard confirmation can originate from a surface that isn't
-        // focused. Presenting its sheet immediately would bring that surface's
-        // window or tab forward and steal focus. Signal that it needs attention,
-        // retain the request on the surface, and present it only after the
-        // surface gains focus.
-        if !target.focused {
-            if !target.bell {
-                NotificationCenter.default.post(
-                    name: .ghosttyBellDidRing,
-                    object: target)
-            }
-            return
-        }
-
-        // Preserve the prior behavior for confirmation types other than an
-        // OSC 52 read: only the controller's selected surface may present it.
-        guard target == focusedSurface else {
-            target.pendingClipboardConfirmation = nil
-            return
-        }
-        _ = presentClipboardConfirmation(request)
-    }
-
-    private func presentClipboardConfirmation(
-        _ request: Ghostty.ClipboardConfirmationRequest
-    ) -> Bool {
-        guard clipboardConfirmation == nil, let window else { return false }
-
-        clipboardConfirmation = ClipboardConfirmationController(
-            confirmation: request,
-            delegate: self
-        )
-        window.beginSheet(clipboardConfirmation!.window!)
-        return true
-    }
-
-    private func dismissClipboardConfirmation(
-        _ confirmation: ClipboardConfirmationController
-    ) {
-        guard clipboardConfirmation === confirmation else { return }
-        clipboardConfirmation = nil
-        if let confirmationWindow = confirmation.window {
-            window?.endSheet(confirmationWindow)
+        clipboardConfirmationCancellable = ClipboardConfirmationPresenter.pendingRequestsPublisher(
+            for: $surfaceTree.eraseToAnyPublisher()
+        ).sink { [weak self] id, request in
+            guard let self,
+                  let surface = surfaceTree.first(where: { $0.id == id }) else { return }
+            clipboardConfirmationPresenter.requestDidChange(
+                request,
+                for: surface,
+                isSelected: surface == focusedSurface)
         }
     }
 
     private func presentPendingClipboardConfirmation(for target: Ghostty.SurfaceView) {
-        guard target.focused,
-              target == focusedSurface,
-              let request = target.pendingClipboardConfirmation else { return }
-        onConfirmClipboardRequest(request, for: target)
+        clipboardConfirmationPresenter.presentPendingRequest(
+            for: target,
+            isSelected: target == focusedSurface)
     }
 
     private func cancelPendingClipboardConfirmation(for target: Ghostty.SurfaceView) {
-        if let confirmation = clipboardConfirmation,
-           confirmation.confirmation.surface === target {
-            dismissClipboardConfirmation(confirmation)
-        }
-        target.pendingClipboardConfirmation = nil
-    }
-
-    func clipboardConfirmationComplete(_ action: ClipboardConfirmationView.Action, remember: Bool) {
-        // End our clipboard confirmation no matter what
-        guard let cc = self.clipboardConfirmation else { return }
-        dismissClipboardConfirmation(cc)
-
-        switch action {
-        case .cancel:
-            cc.confirmation.cancel()
-        case .confirm:
-            cc.confirmation.complete(remember: remember)
-        }
-
-        // Clear only if this is still the surface's current request. Completing
-        // the request may synchronously cause a newer request to replace it.
-        if let target = cc.confirmation.surface,
-           target.pendingClipboardConfirmation === cc.confirmation {
-            target.pendingClipboardConfirmation = nil
-        }
+        clipboardConfirmationPresenter.cancelPendingRequest(for: target)
     }
 }
 

@@ -3,6 +3,157 @@ import Testing
 @testable import Ghostty
 
 struct AgentWorkspacePolicyTests {
+    @Test func workspaceMotionHonorsReduceMotion() {
+        #expect(AgentWorkspaceMotion.animation(reduceMotion: true) == nil)
+        #expect(AgentWorkspaceMotion.animation(reduceMotion: false) != nil)
+    }
+
+    @Test @MainActor func workspacePersistenceCanBeDisabledForIsolatedProcesses() {
+        let first = AgentWorkspaceModel(defaults: nil)
+        _ = first.apply(.userSelectedScope(.attention, agentID: nil))
+
+        let independent = AgentWorkspaceModel(defaults: nil)
+        #expect(first.scope == .attention)
+        #expect(independent.scope == .all)
+    }
+
+    @Test func visualAuditModeRequiresAnExplicitTruthyEnvironmentValue() {
+        #expect(!AgentVisualAuditPolicy.isEnabled(environment: [:]))
+        #expect(!AgentVisualAuditPolicy.isEnabled(environment: [
+            AgentVisualAuditPolicy.environmentKey: "0",
+        ]))
+        #expect(AgentVisualAuditPolicy.isEnabled(environment: [
+            AgentVisualAuditPolicy.environmentKey: " TRUE ",
+        ]))
+    }
+
+    @Test func visualAuditScenarioAcceptsOnlyKnownExplicitValues() {
+        #expect(AgentVisualAuditPolicy.scenario(environment: [
+            AgentVisualAuditPolicy.environmentKey: "yes",
+        ]) == .workspace)
+        #expect(AgentVisualAuditPolicy.scenario(environment: [
+            AgentVisualAuditPolicy.environmentKey: " NEW-AGENT ",
+        ]) == .newAgent)
+        #expect(AgentVisualAuditPolicy.scenario(environment: [
+            AgentVisualAuditPolicy.environmentKey: "new-agent-configured",
+        ]) == .newAgentConfigured)
+        #expect(AgentVisualAuditPolicy.scenario(environment: [
+            AgentVisualAuditPolicy.environmentKey: "lifecycle-states",
+        ]) == .lifecycleStates)
+        #expect(AgentVisualAuditPolicy.scenario(environment: [
+            AgentVisualAuditPolicy.environmentKey: "settings",
+        ]) == .settings)
+        #expect(AgentVisualAuditPolicy.scenario(environment: [
+            AgentVisualAuditPolicy.environmentKey: "unknown",
+        ]) == nil)
+    }
+
+    @Test func creationDraftTransitionsProviderSpecificStateAtomically() {
+        let preferences = AgentPreferences(
+            claudeCodeDefaultStartMode: .unrestricted,
+            codexDefaultStartMode: .standard)
+        var draft = AgentCreationDraft(provider: .claudeCode, preferences: preferences)
+        draft.name = "  Release review  "
+        draft.modelID = " claude-opus-4-1 "
+        draft.reasoningEffort = "max"
+
+        draft.transition(to: .codex, preferences: preferences)
+
+        #expect(draft.provider == .codex)
+        #expect(draft.startMode == .standard)
+        #expect(draft.modelID.isEmpty)
+        #expect(draft.reasoningEffort == nil)
+        #expect(draft.normalizedName == "Release review")
+    }
+
+    @Test func creationDraftDerivesNormalizedLaunchProfileAndSummary() {
+        var draft = AgentCreationDraft(
+            provider: .codex,
+            preferences: AgentPreferences())
+        draft.modelID = "  gpt-5.6  "
+        draft.reasoningEffort = "xhigh"
+
+        #expect(draft.launchProfile == AgentLaunchProfile(
+            modelID: "gpt-5.6",
+            reasoningEffort: "xhigh",
+            startMode: .unrestricted))
+        #expect(draft.launchSummary == "YOLO · gpt-5.6 · Extra high reasoning")
+    }
+
+    @Test func firstDisclosureStateCollapsesProjectsWithoutHidingSelectedTask() {
+        let selectedProjectID = UUID()
+        let otherProjectID = UUID()
+
+        #expect(AgentNavigationDisclosurePolicy.initialCollapsedProjectIDs(
+            validProjectIDs: [selectedProjectID, otherProjectID],
+            selectedScope: .task(
+                projectID: selectedProjectID,
+                taskID: UUID())) == [otherProjectID])
+        #expect(AgentNavigationDisclosurePolicy.initialCollapsedProjectIDs(
+            validProjectIDs: [selectedProjectID, otherProjectID],
+            selectedScope: .all) == [selectedProjectID, otherProjectID])
+    }
+
+    @Test func collapsingSelectedTaskPromotesSelectionToItsProject() {
+        let selectedProjectID = UUID()
+        let otherProjectID = UUID()
+        let taskID = UUID()
+
+        #expect(AgentNavigationDisclosurePolicy.replacementScopeWhenCollapsing(
+            projectID: selectedProjectID,
+            selectedScope: .task(
+                projectID: selectedProjectID,
+                taskID: taskID)) == .project(selectedProjectID))
+        #expect(AgentNavigationDisclosurePolicy.replacementScopeWhenCollapsing(
+            projectID: otherProjectID,
+            selectedScope: .task(
+                projectID: selectedProjectID,
+                taskID: taskID)) == nil)
+    }
+
+    @Test func disclosureReconciliationDropsMissingAndRevealsSelectedTaskParent() {
+        let selectedProjectID = UUID()
+        let collapsedProjectID = UUID()
+        let missingProjectID = UUID()
+
+        #expect(AgentNavigationDisclosurePolicy.reconciledCollapsedProjectIDs(
+            [selectedProjectID, collapsedProjectID, missingProjectID],
+            validProjectIDs: [selectedProjectID, collapsedProjectID],
+            selectedScope: .task(
+                projectID: selectedProjectID,
+                taskID: UUID())) == [collapsedProjectID])
+    }
+
+    @Test func smartScopeEmptyStatesCommunicateSuccessInsteadOfMissingData() {
+        let attention = AgentListEmptyStatePolicy.presentation(
+            scope: .attention,
+            searchQuery: "")
+        let running = AgentListEmptyStatePolicy.presentation(
+            scope: .running,
+            searchQuery: "")
+
+        #expect(attention.title == "All Clear")
+        #expect(attention.symbolName == "checkmark.circle")
+        #expect(!attention.offersCreation)
+        #expect(running.title == "Nothing Running")
+        #expect(!running.offersCreation)
+    }
+
+    @Test func taskAndSearchEmptyStatesOfferOnlyValidActions() {
+        let task = AgentListEmptyStatePolicy.presentation(
+            scope: .task(projectID: UUID(), taskID: UUID()),
+            searchQuery: "")
+        let search = AgentListEmptyStatePolicy.presentation(
+            scope: .task(projectID: UUID(), taskID: UUID()),
+            searchQuery: "fable")
+
+        #expect(task.offersCreation)
+        #expect(task.message == "Create the first agent for this task.")
+        #expect(search.title == "No Results")
+        #expect(search.message == "No agents match “fable”.")
+        #expect(!search.offersCreation)
+    }
+
     @Test func scopeSelectionCommitsScopeAndDescendantInOneTransition() {
         let projectID = UUID()
         let taskID = UUID()

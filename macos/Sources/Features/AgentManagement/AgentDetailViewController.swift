@@ -15,11 +15,16 @@ private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "Agent
 /// All keys are UUID-based. Zero rekey on rename.
 final class AgentDetailViewController: NSViewController {
 
+    /// Everything one agent's terminal needs, created and destroyed together.
+    private struct Pane {
+        let host: AgentTerminalHost
+        let container: TerminalViewContainer
+        let surface: Ghostty.SurfaceView
+    }
+
     private weak var ghostty: Ghostty.App?
 
-    private var hostsByID: [UUID: AgentTerminalHost] = [:]
-    private var hostingViewsByID: [UUID: TerminalViewContainer] = [:]
-    private var surfacesByID: [UUID: Ghostty.SurfaceView] = [:]
+    private var panesByID: [UUID: Pane] = [:]
     private(set) var activeID: UUID?
 
     private var placeholderView: NSView?
@@ -27,6 +32,13 @@ final class AgentDetailViewController: NSViewController {
     private var headerModel = AgentDetailHeaderModel()
 
     private var keyObservers: [NSObjectProtocol] = []
+
+    /// Activates an agent by id. Wired once by the workspace owner; the header
+    /// invokes it with the currently displayed agent's id at click time, so a
+    /// stale per-selection closure is impossible by construction.
+    var onStartAgent: ((UUID) -> Void)? {
+        didSet { headerModel.onStart = onStartAgent }
+    }
 
     init(ghostty: Ghostty.App) {
         self.ghostty = ghostty
@@ -66,6 +78,7 @@ final class AgentDetailViewController: NSViewController {
             placeholder.centerYAnchor.constraint(equalTo: view.centerYAnchor),
         ])
         placeholderView = placeholder
+        headerModel.onFocusTerminal = { [weak self] in self?.focusTerminal() }
     }
 
     override func viewDidAppear() {
@@ -84,7 +97,7 @@ final class AgentDetailViewController: NSViewController {
         guard keyObservers.isEmpty, let window = view.window else { return }
         let nc = NotificationCenter.default
         let onKey: (Notification) -> Void = { [weak self] _ in
-            self?.activeHost?.syncFocus()
+            self?.activePane?.host.syncFocus()
         }
         keyObservers.append(nc.addObserver(
             forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main, using: onKey))
@@ -92,9 +105,9 @@ final class AgentDetailViewController: NSViewController {
             forName: NSWindow.didResignKeyNotification, object: window, queue: .main, using: onKey))
     }
 
-    private var activeHost: AgentTerminalHost? {
+    private var activePane: Pane? {
         guard let id = activeID else { return nil }
-        return hostsByID[id]
+        return panesByID[id]
     }
 
     /// Reconcile Ghostty's logical focus after AppKit accepts any responder
@@ -102,63 +115,63 @@ final class AgentDetailViewController: NSViewController {
     /// the real first responder is an NSTextView owned by NSWindow, not the
     /// SwiftUI TextField that initiated editing.
     func workspaceFirstResponderDidChange() {
-        activeHost?.syncFocus()
+        activePane?.host.syncFocus()
     }
 
     /// Update the detail selection without launching work or stealing focus.
-    func selectAgent(
-        _ agent: AgentInstance,
-        projectName: String,
-        onStart: (() -> Void)? = nil
-    ) {
+    func selectAgent(_ agent: AgentInstance, projectName: String) {
         if headerModel.agent?.id != agent.id {
             headerModel.showsAgentDetails = false
         }
         headerModel.agent = agent
         headerModel.projectName = projectName
         headerModel.isActive = true
-        if let onStart {
-            headerModel.onStart = onStart
-        }
-        headerModel.onFocusTerminal = { [weak self] in self?.focusTerminal() }
-
-        if let previousID = activeID, previousID != agent.id {
-            hostsByID[previousID]?.focusedSurface = nil
-            detachContainer(id: previousID)
-        }
-
         activeID = agent.id
-        let hasSurface = hostsByID[agent.id] != nil
-        headerModel.hasSurface = hasSurface
-        if hasSurface {
-            attachContainer(id: agent.id)
+        refreshPresentation()
+        installWindowKeyObserversIfNeeded()
+    }
+
+    /// The one place presentation is computed. Invariants enforced here:
+    /// only the active pane may be attached and hold logical focus; header
+    /// and placeholder visibility are derived from whether that pane exists.
+    /// Every pane or selection mutation funnels through this method.
+    private func refreshPresentation() {
+        for (id, pane) in panesByID where id != activeID {
+            pane.host.focusedSurface = nil
+            pane.container.removeFromSuperview()
+        }
+        let pane = activePane
+        if let pane { attach(pane.container) }
+        let hasSurface = pane != nil
+        if headerModel.hasSurface != hasSurface {
+            headerModel.hasSurface = hasSurface
         }
         placeholderView?.isHidden = hasSurface
-        installWindowKeyObserversIfNeeded()
     }
 
     /// Show an existing agent's terminal or create a new one after an explicit action.
     @discardableResult
     func showOrSwitch(
-        id: UUID,
-        displayName: String,
         projectName: String,
         agent: AgentInstance,
         focusTerminal: Bool = true,
         select: Bool = true,
         createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
     ) -> Bool {
+        let id = agent.id
+        // First: detaches the previous container, drops the previous host's
+        // logical focus, and resets header state — before the new surface
+        // claims anything. Also sets activeID.
         if select {
             selectAgent(agent, projectName: projectName)
         }
 
         var isNew = false
 
-        if hostsByID[id] == nil {
+        if panesByID[id] == nil {
             guard let ghostty else { fatalError("AgentDetailViewController used without ghostty") }
             guard let (app, config) = createConfig() else {
-                headerModel.hasSurface = false
-                placeholderView?.isHidden = false
+                // No pane was created; presentation already reflects that.
                 return false
             }
             let surface = Ghostty.SurfaceView(app, baseConfig: config)
@@ -170,34 +183,34 @@ final class AgentDetailViewController: NSViewController {
             }
             container.translatesAutoresizingMaskIntoConstraints = false
 
+            // Must stay in the creation path: selection never sets
+            // hostingWindow, so a pane created with select: false and later
+            // shown via selectAgent would keep a nil hostingWindow and
+            // syncFocus could never grant focus.
             host.hostingWindow = view.window
-            hostsByID[id] = host
-            hostingViewsByID[id] = container
-            surfacesByID[id] = surface
+            panesByID[id] = Pane(host: host, container: container, surface: surface)
             isNew = true
-            if select {
-                attachContainer(id: id)
-                headerModel.hasSurface = true
-            }
             logger.info("created host for agent \(id)")
         }
 
-        if select {
-            attachContainer(id: id)
-            placeholderView?.isHidden = true
-        }
-        if select, let host = hostsByID[id], let surface = surfacesByID[id] {
-            // The window can change between creation and show (rare); re-anchor.
-            host.hostingWindow = view.window
-            host.focusedSurface = surface
-            // Canonical focus move. Handles "view not yet in a window" via backoff,
-            // and pairs resignFirstResponder on the previous focused surface.
+        if select, let pane = panesByID[id] {
+            // Attach before moveFocus (the pane may not have existed when
+            // selectAgent refreshed): makeFirstResponder needs the view in a
+            // window; don't lean on moveFocus's backoff to paper over it.
+            refreshPresentation()
+            // The window can change between creation and show (rare);
+            // re-anchor BEFORE focusedSurface — its didSet runs syncFocus,
+            // which reads hostingWindow.isKeyWindow.
+            pane.host.hostingWindow = view.window
+            // Logical selection before AppKit focus: the responder-change
+            // callback must see this surface as selected to compute
+            // focused == true.
+            pane.host.focusedSurface = pane.surface
+            // Canonical focus move. Pairs resignFirstResponder on the
+            // previous focused surface.
             if focusTerminal {
-                Ghostty.moveFocus(to: surface)
+                Ghostty.moveFocus(to: pane.surface)
             }
-        }
-        if select {
-            activeID = id
         }
 
         installWindowKeyObserversIfNeeded()
@@ -205,8 +218,34 @@ final class AgentDetailViewController: NSViewController {
         return isNew
     }
 
+    /// Present a pane whose asynchronous preparation just finished. Authority
+    /// to attach or focus is re-derived from the pane this controller presents
+    /// now, not from the activation that started the launch, so a selection
+    /// change during preparation cannot steal focus. The pane is still created
+    /// when it is no longer selected; it is simply retained for the next
+    /// selection instead of replacing the current one.
+    @discardableResult
+    func presentPreparedSurface(
+        projectName: String,
+        agent: AgentInstance,
+        createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+    ) -> Bool {
+        let window = view.window
+        let presentation = AgentLaunchPresentationPolicy.decide(
+            agentID: agent.id,
+            selectedAgentID: activeID,
+            windowIsVisible: window?.isVisible ?? false,
+            windowIsMiniaturized: window?.isMiniaturized ?? false)
+        return showOrSwitch(
+            projectName: projectName,
+            agent: agent,
+            focusTerminal: presentation.focusesTerminal,
+            select: presentation.presentsPane,
+            createConfig: createConfig)
+    }
+
     func focusTerminal() {
-        guard let activeID, let surface = surfacesByID[activeID] else { return }
+        guard let surface = activePane?.surface else { return }
         Ghostty.moveFocus(to: surface)
     }
 
@@ -217,40 +256,28 @@ final class AgentDetailViewController: NSViewController {
 
     func removeSurface(id: UUID) {
         logger.info("removeSurface \(id)")
-        hostingViewsByID.removeValue(forKey: id)?.removeFromSuperview()
-        hostsByID[id]?.focusedSurface = nil
-        hostsByID.removeValue(forKey: id)
-        surfacesByID.removeValue(forKey: id)
-        if activeID == id {
-            headerModel.hasSurface = false
-            placeholderView?.isHidden = false
-        }
+        guard let pane = panesByID.removeValue(forKey: id) else { return }
+        pane.host.focusedSurface = nil
+        pane.container.removeFromSuperview()
+        refreshPresentation()
     }
 
     func showPlaceholder() {
-        if let activeID {
-            hostsByID[activeID]?.focusedSurface = nil
-            detachContainer(id: activeID)
-        }
         activeID = nil
         headerModel.isActive = false
         headerModel.agent = nil
-        headerModel.hasSurface = false
         headerModel.showsAgentDetails = false
-        placeholderView?.isHidden = false
+        refreshPresentation()
     }
 
-    func hasSurface(id: UUID) -> Bool { hostsByID[id] != nil }
+    func hasSurface(id: UUID) -> Bool { panesByID[id] != nil }
 
-    var hasActiveSurface: Bool {
-        guard let activeID else { return false }
-        return hostsByID[activeID] != nil
-    }
+    var hasActiveSurface: Bool { activePane != nil }
 
-    func surfaceView(for id: UUID) -> Ghostty.SurfaceView? { surfacesByID[id] }
+    func surfaceView(for id: UUID) -> Ghostty.SurfaceView? { panesByID[id]?.surface }
 
-    private func attachContainer(id: UUID) {
-        guard let container = hostingViewsByID[id], container.superview == nil else { return }
+    private func attach(_ container: TerminalViewContainer) {
+        guard container.superview == nil else { return }
         view.addSubview(container)
         NSLayoutConstraint.activate([
             container.topAnchor.constraint(equalTo: terminalTopAnchor),
@@ -260,19 +287,18 @@ final class AgentDetailViewController: NSViewController {
         ])
     }
 
-    private func detachContainer(id: UUID) {
-        hostingViewsByID[id]?.removeFromSuperview()
-    }
-
     /// Send text to a specific agent's terminal pty.
     func sendText(_ text: String, toAgent id: UUID) {
-        guard let surface = surfacesByID[id]?.surfaceModel else { return }
+        guard let surface = panesByID[id]?.surface.surfaceModel else { return }
         surface.sendText(text)
     }
 
-    /// Set background color to match Ghostty's terminal theme.
+    /// Match the terminal canvas to Ghostty's theme: the layer takes the
+    /// terminal background color and the placeholder's color scheme follows
+    /// it. The header itself deliberately keeps the window-chrome color.
     func setBackgroundColor(_ color: NSColor) {
-        headerModel.backgroundColor = Color(nsColor: .windowBackgroundColor)
+        headerModel.canvasColorScheme = AgentCanvasAppearancePolicy.colorScheme(
+            for: color)
         view.layer?.backgroundColor = color.cgColor
     }
 }
@@ -287,7 +313,8 @@ class AgentDetailHeaderModel {
     var hasSurface: Bool = false
     var showsAgentDetails: Bool = false
     var backgroundColor: Color = Color(nsColor: .windowBackgroundColor)
-    @ObservationIgnored var onStart: (() -> Void)?
+    var canvasColorScheme: ColorScheme = .dark
+    @ObservationIgnored var onStart: ((UUID) -> Void)?
     @ObservationIgnored var onFocusTerminal: (() -> Void)?
 }
 
@@ -338,7 +365,7 @@ private struct AgentDetailHeaderView: View {
                         .accessibilitySortPriority(1)
                     } else {
                         Button {
-                            model.onStart?()
+                            model.onStart?(agent.id)
                         } label: {
                             if agent.isStarting {
                                 HStack(spacing: 6) {
@@ -383,27 +410,71 @@ private struct AgentDetailHeaderView: View {
 
 // MARK: - Placeholder
 
+private struct PlaceholderIconBox: View {
+    let systemName: String
+    let color: Color
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(color.opacity(0.09))
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08))
+            Image(systemName: systemName)
+                .font(.system(size: 29, weight: .medium))
+                .foregroundStyle(color)
+        }
+        .frame(width: 68, height: 68)
+    }
+}
+
 private struct AgentPlaceholderView: View {
     var model: AgentDetailHeaderModel
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 0) {
             if let agent = model.agent {
-                Image(systemName: placeholderIcon(for: agent))
-                    .font(.system(size: 36, weight: .light))
-                    .foregroundStyle(placeholderColor(for: agent))
+                PlaceholderIconBox(
+                    systemName: placeholderIcon(for: agent),
+                    color: placeholderColor(for: agent))
+                .shadow(color: .black.opacity(0.08), radius: 18, y: 8)
+                .padding(.bottom, 20)
 
-                Text(placeholderTitle(for: agent))
-                    .font(.title3.weight(.semibold))
+                Text(agent.name)
+                    .font(.title2.weight(.semibold))
+                    .tracking(-0.25)
+                    .lineLimit(1)
+
+                HStack(spacing: 5) {
+                    Label(agent.provider.displayName, systemImage: agent.provider.symbolName)
+                    Text("·")
+                    Text(model.projectName)
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.top, 5)
+
+                Label(placeholderTitle(for: agent), systemImage: agent.displayState.iconName ?? "circle")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(placeholderColor(for: agent))
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 5)
+                    .background(placeholderColor(for: agent).opacity(0.09), in: Capsule())
+                    .padding(.top, 16)
 
                 Text(placeholderMessage(for: agent))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-                    .frame(maxWidth: 360)
+                    .frame(maxWidth: 420)
+                    .padding(.top, 11)
+
+                AgentMetadataCompactLine(agent: agent)
+                    .padding(.top, 10)
 
                 Button {
-                    model.onStart?()
+                    model.onStart?(agent.id)
                 } label: {
                     if agent.isStarting {
                         HStack(spacing: 7) {
@@ -417,21 +488,28 @@ private struct AgentPlaceholderView: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(agent.isStarting)
+                .padding(.top, 18)
             } else {
-                Image(systemName: "sidebar.left")
-                    .font(.system(size: 36, weight: .light))
-                    .foregroundStyle(.secondary)
+                PlaceholderIconBox(systemName: "sidebar.left", color: .secondary)
+                    .padding(.bottom, 20)
 
                 Text("Select an Agent")
-                    .font(.title3.weight(.semibold))
+                    .font(.title2.weight(.semibold))
+                    .tracking(-0.25)
 
                 Text("Choose an agent in the sidebar to view its status and terminal.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+                    .padding(.top, 8)
             }
         }
-        .padding(32)
+        .frame(minWidth: 380, maxWidth: 520)
+        .padding(48)
+        // The canvas follows the terminal theme, which can intentionally
+        // differ from the macOS appearance used by the surrounding workspace.
+        .environment(\.colorScheme, model.canvasColorScheme)
         .accessibilityElement(children: .contain)
     }
 
@@ -474,5 +552,11 @@ private struct AgentPlaceholderView: View {
         if agent.surfaceState == .failed { return "Retry" }
         if agent.runtimeErrorMessage != nil { return "Restart Agent" }
         return "Start Agent"
+    }
+}
+
+enum AgentCanvasAppearancePolicy {
+    static func colorScheme(for backgroundColor: NSColor) -> ColorScheme {
+        backgroundColor.isLightColor ? .light : .dark
     }
 }

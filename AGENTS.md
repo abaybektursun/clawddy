@@ -11,6 +11,15 @@ A file for [guiding coding agents](https://agents.md/).
 - Default root: `/Volumes/Xcode/GhosttyBuilds/ghostty`.
 - Set `GHOSTTY_BUILD_ROOT` or pass `--build-root` only to select another
   external path.
+- Zig 0.17 is not the `zig` on `PATH`. Select it before any `./build.nu`
+  command, e.g.
+  `export GHOSTTY_ZIG=/Volumes/Xcode/GhosttyBuilds/ghostty/tools/zig-0.17.0/zig`
+  (fallback: `zig` on `PATH`). `./build.nu --show-paths` prints the selected
+  compiler and the version it reports.
+- `macos/GhosttyKit.xcframework` is a symlink to
+  `<root>/xcframework/GhosttyKit.xcframework`. Never replace it with a real
+  directory; the wrapper restores the symlink after a build and preserves
+  replaced copies in `<root>/xcframework/history`.
 
 ## Commands
 

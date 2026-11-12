@@ -155,12 +155,18 @@ enum AgentStateReducer {
         case .provider(let generation, let provider, let eventID, let domainEvent, let isViewed):
             guard state.launchGeneration == generation else { break }
             if case .providerExited(let status) = domainEvent {
-                let wasRunning = state.processState == .running
+                // "Pre-start" is the launch phase, not "not currently
+                // running". A session that started and ended has already
+                // moved the process to .exited via SessionEnd, so inferring
+                // a start failure from .exited would relabel a normal
+                // interrupted exit as a launch failure.
+                let stillLaunching = state.processState == .notStarted
+                    || state.processState == .launching
                 state.processState = .exited
                 state.activityState = .unknown
                 state.interactionState = .none
                 state.turnState = .inactive
-                if !wasRunning && status != 0 {
+                if stillLaunching && status != 0 {
                     state.failureMessage = "The provider exited before the agent session started (status \(status))."
                     effects.append(.failed)
                 }

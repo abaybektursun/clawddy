@@ -3,6 +3,38 @@ import SwiftUI
 import UniformTypeIdentifiers
 import Observation
 
+enum AgentWorkspaceMotion {
+    static func animation(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .smooth(duration: 0.2)
+    }
+}
+
+/// One source for the Move Up/Down pair used by project, task, and agent rows.
+/// `onMove` receives -1 (up) or +1 (down).
+@ViewBuilder
+private func moveUpDownMenuButtons(
+    canMoveUp: Bool,
+    canMoveDown: Bool,
+    onMove: @escaping (Int) -> Void
+) -> some View {
+    Button("Move Up", systemImage: "arrow.up") { onMove(-1) }
+        .disabled(!canMoveUp)
+    Button("Move Down", systemImage: "arrow.down") { onMove(1) }
+        .disabled(!canMoveDown)
+}
+
+/// The accessibility-action twin of `moveUpDownMenuButtons`: actions are
+/// omitted (not disabled) when unavailable, per accessibility convention.
+@ViewBuilder
+private func moveUpDownAccessibilityActions(
+    canMoveUp: Bool,
+    canMoveDown: Bool,
+    onMove: @escaping (Int) -> Void
+) -> some View {
+    if canMoveUp { Button("Move Up") { onMove(-1) } }
+    if canMoveDown { Button("Move Down") { onMove(1) } }
+}
+
 @Observable
 @MainActor
 final class AgentWorkspaceModel {
@@ -18,6 +50,7 @@ final class AgentWorkspaceModel {
         static let scope = "clawddy.workspace.scope"
         static let selectedAgentID = "clawddy.workspace.selectedAgentID"
         static let preferredAgents = "clawddy.workspace.preferredAgents"
+        static let collapsedProjects = "clawddy.workspace.collapsedProjects"
     }
 
     private(set) var selection: AgentWorkspaceSelectionState
@@ -25,17 +58,21 @@ final class AgentWorkspaceModel {
     var selectedAgentID: UUID? { selection.agentID }
     var searchQuery = ""
     private var preferredAgents: [String: UUID] = [:]
+    private var collapsedProjectIDs: Set<UUID> = []
+    private var hasPersistedProjectDisclosure = false
+    private let defaults: UserDefaults?
 
-    init() {
+    init(defaults: UserDefaults? = .standard) {
+        self.defaults = defaults
         let restoredScope: Scope
-        if let raw = UserDefaults.standard.string(forKey: DefaultsKey.scope),
+        if let raw = defaults?.string(forKey: DefaultsKey.scope),
            let restored = Self.decodeScope(raw) {
             restoredScope = restored
         } else {
             restoredScope = .all
         }
         let restoredAgentID: UUID?
-        if let rawID = UserDefaults.standard.string(forKey: DefaultsKey.selectedAgentID) {
+        if let rawID = defaults?.string(forKey: DefaultsKey.selectedAgentID) {
             restoredAgentID = UUID(uuidString: rawID)
         } else {
             restoredAgentID = nil
@@ -43,11 +80,16 @@ final class AgentWorkspaceModel {
         selection = AgentWorkspaceSelectionState(
             scope: restoredScope,
             agentID: restoredAgentID)
-        if let stored = UserDefaults.standard.dictionary(
+        if let stored = defaults?.dictionary(
             forKey: DefaultsKey.preferredAgents) as? [String: String] {
             preferredAgents = stored.reduce(into: [:]) { result, pair in
                 if let id = UUID(uuidString: pair.value) { result[pair.key] = id }
             }
+        }
+        if let stored = defaults?.stringArray(
+            forKey: DefaultsKey.collapsedProjects) {
+            collapsedProjectIDs = Set(stored.compactMap(UUID.init(uuidString:)))
+            hasPersistedProjectDisclosure = true
         }
     }
 
@@ -58,8 +100,12 @@ final class AgentWorkspaceModel {
         let transition = AgentWorkspaceSelectionReducer.reduce(selection, action: action)
         if transition.state != selection {
             selection = transition.state
-            UserDefaults.standard.set(encodedScope, forKey: DefaultsKey.scope)
-            UserDefaults.standard.set(
+            if case .task(let projectID, _) = selection.scope,
+               collapsedProjectIDs.remove(projectID) != nil {
+                persistCollapsedProjects()
+            }
+            defaults?.set(encodedScope, forKey: DefaultsKey.scope)
+            defaults?.set(
                 selectedAgentID?.uuidString,
                 forKey: DefaultsKey.selectedAgentID)
         }
@@ -87,6 +133,17 @@ final class AgentWorkspaceModel {
         }
     }
 
+    func isProjectExpanded(_ projectID: UUID) -> Bool {
+        !collapsedProjectIDs.contains(projectID)
+    }
+
+    func setProjectExpanded(_ expanded: Bool, projectID: UUID) {
+        let changed = expanded
+            ? collapsedProjectIDs.remove(projectID) != nil
+            : collapsedProjectIDs.insert(projectID).inserted
+        if changed { persistCollapsedProjects() }
+    }
+
     func reconcile(with config: AgentConfig) {
         let projectIDs = Set(config.projects.map(\.id))
         var reconciledScope = scope
@@ -109,6 +166,23 @@ final class AgentWorkspaceModel {
         if reconciledScope != scope || reconciledAgentID != selectedAgentID {
             _ = apply(.reveal(scope: reconciledScope, agentID: reconciledAgentID))
         }
+        if !hasPersistedProjectDisclosure {
+            collapsedProjectIDs = AgentNavigationDisclosurePolicy
+                .initialCollapsedProjectIDs(
+                    validProjectIDs: projectIDs,
+                    selectedScope: scope)
+            hasPersistedProjectDisclosure = true
+            persistCollapsedProjects()
+        }
+        let reconciledCollapsed = AgentNavigationDisclosurePolicy
+            .reconciledCollapsedProjectIDs(
+                collapsedProjectIDs,
+                validProjectIDs: projectIDs,
+                selectedScope: scope)
+        if reconciledCollapsed != collapsedProjectIDs {
+            collapsedProjectIDs = reconciledCollapsed
+            persistCollapsedProjects()
+        }
         let validAgentIDs = Set(config.allAgentEntries.map(\.id))
         let reconciledPreferences = preferredAgents.filter {
             validAgentIDs.contains($0.value)
@@ -121,7 +195,13 @@ final class AgentWorkspaceModel {
 
     private func persistPreferredAgents() {
         let encoded = preferredAgents.mapValues(\.uuidString)
-        UserDefaults.standard.set(encoded, forKey: DefaultsKey.preferredAgents)
+        defaults?.set(encoded, forKey: DefaultsKey.preferredAgents)
+    }
+
+    private func persistCollapsedProjects() {
+        defaults?.set(
+            collapsedProjectIDs.map(\.uuidString).sorted(),
+            forKey: DefaultsKey.collapsedProjects)
     }
 
     private static func preferenceKey(projectID: UUID) -> String {
@@ -229,7 +309,7 @@ enum DestructiveAction: Identifiable {
         case .deleteTask:
             return "This cannot be undone."
         case .deleteAgent:
-            return "The agent's terminal will be closed. This cannot be undone."
+            return "The running process and terminal will close. This cannot be undone."
         case .resetSessions(_, _, let count):
             return "\(count) existing agent\(count == 1 ? "" : "s") will use the new directory after being restarted. Conversation history is preserved."
         }
@@ -261,6 +341,7 @@ struct AgentNavigationView: View {
     @State private var renameTarget: WorkspaceRenameTarget?
     @State private var deletion: DestructiveAction?
     @Environment(\.undoManager) private var undoManager
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let userScopeSelection = Binding(
@@ -294,94 +375,96 @@ struct AgentNavigationView: View {
 
             Section("Projects") {
                 ForEach(Array(config.projects.enumerated()), id: \.element.id) { projectIndex, project in
-                    hierarchyLabel(
-                        project.name,
-                        icon: "folder",
-                        state: aggregateState(for: project))
-                        .tag(AgentWorkspaceModel.Scope.project(project.id))
-                        .contextMenu {
-                            Button("New Task", systemImage: "plus") { addTask(to: project) }
-                            Button("Rename", systemImage: "pencil") {
-                                renameTarget = .project(project.id, project.name)
-                            }
-                            Button("Choose Directory…", systemImage: "folder") {
-                                directoryProjectID = project.id
-                                choosingProjectDirectory = true
-                            }
-                            Divider()
-                            Button("Move Up", systemImage: "arrow.up") {
-                                moveProject(project.id, to: projectIndex - 1)
-                            }
-                            .disabled(projectIndex == config.projects.startIndex)
-                            Button("Move Down", systemImage: "arrow.down") {
-                                moveProject(project.id, to: projectIndex + 1)
-                            }
-                            .disabled(projectIndex == config.projects.index(before: config.projects.endIndex))
-                            Divider()
-                            Button("Delete", systemImage: "trash", role: .destructive) {
-                                deletion = .deleteProject(
-                                    id: project.id,
-                                    name: project.name,
-                                    agentCount: project.tasks.flatMap(\.agents).count)
-                            }
+                    // Native disclosure: AppKit draws the chevron, indents the
+                    // children, and animates; we only own the expansion state.
+                    DisclosureGroup(isExpanded: projectExpansion(project)) {
+                        ForEach(Array(project.tasks.enumerated()), id: \.element.id) { taskIndex, task in
+                            hierarchyLabel(
+                                task.name,
+                                icon: "list.bullet.rectangle",
+                                state: aggregateState(for: task))
+                                .tag(AgentWorkspaceModel.Scope.task(
+                                    projectID: project.id,
+                                    taskID: task.id))
+                                .contextMenu {
+                                    Button("Rename", systemImage: "pencil") {
+                                        renameTarget = .task(project.id, task.id, task.name)
+                                    }
+                                    Divider()
+                                    moveUpDownMenuButtons(
+                                        canMoveUp: taskIndex > project.tasks.startIndex,
+                                        canMoveDown: taskIndex < project.tasks.index(before: project.tasks.endIndex),
+                                        onMove: { moveTask(task.id, in: project.id, to: taskIndex + $0) })
+                                    Divider()
+                                    Button("Delete", systemImage: "trash", role: .destructive) {
+                                        deletion = .deleteTask(
+                                            projectId: project.id,
+                                            taskId: task.id,
+                                            name: task.name,
+                                            agentCount: task.agents.count)
+                                    }
+                                }
+                                .accessibilityHint("Shows agents in \(task.name)")
+                                .draggable(AgentWorkspaceDragPayload(.task(task.id)))
+                                .dropDestination(for: AgentWorkspaceDragPayload.self) { payloads, _ in
+                                    handleTaskDrop(
+                                        payloads,
+                                        project: project,
+                                        task: task,
+                                        taskIndex: taskIndex)
+                                }
+                                .accessibilityActions {
+                                    moveUpDownAccessibilityActions(
+                                        canMoveUp: taskIndex > project.tasks.startIndex,
+                                        canMoveDown: taskIndex < project.tasks.index(before: project.tasks.endIndex),
+                                        onMove: { moveTask(task.id, in: project.id, to: taskIndex + $0) })
+                                }
                         }
-                        .accessibilityHint("Shows every agent in this project")
-                        .draggable(AgentWorkspaceDragPayload(.project(project.id)))
-                        .dropDestination(for: AgentWorkspaceDragPayload.self) { payloads, _ in
-                            handleProjectDrop(
-                                payloads,
-                                project: project,
-                                projectIndex: projectIndex)
-                        }
-
-                    ForEach(Array(project.tasks.enumerated()), id: \.element.id) { taskIndex, task in
+                    } label: {
                         hierarchyLabel(
-                            task.name,
-                            icon: "list.bullet.rectangle",
-                            state: aggregateState(for: task))
-                            .padding(.leading, 18)
-                            .tag(AgentWorkspaceModel.Scope.task(
-                                projectID: project.id,
-                                taskID: task.id))
+                            project.name,
+                            icon: "folder",
+                            state: aggregateState(for: project),
+                            quietCount: model.isProjectExpanded(project.id)
+                                ? nil : project.tasks.flatMap(\.agents).count)
                             .contextMenu {
+                                Button("New Task", systemImage: "plus") { addTask(to: project) }
                                 Button("Rename", systemImage: "pencil") {
-                                    renameTarget = .task(project.id, task.id, task.name)
+                                    renameTarget = .project(project.id, project.name)
+                                }
+                                Button("Choose Directory…", systemImage: "folder") {
+                                    directoryProjectID = project.id
+                                    choosingProjectDirectory = true
                                 }
                                 Divider()
-                                Button("Move Up", systemImage: "arrow.up") {
-                                    moveTask(
-                                        task.id,
-                                        in: project.id,
-                                        to: taskIndex - 1)
-                                }
-                                .disabled(taskIndex == project.tasks.startIndex)
-                                Button("Move Down", systemImage: "arrow.down") {
-                                    moveTask(
-                                        task.id,
-                                        in: project.id,
-                                        to: taskIndex + 1)
-                                }
-                                .disabled(taskIndex == project.tasks.index(
-                                    before: project.tasks.endIndex))
+                                moveUpDownMenuButtons(
+                                    canMoveUp: projectIndex > config.projects.startIndex,
+                                    canMoveDown: projectIndex < config.projects.index(before: config.projects.endIndex),
+                                    onMove: { moveProject(project.id, to: projectIndex + $0) })
                                 Divider()
                                 Button("Delete", systemImage: "trash", role: .destructive) {
-                                    deletion = .deleteTask(
-                                        projectId: project.id,
-                                        taskId: task.id,
-                                        name: task.name,
-                                        agentCount: task.agents.count)
+                                    deletion = .deleteProject(
+                                        id: project.id,
+                                        name: project.name,
+                                        agentCount: project.tasks.flatMap(\.agents).count)
                                 }
                             }
-                            .accessibilityHint("Shows agents in \(task.name)")
-                            .draggable(AgentWorkspaceDragPayload(.task(task.id)))
+                            .draggable(AgentWorkspaceDragPayload(.project(project.id)))
                             .dropDestination(for: AgentWorkspaceDragPayload.self) { payloads, _ in
-                                handleTaskDrop(
+                                handleProjectDrop(
                                     payloads,
                                     project: project,
-                                    task: task,
-                                    taskIndex: taskIndex)
+                                    projectIndex: projectIndex)
+                            }
+                            .accessibilityActions {
+                                moveUpDownAccessibilityActions(
+                                    canMoveUp: projectIndex > config.projects.startIndex,
+                                    canMoveDown: projectIndex < config.projects.index(before: config.projects.endIndex),
+                                    onMove: { moveProject(project.id, to: projectIndex + $0) })
                             }
                     }
+                    .tag(AgentWorkspaceModel.Scope.project(project.id))
+                    .accessibilityHint("Shows every agent in this project")
                 }
 
                 WorkspaceAppendDropTarget { payloads in
@@ -397,6 +480,8 @@ struct AgentNavigationView: View {
             }
         }
         .listStyle(.sidebar)
+        // AppKit's sidebar item owns the glass; the List draws content only.
+        .scrollContentBackground(.hidden)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             HStack {
                 Button("Add Project", systemImage: "folder.badge.plus") {
@@ -412,7 +497,7 @@ struct AgentNavigationView: View {
                 }
                 .labelStyle(.iconOnly)
                 .disabled(selectedProject == nil)
-                .help("Add Task")
+                .help(selectedProject == nil ? "Select a project to add a task" : "Add Task")
 
                 Spacer()
 
@@ -498,7 +583,8 @@ struct AgentNavigationView: View {
     private func hierarchyLabel(
         _ title: String,
         icon: String,
-        state: DisplayState?
+        state: DisplayState?,
+        quietCount: Int? = nil
     ) -> some View {
         HStack(spacing: 6) {
             Label {
@@ -520,10 +606,43 @@ struct AgentNavigationView: View {
                 .font(.caption2)
                 .lineLimit(1)
                 .accessibilityHidden(true)
+            } else if let quietCount, quietCount > 0 {
+                Text(quietCount, format: .number)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
+                    .accessibilityHidden(true)
             }
         }
         .help(state.map { "\(title): \($0.label)" } ?? "\(title): No agents")
-        .accessibilityValue(state.map { "Aggregated status: \($0.label)" } ?? "No agents")
+        .accessibilityValue(accessibilityValue(state: state, quietCount: quietCount))
+    }
+
+    private func accessibilityValue(state: DisplayState?, quietCount: Int?) -> String {
+        if let state { return "Aggregated status: \(state.label)" }
+        if let quietCount {
+            return "\(quietCount) agent\(quietCount == 1 ? "" : "s")"
+        }
+        return "No agents"
+    }
+
+    /// Two-way disclosure state. Collapsing a project whose task is selected
+    /// first moves the selection up to the project, so nothing selected hides.
+    private func projectExpansion(_ project: AgentProject) -> Binding<Bool> {
+        Binding(
+            get: { model.isProjectExpanded(project.id) },
+            set: { expanded in
+                if !expanded,
+                   let replacement = AgentNavigationDisclosurePolicy
+                       .replacementScopeWhenCollapsing(
+                           projectID: project.id,
+                           selectedScope: model.scope) {
+                    onSelectScope(replacement)
+                }
+                withAnimation(AgentWorkspaceMotion.animation(reduceMotion: reduceMotion)) {
+                    model.setProjectExpanded(expanded, projectID: project.id)
+                }
+            })
     }
 
     private func aggregateState(for project: AgentProject) -> DisplayState? {
@@ -604,7 +723,7 @@ struct AgentNavigationView: View {
     }
 
     private func perform(_ move: AgentWorkspaceMove, actionName: String) -> Bool {
-        withAnimation(.smooth(duration: 0.2)) {
+        withAnimation(AgentWorkspaceMotion.animation(reduceMotion: reduceMotion)) {
             AgentWorkspaceTransactions.perform(
                 move,
                 on: config,
@@ -692,6 +811,7 @@ struct AgentNavigationView: View {
         case .resetSessions(let projectID, let newPath, _):
             applyDirectory(newPath, to: projectID)
         case .deleteAgent:
+            // Presented by AgentListView, never by this view.
             break
         }
     }
@@ -705,6 +825,7 @@ struct AgentListView: View {
     var config: AgentConfig
     var bridge: AgentBridge
     var model: AgentWorkspaceModel
+    var visualAuditScenario: AgentVisualAuditScenario?
     let onSelectAgent: (UUID, AgentProject, AgentSelectionIntent) -> Void
     let onReconcileSelection: ([UUID], UUID?) -> Void
     let onActivateAgent: (UUID, AgentProject) -> Void
@@ -713,8 +834,9 @@ struct AgentListView: View {
 
     @State private var renameTarget: WorkspaceRenameTarget?
     @State private var showingNewAgent = false
-    @State private var pendingDelete: AgentEntry?
+    @State private var deletion: DestructiveAction?
     @Environment(\.undoManager) private var undoManager
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// List writes represent deliberate mouse or keyboard selection. Other
     /// code writes directly to the model and is handled as a passive reveal
@@ -757,25 +879,23 @@ struct AgentListView: View {
         }.sorted { AgentOrdering.precedes($0.id, $1.id, ranks: ranks) }
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            NativeTextField(
-                placeholder: "Search Agents",
-                text: Binding(
-                    get: { model.searchQuery },
-                    set: { model.searchQuery = $0 }),
-                style: .search)
-            .padding(.horizontal, 12)
-            .frame(height: 42, alignment: .center)
-            .overlay(alignment: .bottom) { Divider() }
+    private var emptyPresentation: AgentListEmptyPresentation {
+        AgentListEmptyStatePolicy.presentation(
+            scope: model.scope,
+            searchQuery: model.searchQuery)
+    }
 
+    var body: some View {
+        // A concrete container: `.sheet`/`.onAppear` below must attach once,
+        // not per child as they would on a Group.
+        VStack(spacing: 0) {
             if visibleAgents.isEmpty {
                 ContentUnavailableView {
-                    Label(emptyTitle, systemImage: "person.crop.circle.badge.questionmark")
+                    Label(emptyPresentation.title, systemImage: emptyPresentation.symbolName)
                 } description: {
-                    Text(emptyDescription)
+                    Text(emptyPresentation.message)
                 } actions: {
-                    if selectedTask != nil {
+                    if emptyPresentation.offersCreation, selectedTask != nil {
                         Button("New Agent", systemImage: "plus") { showingNewAgent = true }
                     }
                 }
@@ -787,7 +907,9 @@ struct AgentListView: View {
                         let project = item.project
                         let task = item.task
                         let instance = item.instance
-                        AgentListRow(agent: instance, project: project.name, task: task.name)
+                        AgentListRow(
+                            agent: instance,
+                            location: rowLocation(project: project, task: task))
                             .tag(entry.id)
                             .contentShape(Rectangle())
                             .contextMenu {
@@ -802,26 +924,29 @@ struct AgentListView: View {
                                 }
                                 .disabled(!bridge.providerCapabilities(for: entry.provider).fork.isSupported)
                                 Divider()
-                                Button("Move Up", systemImage: "arrow.up") {
-                                    moveAgent(entry.id, in: item, by: -1)
-                                }
-                                .disabled(item.task.agents.first?.id == entry.id)
-                                Button("Move Down", systemImage: "arrow.down") {
-                                    moveAgent(entry.id, in: item, by: 1)
-                                }
-                                .disabled(item.task.agents.last?.id == entry.id)
+                                moveUpDownMenuButtons(
+                                    canMoveUp: item.task.agents.first?.id != entry.id,
+                                    canMoveDown: item.task.agents.last?.id != entry.id,
+                                    onMove: { moveAgent(entry.id, in: item, by: $0) })
                                 Divider()
                                 Button("Delete", systemImage: "trash", role: .destructive) {
-                                    pendingDelete = entry
+                                    deletion = .deleteAgent(id: entry.id, name: entry.name)
                                 }
                             }
                             .draggable(AgentWorkspaceDragPayload(.agent(entry.id)))
                             .dropDestination(for: AgentWorkspaceDragPayload.self) { payloads, _ in
                                 handleAgentDrop(payloads, before: item)
                             }
+                            .accessibilityActions {
+                                moveUpDownAccessibilityActions(
+                                    canMoveUp: item.task.agents.first?.id != entry.id,
+                                    canMoveDown: item.task.agents.last?.id != entry.id,
+                                    onMove: { moveAgent(entry.id, in: item, by: $0) })
+                            }
                     }
                 }
                 .listStyle(.inset)
+                .scrollContentBackground(.hidden)
                 .onKeyPress(.return) {
                     guard let id = model.selectedAgentID,
                           let project = config.project(forAgent: id)
@@ -835,6 +960,7 @@ struct AgentListView: View {
             HStack {
                 Button("New Agent", systemImage: "plus") { showingNewAgent = true }
                     .disabled(selectedTask == nil)
+                    .help(selectedTask == nil ? "Choose a task to create an agent" : "New Agent")
                 Spacer()
                 if let item = selectedVisibleAgent {
                     Menu("Agent Actions", systemImage: "ellipsis.circle") {
@@ -851,7 +977,7 @@ struct AgentListView: View {
                             for: item.entry.provider).fork.isSupported)
                         Divider()
                         Button("Delete", systemImage: "trash", role: .destructive) {
-                            pendingDelete = item.entry
+                            deletion = .deleteAgent(id: item.id, name: item.entry.name)
                         }
                     }
                     .labelStyle(.iconOnly)
@@ -870,6 +996,12 @@ struct AgentListView: View {
         .onChange(of: visibleAgents.map(\.id), initial: true) { _, visibleIDs in
             onReconcileSelection(visibleIDs, mostImportantVisibleAgentID())
         }
+        .onAppear {
+            if visualAuditScenario == .newAgent
+                || visualAuditScenario == .newAgentConfigured {
+                showingNewAgent = true
+            }
+        }
         .sheet(item: $renameTarget) { target in
             WorkspaceNameSheet(
                 title: "Rename Agent",
@@ -886,6 +1018,8 @@ struct AgentListView: View {
         .sheet(isPresented: $showingNewAgent) {
             NewAgentSheet(
                 bridge: bridge,
+                taskName: selectedTask?.1.name ?? "this task",
+                visualAuditScenario: visualAuditScenario,
                 failureMessage: { config.persistenceErrorMessage },
                 commit: { name, provider, launchProfile in
                     guard let (project, task) = selectedTask,
@@ -902,21 +1036,19 @@ struct AgentListView: View {
                 })
         }
         .confirmationDialog(
-            pendingDelete.map { "Delete agent “\($0.name)”?" } ?? "",
+            deletion?.title ?? "",
             isPresented: Binding(
-                get: { pendingDelete != nil },
-                set: { if !$0 { pendingDelete = nil } }
+                get: { deletion != nil },
+                set: { if !$0 { deletion = nil } }
             ),
-            presenting: pendingDelete
-        ) { entry in
-            Button("Delete", role: .destructive) {
-                onDeleteAgent(entry.id)
-                pendingDelete = nil
+            presenting: deletion
+        ) { action in
+            Button(action.confirmLabel, role: action.role) {
+                if case .deleteAgent(let id, _) = action { onDeleteAgent(id) }
+                deletion = nil
             }
-            Button("Cancel", role: .cancel) { pendingDelete = nil }
-        } message: { _ in
-            Text("The running process and terminal will close. This cannot be undone.")
-        }
+            Button("Cancel", role: .cancel) { deletion = nil }
+        } message: { Text($0.message) }
     }
 
     private var selectedTask: (AgentProject, AgentTask)? {
@@ -957,7 +1089,7 @@ struct AgentListView: View {
         if sourceID == item.id { return true }
         let sourceTask = config.task(forAgent: sourceID)
         let sourceIndex = sourceTask?.agents.firstIndex(where: { $0.id == sourceID })
-        return withAnimation(.smooth(duration: 0.2)) {
+        return withAnimation(AgentWorkspaceMotion.animation(reduceMotion: reduceMotion)) {
             AgentWorkspaceTransactions.perform(
                 AgentWorkspaceMove(
                     item: payload.item,
@@ -976,7 +1108,7 @@ struct AgentListView: View {
 
     private func moveAgent(_ id: UUID, in item: AgentListItem, by offset: Int) {
         guard let sourceIndex = item.task.agents.firstIndex(where: { $0.id == id }) else { return }
-        _ = withAnimation(.smooth(duration: 0.2)) {
+        _ = withAnimation(AgentWorkspaceMotion.animation(reduceMotion: reduceMotion)) {
             AgentWorkspaceTransactions.perform(
                 AgentWorkspaceMove(
                     item: .agent(id),
@@ -990,14 +1122,15 @@ struct AgentListView: View {
         }
     }
 
-    private var emptyTitle: String {
-        model.searchQuery.isEmpty ? "No Agents" : "No Results"
-    }
-
-    private var emptyDescription: String {
-        model.searchQuery.isEmpty
-            ? "Choose a task and create an agent to begin."
-            : "No agents match “\(model.searchQuery)”."
+    private func rowLocation(project: AgentProject, task: AgentTask) -> String? {
+        switch model.scope {
+        case .task:
+            return nil
+        case .project:
+            return task.name
+        case .all, .attention, .running:
+            return "\(project.name) › \(task.name)"
+        }
     }
 
 }
@@ -1038,8 +1171,7 @@ private struct AgentListItem: Identifiable {
 
 private struct AgentListRow: View {
     var agent: AgentInstance
-    let project: String
-    let task: String
+    let location: String?
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -1054,82 +1186,80 @@ private struct AgentListRow: View {
                         .font(.body.weight(.medium))
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    Text(agent.displayState.label)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    if agent.displayState.showsListLabel {
+                        Text(agent.displayState.label)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
-                Text("\(agent.provider.displayName) · \(project) · \(task)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Label(agent.provider.displayName, systemImage: agent.provider.symbolName)
+                    if let location {
+                        Text("·")
+                        Text(location)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
                 AgentMetadataCompactLine(agent: agent)
             }
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(agent.name)
-        .accessibilityValue("\(agent.provider.displayName). \(agent.displayState.label). \(project), \(task). \(agent.metadataAccessibilityValue)")
+        .accessibilityValue([
+            agent.provider.displayName,
+            agent.displayState.label,
+            location,
+            agent.metadataAccessibilityValue,
+        ].compactMap { $0 }.joined(separator: ". "))
         .accessibilityHint("Selects this agent. Press Return to start or focus.")
     }
 }
 
 private struct NewAgentSheet: View {
-    private struct EffortOption: Identifiable {
-        let id: String
-        let title: String
-        let value: String?
-    }
+    private static let providerDefaultsKey = "clawddy.newAgent.provider"
 
     var bridge: AgentBridge
+    let taskName: String
+    let visualAuditScenario: AgentVisualAuditScenario?
     let failureMessage: () -> String?
     let commit: (String, AgentProviderID, AgentLaunchProfile) -> Bool
 
     @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var provider = Self.restoredProvider
-    @State private var model = ""
-    @State private var effort: String?
-    @State private var startMode = AgentPreferencesStore.load()
-        .defaultStartMode(for: Self.restoredProvider)
+    @State private var draft = AgentCreationDraft(
+        provider: Self.restoredProvider,
+        preferences: AgentPreferencesStore.load())
     @State private var error: String?
     @State private var showsRunSettings = false
-    @State private var focused = false
+    @FocusState private var nameFocused: Bool
 
     private static var restoredProvider: AgentProviderID {
-        guard let raw = UserDefaults.standard.string(forKey: "clawddy.newAgent.provider"),
+        guard let raw = UserDefaults.standard.string(forKey: providerDefaultsKey),
               let provider = AgentProviderID(rawValue: raw)
         else { return .claudeCode }
         return provider
     }
 
     private var health: AgentProviderHealth {
-        bridge.providerHealth[provider] ?? AgentProviderHealth()
+        bridge.providerHealth[draft.provider] ?? AgentProviderHealth()
     }
 
     private var canCreate: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && health.isReadyToLaunch
+        draft.canCreate(providerHealth: health)
     }
 
-    private var effortOptions: [EffortOption] {
-        var options = [EffortOption(
-            id: "default",
-            title: "Provider Default",
-            value: nil)]
-        if provider == .codex {
-            options.append(EffortOption(id: "minimal", title: "Minimal", value: "minimal"))
-        }
-        options += [
-            EffortOption(id: "low", title: "Low", value: "low"),
-            EffortOption(id: "medium", title: "Medium", value: "medium"),
-            EffortOption(id: "high", title: "High", value: "high"),
-            EffortOption(id: "xhigh", title: "Extra High", value: "xhigh"),
-        ]
-        if provider == .claudeCode {
-            options.append(EffortOption(id: "max", title: "Maximum", value: "max"))
-        }
-        return options
+    private var providerSelection: Binding<AgentProviderID> {
+        Binding(
+            get: { draft.provider },
+            set: { provider in
+                draft.transition(
+                    to: provider,
+                    preferences: AgentPreferencesStore.load())
+                error = nil
+            })
     }
 
     var body: some View {
@@ -1137,22 +1267,24 @@ private struct NewAgentSheet: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("New Agent")
                     .font(.title3.weight(.semibold))
-                Text("Choose the coding agent for this conversation.")
+                Text("Create a coding agent in \(taskName).")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
-            NativeTextField(
-                placeholder: "Agent Name",
-                text: $name,
-                isFocused: $focused,
-                onSubmit: create)
-                .frame(height: 22)
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Name")
+                    .font(.callout.weight(.medium))
+                TextField("Agent name", text: $draft.name)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($nameFocused)
+                    .onSubmit(create)
+            }
 
             VStack(alignment: .leading, spacing: 10) {
                 Text("Provider")
-                    .font(.headline)
-                Picker("Provider", selection: $provider) {
+                    .font(.callout.weight(.medium))
+                Picker("Provider", selection: providerSelection) {
                     ForEach(AgentProviderID.allCases) { option in
                         Label(option.displayName, systemImage: option.symbolName)
                             .tag(option)
@@ -1164,29 +1296,27 @@ private struct NewAgentSheet: View {
                 providerStatus
             }
 
-            DisclosureGroup("Run Settings", isExpanded: $showsRunSettings) {
+            DisclosureGroup(isExpanded: $showsRunSettings) {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
                     GridRow {
                         Text("Start mode")
-                        Picker("Start mode", selection: $startMode) {
+                        Picker("Start mode", selection: $draft.startMode) {
                             ForEach(AgentStartMode.allCases) { option in
-                                Text(provider.startModeTitle(option)).tag(option)
+                                Text(draft.provider.startModeTitle(option)).tag(option)
                             }
                         }
                         .labelsHidden()
                     }
                     GridRow {
                         Text("Model")
-                        NativeTextField(
-                            placeholder: "Provider default",
-                            text: $model,
-                            accessibilityLabel: "Model")
-                            .frame(height: 22)
+                        TextField("Model", text: $draft.modelID, prompt: Text("Provider default"))
+                            .textFieldStyle(.roundedBorder)
+                            .labelsHidden()
                     }
                     GridRow {
                         Text("Reasoning")
-                        Picker("Reasoning", selection: $effort) {
-                            ForEach(effortOptions) { option in
+                        Picker("Reasoning", selection: $draft.reasoningEffort) {
+                            ForEach(draft.provider.reasoningEffortOptions) { option in
                                 Text(option.title).tag(option.value)
                             }
                         }
@@ -1194,6 +1324,20 @@ private struct NewAgentSheet: View {
                     }
                 }
                 .padding(.top, 10)
+                Text(draft.provider.startModeDescription(draft.startMode))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Run Settings")
+                        .font(.callout.weight(.medium))
+                    Text(draft.launchSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             if let error {
@@ -1213,16 +1357,19 @@ private struct NewAgentSheet: View {
             }
         }
         .padding(22)
-        .frame(width: 440)
+        .frame(width: 480)
         .onAppear {
-            focused = true
+            if visualAuditScenario == .newAgentConfigured {
+                draft.name = "Release review"
+                draft.transition(
+                    to: .codex,
+                    preferences: AgentPreferencesStore.load())
+                draft.modelID = "gpt-5.6"
+                draft.reasoningEffort = "high"
+                showsRunSettings = true
+            }
+            nameFocused = true
             bridge.refreshProviderHealth()
-        }
-        .onChange(of: provider) { _, _ in
-            model = ""
-            effort = nil
-            startMode = AgentPreferencesStore.load().defaultStartMode(for: provider)
-            error = nil
         }
     }
 
@@ -1243,7 +1390,7 @@ private struct NewAgentSheet: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(provider.displayName): \(health.conciseStatus)")
+        .accessibilityLabel("\(draft.provider.displayName): \(health.conciseStatus)")
         .accessibilityValue(providerStatusDetail ?? "No additional details")
     }
 
@@ -1284,7 +1431,7 @@ private struct NewAgentSheet: View {
         case .checking:
             return "Checking the login-shell PATH and sign-in status."
         case .missing:
-            return "Install the \(provider.displayName) CLI before creating this agent."
+                return "Install the \(draft.provider.displayName) CLI before creating this agent."
         case .unavailable(let reason):
             return reason
         case .ready(_, let version):
@@ -1296,7 +1443,7 @@ private struct NewAgentSheet: View {
             case .checking, .signedIn:
                 break
             }
-            if provider == .codex {
+            if draft.provider == .codex {
                 let prefix = version.map { "\($0). " } ?? ""
                 return "\(prefix)On first use, Codex may ask you to review Clawddy’s activity hook with /hooks."
             }
@@ -1306,18 +1453,14 @@ private struct NewAgentSheet: View {
 
     private func create() {
         guard canCreate else { return }
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let selectedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let profile = AgentLaunchProfile(
-            modelID: selectedModel.isEmpty ? nil : selectedModel,
-            reasoningEffort: effort,
-            startMode: startMode)
-        if commit(trimmed, provider, profile) {
-            UserDefaults.standard.set(provider.rawValue, forKey: "clawddy.newAgent.provider")
+        if commit(draft.normalizedName, draft.provider, draft.launchProfile) {
+            UserDefaults.standard.set(
+                draft.provider.rawValue,
+                forKey: Self.providerDefaultsKey)
             dismiss()
         } else {
             error = failureMessage() ?? "That name is already in use."
-            focused = true
+            nameFocused = true
         }
     }
 }
@@ -1331,7 +1474,7 @@ private struct WorkspaceNameSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
     @State private var error: String?
-    @State private var focused = false
+    @FocusState private var nameFocused: Bool
 
     init(
         title: String,
@@ -1349,12 +1492,10 @@ private struct WorkspaceNameSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(title).font(.headline)
-            NativeTextField(
-                placeholder: "Name",
-                text: $name,
-                isFocused: $focused,
-                onSubmit: save)
-                .frame(height: 22)
+            TextField("Name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .focused($nameFocused)
+                .onSubmit(save)
             if let error {
                 Label(error, systemImage: "exclamationmark.circle.fill")
                     .font(.caption)
@@ -1372,7 +1513,7 @@ private struct WorkspaceNameSheet: View {
         }
         .padding(20)
         .frame(width: 360)
-        .onAppear { focused = true }
+        .onAppear { nameFocused = true }
     }
 
     private func save() {
@@ -1382,7 +1523,7 @@ private struct WorkspaceNameSheet: View {
             dismiss()
         } else {
             error = failureMessage() ?? "That name is already in use."
-            focused = true
+            nameFocused = true
         }
     }
 }

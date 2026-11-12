@@ -6,14 +6,6 @@ import Sparkle
 import Carbon
 import GhosttyKit
 
-private final class AppDelegateReference: @unchecked Sendable {
-    weak var value: AppDelegate?
-
-    init(_ value: AppDelegate) {
-        self.value = value
-    }
-}
-
 class AppDelegate: NSObject,
                     ObservableObject,
                     NSApplicationDelegate,
@@ -116,18 +108,9 @@ class AppDelegate: NSObject,
     /// The ghostty global state. Only one per process.
     let ghostty: Ghostty.App
 
-    /// Clawddy agent management
-    private var agentStatusItem: NSStatusItem?
-    private var agentWorkspaceWindow: NSWindow?
-    private var agentDetailVC: AgentDetailViewController?
-    private var agentSearchPanel: AgentSearchPanel?
-    private var agentWorkspaceObservers: [NSObjectProtocol] = []
-    private var explicitlyViewedAgentID: UUID?
-    private var agentSearchHotKeyRef: EventHotKeyRef?
-    private var agentEventHandlerRef: EventHandlerRef?
-    private let agentConfig = AgentConfig()
-    @MainActor private lazy var agentBridge = AgentBridge()
-    @MainActor private lazy var agentWorkspaceModel = AgentWorkspaceModel()
+    /// Clawddy agent management. Everything Clawddy owns lives in the
+    /// controller; this file only forwards app lifecycle to it.
+    @MainActor private(set) lazy var clawddy = ClawddyController(ghostty: ghostty)
 
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
@@ -252,8 +235,15 @@ class AppDelegate: NSObject,
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 
-        // Start our update checker.
-        updateController.startUpdater()
+        let visualAuditScenario = AgentVisualAuditPolicy.scenario(
+            environment: ProcessInfo.processInfo.environment)
+        let visualAuditMode = visualAuditScenario != nil
+
+        // An isolated visual-audit process must remain inert outside its own
+        // window so it cannot prompt, update, or compete with the user's app.
+        if !visualAuditMode {
+            updateController.startUpdater()
+        }
 
         // Register our service provider. This must happen after everything is initialized.
         NSApp.servicesProvider = ServiceProvider()
@@ -356,7 +346,12 @@ class AppDelegate: NSObject,
         setupSignals()
 
         // Clawddy agent management
-        setupClawddy()
+        clawddy.onAggregateStateChanged = { [weak self] in self?.syncDockBadge() }
+        clawddy.setup()
+
+        if let visualAuditScenario {
+            clawddy.performVisualAudit(visualAuditScenario)
+        }
 
         switch Ghostty.launchSource {
         case .app:
@@ -400,10 +395,9 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            let hasAgents = !agentConfig.projects.isEmpty
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
-                if hasAgents {
-                    showAgentWorkspace()
+                if clawddy.hasAgents {
+                    clawddy.showWorkspace()
                 } else {
                     undoManager.disableUndoRegistration()
                     _ = TerminalController.newWindow(ghostty)
@@ -453,7 +447,7 @@ class AppDelegate: NSObject,
 
     @MainActor
     func applicationWillTerminate(_ notification: Notification) {
-        shutdownClawddy()
+        clawddy.shutdown()
     }
 
     /// This is called when the application is already open and someone double-clicks the icon
@@ -843,8 +837,7 @@ class AppDelegate: NSObject,
             .reduce(0) { $0 + ($1.bell ? 1 : 0) }
         let bellWantsBadge = ghostty.config.bellFeatures.contains(.attention) && bellCount > 0
 
-        let agentAttentionCount = agentBridge.agents.values.filter { $0.displayState.needsAttention }.count
-        let totalCount = (bellWantsBadge ? bellCount : 0) + agentAttentionCount
+        let totalCount = (bellWantsBadge ? bellCount : 0) + clawddy.attentionCount
 
         let label = totalCount > 0 ? (totalCount > 99 ? "99+" : String(totalCount)) : nil
         NSApp.dockTile.badgeLabel = label
@@ -1000,16 +993,7 @@ class AppDelegate: NSObject,
                 return
             }
             // Clawddy: tap on an agent notification opens the workspace.
-            if didReceive.notification.request.identifier.hasPrefix("clawddy."),
-               let rawID = didReceive.notification.request.content
-                .userInfo["clawddy_agent_id"] as? String,
-               let id = UUID(uuidString: rawID),
-               let project = self.agentConfig.project(forAgent: id) {
-                self.showAgentWorkspace()
-                self.revealAgent(id: id, project: project)
-                if self.agentDetailVC?.hasSurface(id: id) == true {
-                    self.activateAgent(id: id, project: project)
-                }
+            if self.clawddy.handleNotificationResponse(didReceive) {
                 withCompletionHandler()
                 return
             }
@@ -1030,18 +1014,8 @@ class AppDelegate: NSObject,
                 return
             }
             // Keep foreground presentation aligned with the notification's urgency.
-            if willPresent.request.identifier.hasPrefix("clawddy.") {
-                let rawID = willPresent.request.content
-                    .userInfo["clawddy_agent_id"] as? String
-                let id = rawID.flatMap(UUID.init(uuidString:))
-                if id == self.agentBridge.currentlyViewedAgentId,
-                   self.agentWorkspaceWindow?.isVisible == true {
-                    withCompletionHandler([])
-                } else if willPresent.request.identifier.hasSuffix(".completed") {
-                    withCompletionHandler([.badge, .list])
-                } else {
-                    withCompletionHandler([.banner, .sound, .badge, .list])
-                }
+            if let options = self.clawddy.presentationOptions(for: willPresent) {
+                withCompletionHandler(options)
             } else {
                 let shouldPresent = self.ghostty.shouldPresentNotification(
                     notification: willPresent)
@@ -1249,538 +1223,6 @@ extension AppDelegate {
     }
 
     // Setup all the images for our menu items.
-    // MARK: - Clawddy
-
-    @MainActor
-    private func setupClawddy() {
-        agentBridge.environmentPath = AgentEnvironmentResolver.fallbackPath
-        AgentEnvironmentResolver.resolve { [weak self] path in
-            self?.agentBridge.environmentPath = path
-        }
-
-        // Start the bridge (reconstructs state from disk)
-        agentBridge.start(config: agentConfig)
-
-        // Wire callbacks
-        agentBridge.onAggregateStateChanged = { [weak self] state in
-            self?.updateAgentStatusIcon(state)
-            self?.syncDockBadge()
-        }
-        agentBridge.onSendText = { [weak self] id, text in
-            self?.agentDetailVC?.sendText(text, toAgent: id)
-        }
-        agentBridge.onSurfaceDeath = { [weak self] id in
-            self?.agentDetailVC?.removeSurface(id: id)
-        }
-        agentConfig.onReloaded = { [weak self] in
-            guard let self else { return }
-            self.agentBridge.reconcileWithConfig(self.agentConfig)
-            self.agentWorkspaceModel.reconcile(with: self.agentConfig)
-        }
-        agentWorkspaceModel.reconcile(with: agentConfig)
-
-        // Status bar item
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = item.button {
-            button.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Clawddy")
-            button.action = #selector(agentStatusItemClicked)
-            button.target = self
-            button.toolTip = "Clawddy Agents"
-            button.setAccessibilityLabel("Clawddy Agents")
-        }
-        item.autosaveName = "ClawddyAgentStatusItem"
-        agentStatusItem = item
-
-        setupClawddyMenu()
-
-        // Global hotkey
-        registerAgentSearchHotKey()
-    }
-
-    @MainActor
-    private func shutdownClawddy() {
-        agentBridge.shutdown()
-        agentWorkspaceObservers.forEach(NotificationCenter.default.removeObserver)
-        agentWorkspaceObservers.removeAll()
-        if let ref = agentSearchHotKeyRef {
-            UnregisterEventHotKey(ref)
-        }
-        if let ref = agentEventHandlerRef {
-            RemoveEventHandler(ref)
-        }
-    }
-
-    @MainActor
-    private func updateAgentStatusIcon(_ state: AggregateState) {
-        guard let button = agentStatusItem?.button else { return }
-        switch state {
-        case .idle:
-            button.image = NSImage(
-                systemSymbolName: "terminal",
-                accessibilityDescription: "Clawddy"
-            )
-            button.contentTintColor = nil
-            button.setAccessibilityValue("Idle")
-        case .running(let count):
-            let config = NSImage.SymbolConfiguration(paletteColors: [.controlAccentColor])
-            button.image = NSImage(
-                systemSymbolName: "terminal.fill",
-                accessibilityDescription: "Clawddy — \(count) active"
-            )?.withSymbolConfiguration(config)
-            button.contentTintColor = nil
-            button.setAccessibilityValue("\(count) running")
-        case .attention:
-            let config = NSImage.SymbolConfiguration(paletteColors: [.systemOrange])
-            button.image = NSImage(
-                systemSymbolName: "terminal.fill",
-                accessibilityDescription: "Clawddy — needs attention"
-            )?.withSymbolConfiguration(config)
-            button.contentTintColor = nil
-            button.setAccessibilityValue("Needs attention")
-        }
-    }
-
-    @MainActor
-    private func registerAgentSearchHotKey() {
-        let hotKeyID = EventHotKeyID(signature: 0x4147_4E54, id: 1) // "AGNT"
-        var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-
-        let handler: EventHandlerUPP = { _, _, _ -> OSStatus in
-            DispatchQueue.main.async {
-                guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else { return }
-                appDelegate.toggleAgentSearch()
-            }
-            return noErr
-        }
-
-        var handlerRef: EventHandlerRef?
-        let installStatus = InstallEventHandler(
-            GetEventDispatcherTarget(), handler, 1, &eventType, nil, &handlerRef)
-        guard installStatus == noErr else {
-            Self.logger.error("Unable to install Clawddy search hot-key handler: \(installStatus)")
-            return
-        }
-        agentEventHandlerRef = handlerRef
-
-        let registrationStatus = RegisterEventHotKey(
-            49,
-            UInt32(optionKey),
-            hotKeyID,
-            GetEventDispatcherTarget(),
-            0,
-            &agentSearchHotKeyRef)
-        if registrationStatus != noErr {
-            Self.logger.warning("Unable to register Option-Space for agent search: \(registrationStatus)")
-        }
-    }
-
-    @MainActor @objc private func agentStatusItemClicked() {
-        showAgentWorkspace()
-    }
-
-    @MainActor @objc private func showAgentWorkspaceCommand() {
-        showAgentWorkspace()
-    }
-
-    @MainActor @objc private func searchAgentsCommand() {
-        toggleAgentSearch()
-    }
-
-    @MainActor @objc private func startSelectedAgentCommand() {
-        showAgentWorkspace()
-        guard let id = agentWorkspaceModel.selectedAgentID,
-              let project = agentConfig.project(forAgent: id)
-        else { return }
-        activateAgent(id: id, project: project)
-    }
-
-    @MainActor @objc private func focusAgentTerminalCommand() {
-        agentDetailVC?.focusTerminal()
-    }
-
-    @MainActor @objc private func showSelectedAgentDetailsCommand() {
-        showAgentWorkspace()
-        agentDetailVC?.showAgentDetails()
-    }
-
-    @MainActor
-    private func setupClawddyMenu() {
-        guard let mainMenu = NSApp.mainMenu,
-              !mainMenu.items.contains(where: { $0.title == "Agent" })
-        else { return }
-
-        let root = NSMenuItem(title: "Agent", action: nil, keyEquivalent: "")
-        let menu = NSMenu(title: "Agent")
-        root.submenu = menu
-
-        let open = NSMenuItem(
-            title: "Open Agent Workspace",
-            action: #selector(showAgentWorkspaceCommand),
-            keyEquivalent: "a")
-        open.keyEquivalentModifierMask = [.command, .shift]
-        open.target = self
-        menu.addItem(open)
-
-        let search = NSMenuItem(
-            title: "Search Agents…",
-            action: #selector(searchAgentsCommand),
-            keyEquivalent: "k")
-        search.keyEquivalentModifierMask = [.command]
-        search.target = self
-        menu.addItem(search)
-        menu.addItem(.separator())
-
-        let start = NSMenuItem(
-            title: "Start or Focus Selected Agent",
-            action: #selector(startSelectedAgentCommand),
-            keyEquivalent: "\r")
-        start.keyEquivalentModifierMask = [.command]
-        start.target = self
-        menu.addItem(start)
-
-        let details = NSMenuItem(
-            title: "Show Agent Details",
-            action: #selector(showSelectedAgentDetailsCommand),
-            keyEquivalent: "i")
-        details.keyEquivalentModifierMask = [.command]
-        details.target = self
-        menu.addItem(details)
-
-        let focus = NSMenuItem(
-            title: "Focus Agent Terminal",
-            action: #selector(focusAgentTerminalCommand),
-            keyEquivalent: "3")
-        focus.keyEquivalentModifierMask = [.command]
-        focus.target = self
-        menu.addItem(focus)
-
-        mainMenu.addItem(root)
-    }
-
-    @discardableResult
-    @MainActor
-    private func showAgentWorkspace(activate: Bool = true) -> NSWindow? {
-        if agentWorkspaceWindow == nil {
-            let detailVC = AgentDetailViewController(ghostty: ghostty)
-            self.agentDetailVC = detailVC
-
-            let navigationView = AgentInteractiveHostingView(rootView: AgentNavigationView(
-                config: agentConfig,
-                bridge: agentBridge,
-                model: agentWorkspaceModel,
-                onSelectScope: { [weak self] scope in
-                    self?.selectAgentScope(scope)
-                }
-            ))
-
-            let agentListView = AgentInteractiveHostingView(rootView: AgentListView(
-                config: agentConfig,
-                bridge: agentBridge,
-                model: agentWorkspaceModel,
-                onSelectAgent: { [weak self] id, project, intent in
-                    self?.selectAgent(id: id, project: project, intent: intent)
-                },
-                onReconcileSelection: { [weak self] visibleIDs, fallbackID in
-                    self?.reconcileAgentSelection(
-                        visibleAgentIDs: visibleIDs,
-                        fallbackAgentID: fallbackID)
-                },
-                onActivateAgent: { [weak self] id, project in
-                    self?.activateAgent(id: id, project: project)
-                },
-                onForkAgent: { [weak self] sourceId, project, taskName in
-                    guard let self else { return }
-                    if let entry = self.agentBridge.forkAgent(
-                        sourceId: sourceId, config: self.agentConfig,
-                        project: project.name, task: taskName) {
-                        let scope = self.agentConfig.task(forAgent: entry.id).map {
-                            AgentWorkspaceModel.Scope.task(
-                                projectID: project.id,
-                                taskID: $0.id)
-                        }
-                        self.activateAgent(id: entry.id, project: project, scope: scope)
-                    }
-                },
-                onDeleteAgent: { [weak self] id in
-                    guard let self else { return }
-                    self.agentBridge.deleteAgent(id: id, config: self.agentConfig)
-                    if self.agentWorkspaceModel.selectedAgentID == id {
-                        self.applyAgentSelection(.reveal(scope: nil, agentID: nil))
-                    }
-                }
-            ))
-
-            let controller = AgentWorkspaceController(
-                navigationView: navigationView,
-                agentListView: agentListView,
-                detailViewController: detailVC,
-                onSearch: { [weak self] in self?.toggleAgentSearch() },
-                onFocusTerminal: { [weak detailVC] in detailVC?.focusTerminal() },
-                canFocusTerminal: { [weak detailVC] in
-                    detailVC?.hasActiveSurface == true
-                },
-                onShowAgentDetails: { [weak detailVC] in detailVC?.showAgentDetails() },
-                canShowAgentDetails: { [weak self] in
-                    self?.agentWorkspaceModel.selectedAgentID != nil
-                })
-            let window = makeAgentWorkspaceWindow(controller: controller)
-            window.onFirstResponderChanged = { [weak detailVC] in
-                detailVC?.workspaceFirstResponderDidChange()
-            }
-
-            detailVC.setBackgroundColor(NSColor(ghostty.config.backgroundColor))
-            agentWorkspaceWindow = window
-            installAgentWorkspaceObservers(for: window)
-            if let selectedID = agentWorkspaceModel.selectedAgentID,
-               let project = agentConfig.project(forAgent: selectedID) {
-                selectAgent(id: selectedID, project: project)
-            }
-        }
-
-        if activate {
-            NSApp.activate(ignoringOtherApps: true)
-            agentWorkspaceWindow?.makeKeyAndOrderFront(nil)
-        }
-        return agentWorkspaceWindow
-    }
-
-    @MainActor
-    func restoreAgentWorkspaceWindow(
-        completionHandler: @escaping (NSWindow?, Error?) -> Void
-    ) {
-        completionHandler(showAgentWorkspace(activate: false), nil)
-    }
-
-    @MainActor
-    private func selectAgent(
-        id: UUID,
-        project _: AgentProject,
-        intent: AgentSelectionIntent = .reveal
-    ) {
-        let action: AgentWorkspaceSelectionAction = intent == .inspect
-            ? .userSelectedAgent(id)
-            : .reveal(scope: nil, agentID: id)
-        applyAgentSelection(action)
-    }
-
-    @MainActor
-    private func selectAgentScope(_ scope: AgentWorkspaceModel.Scope) {
-        applyAgentSelection(.userSelectedScope(
-            scope,
-            agentID: mostImportantAgentID(for: scope)))
-    }
-
-    @MainActor
-    private func reconcileAgentSelection(
-        visibleAgentIDs: [UUID],
-        fallbackAgentID: UUID?
-    ) {
-        applyAgentSelection(.reconcile(
-            visibleAgentIDs: Set(visibleAgentIDs),
-            fallbackAgentID: fallbackAgentID))
-    }
-
-    @MainActor
-    private func applyAgentSelection(_ action: AgentWorkspaceSelectionAction) {
-        switch agentWorkspaceModel.apply(action) {
-        case .none:
-            return
-        case .present(nil, _):
-            renderAgentPlaceholder()
-        case .present(let id?, let intent):
-            guard let project = agentConfig.project(forAgent: id),
-                  let agent = agentBridge.agents[id],
-                  let detailVC = agentDetailVC
-            else {
-                renderAgentPlaceholder()
-                return
-            }
-            renderAgentSelection(
-                id: id,
-                agent: agent,
-                project: project,
-                detailVC: detailVC,
-                intent: intent)
-        }
-    }
-
-    @MainActor
-    private func renderAgentSelection(
-        id: UUID,
-        agent: AgentInstance,
-        project: AgentProject,
-        detailVC: AgentDetailViewController,
-        intent: AgentSelectionIntent
-    ) {
-        if explicitlyViewedAgentID != id {
-            explicitlyViewedAgentID = nil
-            agentBridge.setCurrentlyViewedAgent(nil)
-        }
-        if intent == .inspect, let task = agentConfig.task(forAgent: id) {
-            agentWorkspaceModel.recordExplicitSelection(
-                agentID: id,
-                projectID: project.id,
-                taskID: task.id)
-        }
-        detailVC.selectAgent(agent, projectName: project.name) { [weak self] in
-            self?.activateAgent(id: id, project: project)
-        }
-        if intent == .inspect, detailVC.hasSurface(id: id) {
-            explicitlyViewedAgentID = id
-        }
-        updateAgentViewingState()
-        agentWorkspaceWindow?.title = "\(project.name) — \(agent.name)"
-    }
-
-    @MainActor
-    private func renderAgentPlaceholder() {
-        explicitlyViewedAgentID = nil
-        agentBridge.setCurrentlyViewedAgent(nil)
-        agentDetailVC?.showPlaceholder()
-        agentWorkspaceWindow?.title = "Clawddy"
-    }
-
-    @MainActor
-    private func revealAgent(id: UUID, project: AgentProject) {
-        let scope = agentConfig.task(forAgent: id).map {
-            AgentWorkspaceModel.Scope.task(projectID: project.id, taskID: $0.id)
-        }
-        applyAgentSelection(.reveal(scope: scope, agentID: id))
-    }
-
-    @MainActor
-    private func mostImportantAgentID(for scope: AgentWorkspaceModel.Scope) -> UUID? {
-        var candidates: [AgentImportanceCandidate] = []
-        var configurationRank = 0
-        for project in agentConfig.projects {
-            for task in project.tasks {
-                for entry in task.agents {
-                    defer { configurationRank += 1 }
-                    guard let instance = agentBridge.agents[entry.id],
-                          AgentWorkspaceProjection.includes(
-                            instance,
-                            project: project,
-                            task: task,
-                            scope: scope),
-                          AgentWorkspaceProjection.matchesSearch(
-                            entry,
-                            project: project,
-                            task: task,
-                            instance: instance,
-                            query: agentWorkspaceModel.searchQuery)
-                    else { continue }
-                    candidates.append(AgentImportanceCandidate(
-                        id: entry.id,
-                        state: instance.displayState,
-                        lastAuthoritativeChange: instance.lastAuthoritativeChange,
-                        configurationRank: configurationRank))
-                }
-            }
-        }
-        return AgentImportance.mostImportant(
-            in: candidates,
-            preferredID: agentWorkspaceModel.preferredAgentID(for: scope))
-    }
-
-    @MainActor
-    private func installAgentWorkspaceObservers(for window: NSWindow) {
-        let center = NotificationCenter.default
-        let reference = AppDelegateReference(self)
-        for name in [
-            NSWindow.willCloseNotification,
-            NSWindow.didResignKeyNotification,
-            NSWindow.didMiniaturizeNotification,
-        ] {
-            agentWorkspaceObservers.append(center.addObserver(
-                forName: name,
-                object: window,
-                queue: .main,
-                using: { [reference] _ in
-                    Task { @MainActor in
-                        reference.value?.agentBridge.setCurrentlyViewedAgent(nil)
-                    }
-                }))
-        }
-        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didDeminiaturizeNotification] {
-            agentWorkspaceObservers.append(center.addObserver(
-                forName: name,
-                object: window,
-                queue: .main,
-                using: { [reference] _ in
-                    Task { @MainActor in
-                        reference.value?.updateAgentViewingState()
-                    }
-                }))
-        }
-    }
-
-    @MainActor
-    private func updateAgentViewingState() {
-        guard let window = agentWorkspaceWindow,
-              window.isVisible,
-              window.isKeyWindow,
-              !window.isMiniaturized,
-              let id = explicitlyViewedAgentID,
-              agentWorkspaceModel.selectedAgentID == id,
-              agentDetailVC?.hasSurface(id: id) == true
-        else {
-            agentBridge.setCurrentlyViewedAgent(nil)
-            return
-        }
-        agentBridge.setCurrentlyViewedAgent(id)
-    }
-
-    @MainActor
-    private func activateAgent(
-        id: UUID,
-        project: AgentProject,
-        scope: AgentWorkspaceModel.Scope? = nil
-    ) {
-        guard let app = ghostty.app, let detailVC = agentDetailVC else { return }
-        applyAgentSelection(.reveal(scope: scope, agentID: id))
-        agentBridge.activateAgent(id: id, app: app, detailVC: detailVC, project: project)
-        explicitlyViewedAgentID = id
-        updateAgentViewingState()
-        if let agent = agentBridge.agents[id] {
-            agentWorkspaceWindow?.title = "\(project.name) — \(agent.name)"
-        }
-    }
-
-    @MainActor
-    private func toggleAgentSearch() {
-        if let panel = agentSearchPanel, panel.isVisible {
-            panel.hide()
-            return
-        }
-
-        if agentSearchPanel == nil {
-            let view = AgentCommandPaletteView(
-                config: agentConfig,
-                bridge: agentBridge,
-                onSelectAgent: { [weak self] id, project in
-                    self?.agentSearchPanel?.commitSelection()
-                    self?.showAgentWorkspace()
-                    self?.revealAgent(id: id, project: project)
-                    if self?.agentDetailVC?.hasSurface(id: id) == true {
-                        self?.activateAgent(id: id, project: project)
-                    }
-                },
-                onDismiss: { [weak self] in
-                    self?.agentSearchPanel?.hide()
-                }
-            )
-            let host = NSHostingView(rootView: view)
-            host.frame = NSRect(x: 0, y: 0, width: 540, height: 320)
-            // Let SwiftUI's .shadow extend past the host's rectangular bounds
-            // into the transparent panel area; otherwise the shadow gets
-            // clipped flat and appears as a sharp dark rectangle.
-            host.clipsToBounds = false
-            agentSearchPanel = AgentSearchPanel(contentView: host)
-        }
-
-        agentSearchPanel?.showCentered()
-    }
-
     private func setupMenuImages() {
         // Note: This COULD Be done all in the xib file, but I find it easier to
         // modify this stuff as code.
@@ -1980,15 +1422,6 @@ extension AppDelegate: NSMenuItemValidation {
                 item.title = "Redo"
             }
             return undoManager.canRedo
-
-        case #selector(startSelectedAgentCommand):
-            return agentWorkspaceModel.selectedAgentID != nil
-
-        case #selector(showSelectedAgentDetailsCommand):
-            return agentWorkspaceModel.selectedAgentID != nil
-
-        case #selector(focusAgentTerminalCommand):
-            return agentDetailVC?.hasActiveSurface == true
 
         default:
             return true

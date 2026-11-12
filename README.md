@@ -69,7 +69,7 @@ integration, permissions, accessibility, rendering, or build settings.
 
 - macOS 15.6 or newer for the Xcode 26 development toolchain
 - Xcode 26 with the macOS 26 SDK and Metal Toolchain
-- [Zig 0.15.2](https://ziglang.org/download/)
+- [Zig 0.17.0](https://ziglang.org/download/)
 
 The built application itself has a macOS 14 deployment target.
 

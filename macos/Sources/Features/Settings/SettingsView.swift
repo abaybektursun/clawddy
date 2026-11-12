@@ -23,15 +23,17 @@ struct SettingsView: View {
                 }
             }
 
-            Label(
-                "Unrestricted modes can run commands, access the network, and modify files without asking. Use them only in projects you trust.",
-                systemImage: "exclamationmark.triangle.fill")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityLabel("Warning")
-                .accessibilityValue(
-                    "Unrestricted modes can run commands, access the network, and modify files without asking. Use them only in projects you trust.")
+            if usesUnrestrictedMode {
+                Label(
+                    "Unrestricted modes can run commands, access the network, and modify files without asking. Use them only in projects you trust.",
+                    systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Warning")
+                    .accessibilityValue(
+                        "Unrestricted modes can run commands, access the network, and modify files without asking. Use them only in projects you trust.")
+            }
 
             if let persistenceError {
                 Label(persistenceError, systemImage: "exclamationmark.circle.fill")
@@ -46,18 +48,24 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Terminal Configuration")
                         .font(.callout.weight(.medium))
-                    Text("Appearance, fonts, key bindings, and other Ghostty settings.")
+                    Text("Appearance, fonts, key bindings, and other terminal settings.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Open Configuration…") {
-                    Ghostty.App.openConfig()
+                    (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
                 }
             }
         }
         .padding(24)
         .frame(width: 590)
+    }
+
+    private var usesUnrestrictedMode: Bool {
+        AgentProviderID.allCases.contains {
+            preferences.defaultStartMode(for: $0) == .unrestricted
+        }
     }
 
     private func providerRow(_ provider: AgentProviderID) -> some View {

@@ -1,23 +1,16 @@
 import AppKit
 
-/// Borderless floating Spotlight-style panel. On macOS 26 the content is
-/// wrapped in an NSGlassEffectView so the panel reads as a single floating
-/// Liquid Glass surface (the glass lenses the wallpaper and draws its own
-/// ambient shadow — no stroke, no manual shadow). The hosted SwiftUI palette
-/// draws no background of its own; this glass is the surface.
+/// Borderless floating Spotlight-style panel hosting Ghostty's own command
+/// palette, which draws its own material card, border, and shape. The panel
+/// supplies only positioning, key handling, and app-restoration behavior.
 final class AgentSearchPanel: NSPanel {
 
     /// The hosted SwiftUI content (NSHostingView). Kept to size the panel to
     /// its fitting size so the panel grows/shrinks with the result count.
     private let hostedView: NSView
-    private var fallbackEffectView: NSVisualEffectView?
     private var animationGeneration = 0
     private var previousApplication: NSRunningApplication?
     private var selectionCommitted = false
-
-    /// Outer corner radius of the glass surface. The hosted content's own
-    /// corners stay square; the glass masks them to this radius.
-    private let cornerRadius: CGFloat = 26
 
     init(contentView: NSView) {
         self.hostedView = contentView
@@ -34,29 +27,11 @@ final class AgentSearchPanel: NSPanel {
         titleVisibility = .hidden
         backgroundColor = .clear
         isOpaque = false
-        // The glass surface defines a rounded, translucent shape, so the
-        // window shadow follows that shape — a soft ambient Spotlight shadow,
-        // not a hard rectangle.
+        // The palette's rounded card defines the opaque shape, so the window
+        // shadow follows it rather than a hard rectangle.
         hasShadow = true
         isMovableByWindowBackground = false
-
-#if compiler(>=6.2)
-        if #available(macOS 26.0, *) {
-            let glass = NSGlassEffectView()
-            glass.cornerRadius = cornerRadius
-            // Without clipsToBounds the glass renders rounded but its view
-            // bounds stay square, so the window paints/shadows the full
-            // rectangle behind it — the hard black outline. Clip to the
-            // rounded shape so the window shadow follows the glass.
-            glass.clipsToBounds = true
-            glass.contentView = contentView
-            self.contentView = glass
-        } else {
-            installFallbackSurface(contentView)
-        }
-#else
-        installFallbackSurface(contentView)
-#endif
+        self.contentView = contentView
     }
 
     override var canBecomeKey: Bool { true }
@@ -84,7 +59,6 @@ final class AgentSearchPanel: NSPanel {
                 : frontmost
             selectionCommitted = false
         }
-        updateFallbackSurface()
         let pointer = NSEvent.mouseLocation
         guard let screen = NSApp.keyWindow?.screen
             ?? NSScreen.screens.first(where: { $0.frame.contains(pointer) })
@@ -157,36 +131,5 @@ final class AgentSearchPanel: NSPanel {
         }
         previousApplication = nil
         selectionCommitted = false
-    }
-
-    private func installFallbackSurface(_ contentView: NSView) {
-        let effect = NSVisualEffectView()
-        effect.material = .hudWindow
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = 16
-        effect.layer?.masksToBounds = true
-        contentView.translatesAutoresizingMaskIntoConstraints = false
-        effect.addSubview(contentView)
-        NSLayoutConstraint.activate([
-            contentView.topAnchor.constraint(equalTo: effect.topAnchor),
-            contentView.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-            contentView.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            contentView.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-        ])
-        fallbackEffectView = effect
-        self.contentView = effect
-    }
-
-    private func updateFallbackSurface() {
-        guard let effect = fallbackEffectView else { return }
-        if NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
-            effect.material = .contentBackground
-            effect.blendingMode = .withinWindow
-        } else {
-            effect.material = .hudWindow
-            effect.blendingMode = .behindWindow
-        }
     }
 }

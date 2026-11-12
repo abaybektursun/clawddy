@@ -7,16 +7,18 @@ struct AgentMetadataCompactLine: View {
         if let metadata = agent.metadata {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 5) {
+                    historicalMarker
                     modelAndEffort(metadata)
                     Spacer(minLength: 6)
                     context(metadata, includesGauge: true)
                 }
                 HStack(spacing: 5) {
+                    historicalMarker
                     modelAndEffort(metadata)
                     Spacer(minLength: 6)
                     context(metadata, includesGauge: false)
                 }
-                context(metadata, includesGauge: false)
+                compactContext(metadata)
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -35,6 +37,14 @@ struct AgentMetadataCompactLine: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder
+    private var historicalMarker: some View {
+        if agent.metadataIsHistorical {
+            Image(systemName: "clock")
+                .help("Last reported")
         }
     }
 
@@ -68,6 +78,22 @@ struct AgentMetadataCompactLine: View {
             }
         } else if agent.activityState == .compacting {
             Text("Context updating").lineLimit(1)
+        }
+    }
+
+    /// The last `ViewThatFits` fallback preserves the changing value rather
+    /// than truncating a redundant label in narrow agent-list columns.
+    @ViewBuilder
+    private func compactContext(_ metadata: AgentSessionMetadata) -> some View {
+        if let percentage = metadata.contextPercentText {
+            HStack(spacing: 3) {
+                historicalMarker
+                Text(percentage)
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
+        } else if agent.activityState == .compacting {
+            Text("Updating").lineLimit(1)
         }
     }
 }
@@ -110,9 +136,8 @@ struct AgentMetadataSummaryButton: View {
                             ? "Requested effort" : "Effort",
                         value: metadata.displayEffort
                             ?? agent.launchProfile.displayReasoningEffort
-                            ?? capabilityValue(
-                                agent.provider.capabilities.effortTelemetry,
-                                reported: nil))
+                            ?? agent.provider.capabilities.effortTelemetry
+                                .unreportedValue(verbose: false))
                     contextSummary(metadata)
                     freshnessSummary(metadata)
                 }
@@ -157,46 +182,48 @@ struct AgentMetadataSummaryButton: View {
     }
 
     private func summaryValue(_ label: String, value: String) -> some View {
-        HStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: 1) {
             Text(label)
+                .font(.caption2)
                 .foregroundStyle(.tertiary)
             Text(value)
-                .foregroundStyle(.secondary)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.primary.opacity(0.78))
                 .lineLimit(1)
         }
-        .font(.caption)
     }
 
     private func contextSummary(_ metadata: AgentSessionMetadata) -> some View {
-        HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 1) {
             Text("Context")
+                .font(.caption2)
                 .foregroundStyle(.tertiary)
-            if let fraction = metadata.contextFraction,
-               let percentage = metadata.contextPercentText {
-                ProgressView(value: fraction)
-                    .progressViewStyle(.linear)
-                    .frame(width: 68)
-                Text(percentage)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            } else if agent.activityState == .compacting {
-                Text("Updating")
-                    .foregroundStyle(.secondary)
-            } else {
-                Text(capabilityValue(
-                    agent.provider.capabilities.contextTelemetry,
-                    reported: nil))
-                    .foregroundStyle(.secondary)
-                    .help(agent.provider.capabilities.contextTelemetry.explanation ?? "")
+            HStack(spacing: 6) {
+                if let fraction = metadata.contextFraction,
+                   let percentage = metadata.contextPercentText {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .frame(width: 64)
+                    Text(percentage)
+                        .monospacedDigit()
+                        .foregroundStyle(.primary.opacity(0.78))
+                } else if agent.activityState == .compacting {
+                    Text("Updating")
+                        .foregroundStyle(.primary.opacity(0.78))
+                } else {
+                    Text(agent.provider.capabilities.contextTelemetry
+                        .unreportedValue(verbose: false))
+                        .foregroundStyle(.primary.opacity(0.78))
+                        .help(agent.provider.capabilities.contextTelemetry.explanation ?? "")
+                }
             }
+            .font(.caption.weight(.medium))
         }
-        .font(.caption)
     }
 
     @ViewBuilder
     private func freshnessSummary(_ metadata: AgentSessionMetadata) -> some View {
-        if agent.processState == .exited || agent.surfaceState == .inactive
-            || agent.metadataAvailability == .waiting {
+        if agent.metadataIsHistorical {
             Label("Last reported \(metadata.observedAt.formatted(.relative(presentation: .named)))", systemImage: "clock")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -227,15 +254,16 @@ struct AgentMetadataSummaryButton: View {
         }
     }
 
-    private func capabilityValue(
-        _ support: AgentCapabilitySupport,
-        reported: String?
-    ) -> String {
-        if let reported { return reported }
-        switch support {
+}
+
+extension AgentCapabilitySupport {
+    /// User-facing text when no value was reported. The verbose form carries
+    /// the capability's reason; the compact form uses fixed short labels.
+    func unreportedValue(verbose: Bool) -> String {
+        switch self {
         case .supported: return "Not reported"
-        case .unavailable: return "Unavailable"
-        case .unsupported: return "Not supported"
+        case .unavailable(let reason): return verbose ? reason : "Unavailable"
+        case .unsupported(let reason): return verbose ? reason : "Not supported"
         }
     }
 }
@@ -263,9 +291,9 @@ private struct AgentMetadataInspectorView: View {
                     detailRow("Model ID", metadata.modelID ?? "Not reported")
                     detailRow(
                         "Reasoning effort",
-                        detailValue(
-                            agent.provider.capabilities.effortTelemetry,
-                            reported: metadata.displayEffort))
+                        metadata.displayEffort
+                            ?? agent.provider.capabilities.effortTelemetry
+                                .unreportedValue(verbose: true))
                     if let requested = agent.launchProfile.displayReasoningEffort {
                         detailRow("Requested effort", requested)
                     }
@@ -286,9 +314,8 @@ private struct AgentMetadataInspectorView: View {
                     }
                     detailRow(
                         "Reasoning effort",
-                        detailValue(
-                            agent.provider.capabilities.effortTelemetry,
-                            reported: nil))
+                        agent.provider.capabilities.effortTelemetry
+                            .unreportedValue(verbose: true))
                     if let requested = agent.launchProfile.displayReasoningEffort {
                         detailRow("Requested effort", requested)
                     }
@@ -309,9 +336,8 @@ private struct AgentMetadataInspectorView: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     } else {
-                        Text(detailValue(
-                            agent.provider.capabilities.contextTelemetry,
-                            reported: nil))
+                        Text(agent.provider.capabilities.contextTelemetry
+                            .unreportedValue(verbose: true))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -383,9 +409,9 @@ private struct AgentMetadataInspectorView: View {
               let limit = metadata.contextWindowSize,
               let percent = metadata.contextPercentText
         else {
-            return detailValue(
-                agent.provider.capabilities.contextTelemetry,
-                reported: metadata.contextPercentText)
+            return metadata.contextPercentText
+                ?? agent.provider.capabilities.contextTelemetry
+                    .unreportedValue(verbose: true)
         }
         return "\(AgentSessionMetadata.formatTokens(used)) of \(AgentSessionMetadata.formatTokens(limit)) · \(percent)"
     }
@@ -395,9 +421,9 @@ private struct AgentMetadataInspectorView: View {
               let limit = metadata.contextWindowSize,
               let percent = metadata.contextPercentText
         else {
-            return detailValue(
-                agent.provider.capabilities.contextTelemetry,
-                reported: metadata.contextPercentText)
+            return metadata.contextPercentText
+                ?? agent.provider.capabilities.contextTelemetry
+                    .unreportedValue(verbose: true)
         }
         return "\(percent), \(used.formatted()) of \(limit.formatted()) tokens"
     }
@@ -411,19 +437,15 @@ private struct AgentMetadataInspectorView: View {
         }
     }
 
-    private func detailValue(
-        _ support: AgentCapabilitySupport,
-        reported: String?
-    ) -> String {
-        if let reported { return reported }
-        switch support {
-        case .supported: return "Not reported"
-        case .unavailable(let reason), .unsupported(let reason): return reason
-        }
-    }
 }
 
 extension AgentInstance {
+    var metadataIsHistorical: Bool {
+        processState == .exited
+            || surfaceState == .inactive
+            || metadataAvailability == .waiting
+    }
+
     var metadataAccessibilityValue: String {
         guard let metadata else {
             var configured = [
@@ -468,7 +490,7 @@ extension AgentInstance {
         } else {
             parts.append("Context use was not reported")
         }
-        if processState == .exited || surfaceState == .inactive || metadataAvailability == .waiting {
+        if metadataIsHistorical {
             parts.append("Last reported \(metadata.observedAt.formatted(.relative(presentation: .named)))")
         }
         return parts.joined(separator: ". ") + "."

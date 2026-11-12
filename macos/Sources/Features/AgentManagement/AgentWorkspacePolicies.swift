@@ -2,6 +2,35 @@ import Foundation
 import CoreTransferable
 import UniformTypeIdentifiers
 
+/// Explicit process boundary for non-disruptive visual verification. Audit
+/// instances use isolated agent data and remain behind the user's active app;
+/// ordinary launches never enter this mode implicitly.
+enum AgentVisualAuditScenario: String, Equatable, Sendable {
+    case workspace
+    case newAgent = "new-agent"
+    case newAgentConfigured = "new-agent-configured"
+    case lifecycleStates = "lifecycle-states"
+    case settings
+}
+
+enum AgentVisualAuditPolicy {
+    static let environmentKey = "GHOSTTY_AGENT_VISUAL_AUDIT"
+
+    static func scenario(environment: [String: String]) -> AgentVisualAuditScenario? {
+        guard let rawValue = environment[environmentKey]?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !rawValue.isEmpty
+        else { return nil }
+        if ["1", "true", "yes"].contains(rawValue) { return .workspace }
+        return AgentVisualAuditScenario(rawValue: rawValue)
+    }
+
+    static func isEnabled(environment: [String: String]) -> Bool {
+        scenario(environment: environment) != nil
+    }
+}
+
 enum AgentSelectionIntent: Equatable, Sendable {
     /// Keeps detail presentation synchronized with authoritative selection.
     case reveal
@@ -74,6 +103,221 @@ enum AgentWorkspaceSelectionReducer {
                 state: next,
                 effect: .present(agentID: fallbackAgentID, intent: .reveal))
         }
+    }
+}
+
+/// What an asynchronous launch is still allowed to do when it finishes.
+/// Activation authorized preparation, but selection can move while it runs, so
+/// completion re-derives its authority from the pane the detail controller
+/// presents now. A newer selection must never be replaced, attached over, or
+/// focused by an older launch.
+struct AgentLaunchPresentation: Equatable, Sendable {
+    /// The prepared pane is still the selected pane and must be attached.
+    var presentsPane: Bool
+    /// AppKit keyboard focus may move into the prepared pane.
+    var focusesTerminal: Bool
+}
+
+enum AgentLaunchPresentationPolicy {
+    /// Focus is subordinate to presentation: a pane that is not attached must
+    /// not take first responder. Focus also requires a window that can show
+    /// the pane; making a view first responder inside an invisible or
+    /// minimized window would leave the activation intent stranded there
+    /// instead of waiting for the next key transition.
+    static func decide(
+        agentID: UUID,
+        selectedAgentID: UUID?,
+        windowIsVisible: Bool,
+        windowIsMiniaturized: Bool
+    ) -> AgentLaunchPresentation {
+        let stillSelected = selectedAgentID == agentID
+        return AgentLaunchPresentation(
+            presentsPane: stillSelected,
+            focusesTerminal: stillSelected && windowIsVisible && !windowIsMiniaturized)
+    }
+}
+
+/// Everything that must still agree before an agent counts as viewed. Intent is
+/// only one leg: the committed selection, the pane the detail controller
+/// actually presents, that pane's live surface, and a key, visible, unminimized
+/// workspace window must all name the same agent. Anything less stays unread, so
+/// a completion cannot be silently acknowledged behind a placeholder, another
+/// agent, a minimized window, or an inactive application.
+struct AgentViewingContext: Equatable, Sendable {
+    /// The user explicitly activated or inspected this agent.
+    var explicitAgentID: UUID?
+    /// The committed workspace selection.
+    var selectedAgentID: UUID?
+    /// The pane the detail controller currently displays (`activeID`).
+    var presentedAgentID: UUID?
+    /// That pane owns a live surface; placeholder presentation owns none.
+    var presentedSurfaceIsLive: Bool
+    var windowIsVisible: Bool
+    var windowIsKey: Bool
+    var windowIsMiniaturized: Bool
+}
+
+enum AgentViewingPolicy {
+    static func viewedAgentID(in context: AgentViewingContext) -> UUID? {
+        guard let explicitAgentID = context.explicitAgentID,
+              explicitAgentID == context.selectedAgentID,
+              explicitAgentID == context.presentedAgentID,
+              context.presentedSurfaceIsLive,
+              context.windowIsVisible,
+              context.windowIsKey,
+              !context.windowIsMiniaturized
+        else { return nil }
+        return explicitAgentID
+    }
+}
+
+struct AgentListEmptyPresentation: Equatable, Sendable {
+    var title: String
+    var message: String
+    var symbolName: String
+    var offersCreation: Bool
+}
+
+/// Authoritative state for agent creation. Provider changes are transitions,
+/// not independent picker mutations: provider-specific model and reasoning
+/// values are cleared together and the new provider's saved start mode is
+/// applied atomically.
+struct AgentCreationDraft: Equatable, Sendable {
+    var name = ""
+    var provider: AgentProviderID
+    var modelID = ""
+    var reasoningEffort: String?
+    var startMode: AgentStartMode
+
+    init(provider: AgentProviderID, preferences: AgentPreferences) {
+        self.provider = provider
+        startMode = preferences.defaultStartMode(for: provider)
+    }
+
+    var normalizedName: String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var launchProfile: AgentLaunchProfile {
+        let normalizedModel = modelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return AgentLaunchProfile(
+            modelID: normalizedModel.isEmpty ? nil : normalizedModel,
+            reasoningEffort: reasoningEffort,
+            startMode: startMode)
+    }
+
+    var launchSummary: String {
+        var parts = [provider.startModeTitle(startMode)]
+        if let modelID = launchProfile.modelID { parts.append(modelID) }
+        if let effort = launchProfile.displayReasoningEffort {
+            parts.append("\(effort) reasoning")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    func canCreate(providerHealth: AgentProviderHealth) -> Bool {
+        !normalizedName.isEmpty && providerHealth.isReadyToLaunch
+    }
+
+    mutating func transition(
+        to provider: AgentProviderID,
+        preferences: AgentPreferences
+    ) {
+        self.provider = provider
+        modelID = ""
+        reasoningEffort = nil
+        startMode = preferences.defaultStartMode(for: provider)
+    }
+}
+
+/// Empty workspace copy is scope semantics, not a generic list fallback. Smart
+/// scopes communicate successful system state while hierarchy scopes explain
+/// the next valid action at that level.
+enum AgentListEmptyStatePolicy {
+    static func presentation(
+        scope: AgentWorkspaceModel.Scope,
+        searchQuery: String
+    ) -> AgentListEmptyPresentation {
+        if !searchQuery.isEmpty {
+            return AgentListEmptyPresentation(
+                title: "No Results",
+                message: "No agents match “\(searchQuery)”.",
+                symbolName: "magnifyingglass",
+                offersCreation: false)
+        }
+
+        switch scope {
+        case .attention:
+            return AgentListEmptyPresentation(
+                title: "All Clear",
+                message: "No agents need your attention.",
+                symbolName: "checkmark.circle",
+                offersCreation: false)
+        case .running:
+            return AgentListEmptyPresentation(
+                title: "Nothing Running",
+                message: "Start an agent from one of your tasks when you’re ready.",
+                symbolName: "bolt.slash",
+                offersCreation: false)
+        case .task:
+            return AgentListEmptyPresentation(
+                title: "No Agents Yet",
+                message: "Create the first agent for this task.",
+                symbolName: "person.crop.circle.badge.plus",
+                offersCreation: true)
+        case .project:
+            return AgentListEmptyPresentation(
+                title: "No Agents Yet",
+                message: "Choose a task in this project to create an agent.",
+                symbolName: "folder",
+                offersCreation: false)
+        case .all:
+            return AgentListEmptyPresentation(
+                title: "No Agents Yet",
+                message: "Choose a project task to create your first agent.",
+                symbolName: "person.2",
+                offersCreation: false)
+        }
+    }
+}
+
+/// Project disclosure is navigation state, but it must remain coherent with
+/// the selected scope. A task scope is never allowed to become invisibly
+/// selected beneath a collapsed parent.
+enum AgentNavigationDisclosurePolicy {
+    /// A workspace without an explicit disclosure preference starts as a calm
+    /// project index. The selected task's parent remains visible because a
+    /// selection must never be hidden by initialization.
+    static func initialCollapsedProjectIDs(
+        validProjectIDs: Set<UUID>,
+        selectedScope: AgentWorkspaceModel.Scope
+    ) -> Set<UUID> {
+        reconciledCollapsedProjectIDs(
+            validProjectIDs,
+            validProjectIDs: validProjectIDs,
+            selectedScope: selectedScope)
+    }
+
+    static func replacementScopeWhenCollapsing(
+        projectID: UUID,
+        selectedScope: AgentWorkspaceModel.Scope
+    ) -> AgentWorkspaceModel.Scope? {
+        guard case .task(let selectedProjectID, _) = selectedScope,
+              selectedProjectID == projectID
+        else { return nil }
+        return .project(projectID)
+    }
+
+    static func reconciledCollapsedProjectIDs(
+        _ collapsedProjectIDs: Set<UUID>,
+        validProjectIDs: Set<UUID>,
+        selectedScope: AgentWorkspaceModel.Scope
+    ) -> Set<UUID> {
+        var result = collapsedProjectIDs.intersection(validProjectIDs)
+        if case .task(let projectID, _) = selectedScope {
+            result.remove(projectID)
+        }
+        return result
     }
 }
 

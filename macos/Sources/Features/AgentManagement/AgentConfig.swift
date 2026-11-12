@@ -68,6 +68,15 @@ struct AgentProject: Codable, Identifiable, Equatable, Sendable {
     }
 }
 
+/// A structural configuration error. These are thrown instead of falling back
+/// to an empty model: an unreadable entry must fail the whole load so the
+/// previous in-memory model (and the on-disk bytes) survive, rather than
+/// letting a later save persist the loss.
+struct AgentConfigFormatError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
 struct AgentTask: Codable, Identifiable, Equatable, Sendable {
     let id: UUID
     var name: String
@@ -82,16 +91,49 @@ struct AgentTask: Codable, Identifiable, Equatable, Sendable {
     // Migration: decode missing `id` → fresh UUID; agents from [String] (v1) or [AgentEntry] (v2+).
     private enum CodingKeys: String, CodingKey { case id, name, agents }
 
+    /// One persisted agent array element. The original schema stored bare
+    /// names; every later schema stores objects. Anything else is malformed.
+    private enum PersistedAgent: Decodable {
+        case legacyName(String)
+        case entry(AgentEntry)
+
+        init(from decoder: Decoder) throws {
+            if let name = try? decoder.singleValueContainer().decode(String.self) {
+                self = .legacyName(name)
+            } else {
+                self = .entry(try AgentEntry(from: decoder))
+            }
+        }
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         self.name = try c.decode(String.self, forKey: .name)
-        if let entries = try? c.decode([AgentEntry].self, forKey: .agents) {
-            self.agents = entries
-        } else if let names = try? c.decode([String].self, forKey: .agents) {
-            self.agents = names.map { AgentEntry(id: UUID(), name: $0) }
-        } else {
-            self.agents = []
+        self.agents = try Self.decodeAgents(from: c, taskName: self.name)
+    }
+
+    private static func decodeAgents(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        taskName: String
+    ) throws -> [AgentEntry] {
+        // A missing key is the legitimate pre-agent shape (empty task).
+        guard container.contains(.agents) else { return [] }
+        // A null list is corruption, not an empty task. Treating it as empty
+        // would let the next save make the loss durable.
+        if try container.decodeNil(forKey: .agents) {
+            throw AgentConfigFormatError(
+                message: "Task \"\(taskName)\" has a null agent list; refusing to replace it with an empty list.")
+        }
+        // Decode every element strictly. A single malformed entry fails the
+        // entire decode with the offending coding path, so the caller keeps
+        // its previous model instead of observing a truncated agent list.
+        let persisted = try container.decode([PersistedAgent].self, forKey: .agents)
+        return persisted.map { persistedAgent in
+            switch persistedAgent {
+            case .legacyName(let name): return AgentEntry(id: UUID(), name: name)
+            case .entry(let entry): return entry
+            }
         }
     }
 }
@@ -114,7 +156,17 @@ struct AgentConfigFile: Codable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
-        projects = try container.decodeIfPresent([AgentProject].self, forKey: .projects) ?? []
+        if container.contains(.projects) {
+            projects = try container.decode([AgentProject].self, forKey: .projects)
+        } else if schemaVersion >= 2 {
+            // Schema versions at or above 2 always encode `projects`. Its
+            // absence means the file is truncated; decoding it as an empty
+            // list would silently discard the hierarchy on the next save.
+            throw AgentConfigFormatError(
+                message: "Configuration declares schemaVersion \(schemaVersion) but has no projects array.")
+        } else {
+            projects = []
+        }
     }
 }
 
@@ -129,6 +181,17 @@ class AgentConfig {
     /// Snapshot of last-loaded agents.json bytes. Used by the directory watcher
     /// to dedup spurious fires (including those caused by our own writes).
     private var lastConfigData: Data?
+    /// Non-nil while the configuration file on disk could not be decoded. Writes
+    /// are refused until a load succeeds so a malformed file is never replaced
+    /// by a partial in-memory model.
+    private var loadFailure: Error?
+    /// Explicit data root for tests and future multi-root scenarios. `nil`
+    /// resolves through `baseDir` (environment override or the account default).
+    @ObservationIgnored private let overrideDataDirectory: URL?
+
+    var dataDirectory: URL { overrideDataDirectory ?? Self.baseDir }
+    var configFileURL: URL { dataDirectory.appendingPathComponent("agents.json") }
+    var statusDirectoryURL: URL { dataDirectory.appendingPathComponent("status") }
 
     static var baseDir: URL {
         resolveBaseDirectory(
@@ -251,7 +314,8 @@ class AgentConfig {
         return errorMessage
     }
 
-    init() {
+    init(dataDirectory: URL? = nil) {
+        overrideDataDirectory = dataDirectory?.standardizedFileURL
         do {
             try ensureDirs()
         } catch {
@@ -259,7 +323,7 @@ class AgentConfig {
             logger.error("setup failed: \(error.localizedDescription)")
         }
         load()
-        if FileManager.default.fileExists(atPath: Self.baseDir.path) {
+        if FileManager.default.fileExists(atPath: self.dataDirectory.path) {
             watchConfigDir()
         }
     }
@@ -271,17 +335,28 @@ class AgentConfig {
     // MARK: - Load / Save
 
     func load() {
-        guard FileManager.default.fileExists(atPath: Self.configURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: configFileURL.path) else {
+            // Nothing on disk can be clobbered, so a previous failure no longer
+            // blocks writes (e.g. the user deleted the broken file).
+            if loadFailure != nil {
+                loadFailure = nil
+                clearLoadErrorMessage()
+            }
+            return
+        }
         do {
-            let data = try Data(contentsOf: Self.configURL)
+            let data = try Data(contentsOf: configFileURL)
             let config = try JSONDecoder().decode(AgentConfigFile.self, from: data)
+            // Only a fully decoded file clears the failure and replaces the
+            // observable model; a partial decode never reaches this point.
+            loadFailure = nil
             lastConfigData = data
             projects = config.projects
             errorMessage = nil
             migrateStatusFiles()
             let restoredProviderIdentity = Self.enforcePersistedProviderBindings(
                 in: &projects,
-                statusDirectory: Self.statusDir)
+                statusDirectory: statusDirectoryURL)
 
             if config.schemaVersion < AgentConfigFile.currentSchemaVersion
                 || restoredProviderIdentity {
@@ -292,9 +367,51 @@ class AgentConfig {
             logger.info("load — \(config.projects.count) projects, \(self.allAgentEntries.count) agents")
             onReloaded?()
         } catch {
-            errorMessage = "Agents configuration could not be loaded: \(error.localizedDescription)"
-            logger.error("load failed: \(error.localizedDescription)")
+            // Keep the previous valid model and the raw file untouched. Saving
+            // is blocked until a later load succeeds or the file is removed.
+            loadFailure = error
+            errorMessage = "Agents configuration could not be loaded: \(Self.describeLoadFailure(error))"
+            logger.error("load failed: \(Self.describeLoadFailure(error))")
         }
+    }
+
+    /// Turns a decode failure into a message that names the offending record
+    /// (for example `projects[0].tasks[0].agents[1].name`) so the user can fix
+    /// the file instead of losing the agents it still contains.
+    static func describeLoadFailure(_ error: Error) -> String {
+        guard let decodingError = error as? DecodingError else {
+            return error.localizedDescription
+        }
+        switch decodingError {
+        case .keyNotFound(let key, let context):
+            return "\(codingPathDescription(context.codingPath + [key])) is missing"
+        case .typeMismatch(_, let context), .valueNotFound(_, let context):
+            return "\(codingPathDescription(context.codingPath)): \(context.debugDescription)"
+        case .dataCorrupted(let context):
+            return "\(codingPathDescription(context.codingPath)): \(context.debugDescription)"
+        @unknown default:
+            return error.localizedDescription
+        }
+    }
+
+    private func clearLoadErrorMessage() {
+        if errorMessage?.hasPrefix("Agents configuration could not be loaded") == true {
+            errorMessage = nil
+        }
+    }
+
+    private static func codingPathDescription(_ path: [CodingKey]) -> String {
+        guard !path.isEmpty else { return "the configuration root" }
+        var result = ""
+        for key in path {
+            if let index = key.intValue {
+                result += "[\(index)]"
+            } else {
+                if !result.isEmpty { result += "." }
+                result += key.stringValue
+            }
+        }
+        return result
     }
 
     /// Migrate old v1 status files (keyed by sanitized name) to UUID-keyed names.
@@ -310,8 +427,8 @@ class AgentConfig {
                         "session", "session.json", "state", "heartbeat", "forkFrom",
                         "fork.json", "lastEvent", "events", "events.lock", "json", "metadata.json",
                     ] {
-                        let oldURL = Self.statusDir.appendingPathComponent("\(oldKey).\(ext)")
-                        let newURL = Self.statusDir.appendingPathComponent("\(newKey).\(ext)")
+                        let oldURL = statusDirectoryURL.appendingPathComponent("\(oldKey).\(ext)")
+                        let newURL = statusDirectoryURL.appendingPathComponent("\(newKey).\(ext)")
                         if fm.fileExists(atPath: oldURL.path) && !fm.fileExists(atPath: newURL.path) {
                             try? fm.moveItem(at: oldURL, to: newURL)
                             logger.info("migrated \(oldKey).\(ext) → \(newKey).\(ext)")
@@ -362,6 +479,19 @@ class AgentConfig {
 
     @discardableResult
     func save() -> Bool {
+        if let loadFailure {
+            // Refuse to replace a file that failed to decode: the on-disk bytes
+            // are the only copy of the entries this model does not contain.
+            // A removed file has nothing left to protect.
+            guard !FileManager.default.fileExists(atPath: configFileURL.path) else {
+                let reason = Self.describeLoadFailure(loadFailure)
+                errorMessage = "Agents configuration could not be saved because the existing configuration could not be loaded: \(reason)"
+                logger.error("save blocked by load failure: \(reason)")
+                return false
+            }
+            self.loadFailure = nil
+            clearLoadErrorMessage()
+        }
         logger.info("save — \(self.projects.count) projects")
         let config = AgentConfigFile(projects: projects)
         let encoder = JSONEncoder()
@@ -374,7 +504,7 @@ class AgentConfig {
             logger.error("save encode failed: \(error.localizedDescription)")
             return false
         }
-        guard Self.atomicWrite(data, to: Self.configURL) else {
+        guard Self.atomicWrite(data, to: configFileURL) else {
             errorMessage = "Agents configuration could not be saved. Check the file permissions and available storage."
             return false
         }
@@ -602,21 +732,21 @@ class AgentConfig {
     private func ensureDirs() throws {
         let fm = FileManager.default
         try fm.createDirectory(
-            at: Self.baseDir,
+            at: dataDirectory,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
         try fm.createDirectory(
-            at: Self.statusDir,
+            at: statusDirectoryURL,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: Self.baseDir.path)
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: Self.statusDir.path)
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dataDirectory.path)
+        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: statusDirectoryURL.path)
     }
 
     /// Watch the config DIRECTORY (not the file). Handles atomic external edits
     /// that replace the inode, and fresh installs where the file doesn't exist yet.
     private func watchConfigDir() {
-        let dirPath = Self.baseDir.path
+        let dirPath = dataDirectory.path
         let fd = open(dirPath, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(
@@ -629,7 +759,7 @@ class AgentConfig {
             // Compare raw bytes (definitive — no hash collisions).
             // This also suppresses our own writes (save() updates lastConfigData
             // before the kqueue event arrives).
-            guard let data = try? Data(contentsOf: Self.configURL) else { return }
+            guard let data = try? Data(contentsOf: self.configFileURL) else { return }
             guard data != self.lastConfigData else {
                 BridgeMetrics.shared.recordConfigReloadDeduped()
                 return

@@ -47,6 +47,118 @@ struct AgentStateReducerTests {
         #expect(failed.effects == [.failed, .providerExited(127)])
     }
 
+    @Test func nonzeroExitAfterAnOpenSurfaceButBeforeASessionIsStillAStartFailure() {
+        let generation = UUID()
+        var state = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
+        state = AgentStateReducer.reduce(
+            state,
+            event: .surfaceOpened(generation: generation)).state
+
+        let failed = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "exit",
+                event: .providerExited(status: 127)))
+
+        #expect(failed.state.processState == .exited)
+        #expect(failed.state.failureMessage?.contains("status 127") == true)
+        #expect(failed.effects == [.failed, .providerExited(127)])
+    }
+
+    @Test func sessionEndThenNonzeroExitDoesNotBecomeALaunchFailure() {
+        let generation = UUID()
+        var state = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
+        state = AgentStateReducer.reduce(
+            state,
+            event: .surfaceOpened(generation: generation)).state
+        let started = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "session",
+                event: .sessionStarted(
+                    sessionID: "session-1",
+                    model: nil,
+                    permissionMode: nil)))
+        #expect(started.state.processState == .running)
+
+        let ended = AgentStateReducer.reduce(
+            started.state,
+            event: providerEvent(generation, id: "session-end", event: .sessionEnded))
+        #expect(ended.state.processState == .exited)
+        #expect(ended.state.failureMessage == nil)
+
+        let exited = AgentStateReducer.reduce(
+            ended.state,
+            event: providerEvent(
+                generation,
+                id: "exit",
+                event: .providerExited(status: 130)))
+
+        #expect(exited.state.processState == .exited)
+        #expect(exited.state.surfaceState == .open)
+        #expect(exited.state.turnState == .inactive)
+        #expect(exited.state.failureMessage == nil)
+        #expect(exited.effects == [.providerExited(130)])
+    }
+
+    @Test func sessionEndAloneAttributesTheExitToAStartedSession() {
+        let generation = UUID()
+        var state = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
+        state = AgentStateReducer.reduce(
+            state,
+            event: .surfaceOpened(generation: generation)).state
+        // SessionEnd documents that a session ended, so the session started
+        // even if SessionStart was not observed by this launch.
+        state = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(generation, id: "session-end", event: .sessionEnded)).state
+
+        let exited = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "exit",
+                event: .providerExited(status: 130)))
+
+        #expect(exited.state.failureMessage == nil)
+        #expect(exited.effects == [.providerExited(130)])
+    }
+
+    @Test func nonzeroExitAfterAStartedSessionWithoutSessionEndIsNotALaunchFailure() {
+        let generation = UUID()
+        var state = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .launchRequested(generation: generation)).state
+        state = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "session",
+                event: .sessionStarted(
+                    sessionID: "session-1",
+                    model: nil,
+                    permissionMode: nil))).state
+
+        let exited = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "exit",
+                event: .providerExited(status: 130)))
+
+        #expect(exited.state.processState == .exited)
+        #expect(exited.state.failureMessage == nil)
+        #expect(exited.effects == [.providerExited(130)])
+    }
+
     @Test func staleEventsCannotMutateANewerLaunch() {
         let oldGeneration = UUID()
         let currentGeneration = UUID()
@@ -192,6 +304,93 @@ struct AgentStateReducerTests {
         #expect(result.state.failureMessage == nil)
         #expect(result.state.runtimeErrorMessage == "The agent reported a runtime error.")
         #expect(result.effects == [.failed])
+    }
+
+    @Test func toolFailureKeepsTheTurnLiveAndLaterEventsStillReduce() {
+        let generation = UUID()
+        var state = AgentStateReducer.reduce(
+            runningState(generation),
+            event: providerEvent(
+                generation,
+                id: "turn-start",
+                event: .turnStarted(turnID: "turn-1"))).state
+        state = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "tool-start",
+                event: .turnActivityChanged(.executing))).state
+
+        // ClaudeCodeProvider.normalize maps PostToolUseFailure to these
+        // non-terminal events because Claude keeps working in the same turn.
+        state = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "tool-failure-interaction",
+                event: .turnInteractionChanged(.none))).state
+        let afterFailure = AgentStateReducer.reduce(
+            state,
+            event: providerEvent(
+                generation,
+                id: "tool-failure-activity",
+                event: .turnActivityChanged(.reasoning)))
+
+        #expect(afterFailure.state.turnState == .active(turnID: "turn-1"))
+        #expect(afterFailure.state.activityState == .reasoning)
+        #expect(afterFailure.state.runtimeErrorMessage == nil)
+        #expect(afterFailure.state.telemetryHealth == .live)
+        #expect(afterFailure.effects.isEmpty)
+
+        let permission = AgentStateReducer.reduce(
+            afterFailure.state,
+            event: providerEvent(
+                generation,
+                id: "permission-after-failure",
+                event: .turnInteractionChanged(.permission)))
+        #expect(permission.state.interactionState == .permission)
+        #expect(permission.effects == [.waitingForUser])
+
+        let completed = AgentStateReducer.reduce(
+            permission.state,
+            event: providerEvent(
+                generation,
+                id: "turn-complete",
+                event: .turnCompleted(turnID: "turn-1")))
+        #expect(completed.state.turnState == .inactive)
+        #expect(completed.state.unreadCompletion?.turnID == "turn-1")
+        #expect(completed.effects == [.completed, .unreadChanged])
+    }
+
+    @Test func stopFailureStillEndsTheTurn() {
+        let generation = UUID()
+        let running = AgentStateReducer.reduce(
+            runningState(generation),
+            event: providerEvent(
+                generation,
+                id: "turn-start",
+                event: .turnStarted(turnID: "turn-1"))).state
+        let failed = AgentStateReducer.reduce(
+            running,
+            event: providerEvent(
+                generation,
+                id: "stop-failure",
+                event: .turnFailed(nil)))
+
+        #expect(failed.state.turnState == .inactive)
+        #expect(failed.state.activityState == .idle)
+        #expect(failed.state.runtimeErrorMessage == "The agent reported a runtime error.")
+        #expect(failed.effects == [.failed])
+
+        let lateActivity = AgentStateReducer.reduce(
+            failed.state,
+            event: providerEvent(
+                generation,
+                id: "late-activity",
+                event: .turnActivityChanged(.reasoning)))
+        #expect(lateActivity.state.turnState == .inactive)
+        #expect(lateActivity.state.activityState == .idle)
+        #expect(lateActivity.effects.isEmpty)
     }
 
     @Test func replayedCompletionIsIdempotentAfterItWasViewed() {

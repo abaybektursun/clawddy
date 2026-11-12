@@ -60,6 +60,36 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
         case .codex: return ["--dangerously-bypass-approvals-and-sandbox"]
         }
     }
+
+    /// Reasoning-effort choices offered at agent creation, in menu order.
+    /// `value` is passed to the CLI verbatim; nil requests the provider default.
+    var reasoningEffortOptions: [AgentReasoningEffortOption] {
+        switch self {
+        case .claudeCode: return [
+            .init(id: "default", title: "Provider Default", value: nil),
+            .init(id: "low", title: "Low", value: "low"),
+            .init(id: "medium", title: "Medium", value: "medium"),
+            .init(id: "high", title: "High", value: "high"),
+            .init(id: "xhigh", title: "Extra High", value: "xhigh"),
+            .init(id: "max", title: "Maximum", value: "max"),
+        ]
+        case .codex: return [
+            .init(id: "default", title: "Provider Default", value: nil),
+            .init(id: "minimal", title: "Minimal", value: "minimal"),
+            .init(id: "low", title: "Low", value: "low"),
+            .init(id: "medium", title: "Medium", value: "medium"),
+            .init(id: "high", title: "High", value: "high"),
+            .init(id: "xhigh", title: "Extra High", value: "xhigh"),
+        ]
+        }
+    }
+}
+
+struct AgentReasoningEffortOption: Identifiable, Equatable, Sendable {
+    let id: String
+    let title: String
+    /// Value passed to the CLI; nil requests the provider default.
+    let value: String?
 }
 
 enum AgentStartMode: String, Codable, CaseIterable, Identifiable, Sendable {
@@ -441,7 +471,8 @@ enum AgentProcessProbe {
         accountHomeDirectory: URL = AgentConfig.accountHomeDirectory,
         accountUserName: String = AgentConfig.accountUserName
     ) -> [String: String] {
-        var environment = inheritedEnvironment
+        var environment = AgentTerminalEnvironmentPolicy.removingInheritedAutomationVariables(
+            from: inheritedEnvironment)
         environment.merge(additionalEnvironment, uniquingKeysWith: { _, additional in additional })
         environment["HOME"] = accountHomeDirectory.path
         environment["PATH"] = environmentPath

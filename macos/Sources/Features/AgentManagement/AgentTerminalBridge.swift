@@ -57,7 +57,7 @@ enum DisplayState: Equatable, Sendable {
 
     var label: String {
         switch self {
-        case .inactive:     return "Ready"
+        case .inactive:     return "Not Started"
         case .launching:    return "Starting"
         case .idle:         return "Ready"
         case .finished:     return "Completed"
@@ -73,6 +73,14 @@ enum DisplayState: Equatable, Sendable {
         case .failed:       return "Couldn't Start"
         case .dead:         return "Exited"
         }
+    }
+
+    /// Untouched agents are already communicated by the quiet empty-circle
+    /// glyph. Repeating "Not Started" for every row overwhelms useful state
+    /// changes in dense workspaces, while the detail header and accessibility
+    /// value continue to expose the full lifecycle state.
+    var showsListLabel: Bool {
+        self != .inactive
     }
 
     var iconName: String? {
@@ -104,7 +112,7 @@ enum DisplayState: Equatable, Sendable {
 
     var isActive: Bool {
         switch self {
-        case .thinking, .working: return true
+        case .launching, .thinking, .working, .compacting: return true
         default: return false
         }
     }
@@ -343,9 +351,9 @@ private struct AgentLaunchCoordinator: Sendable {
         environment["GHOSTTY_AGENT_ID"] = agentID.uuidString
         environment["GHOSTTY_AGENT_PROVIDER"] = provider.rawValue
         environment["GHOSTTY_AGENT_LAUNCH_GENERATION"] = generation.uuidString
-        let command = ([prepared.executableURL.path] + prepared.arguments)
-            .map(AgentHookRuntime.shellQuote)
-            .joined(separator: " ")
+        let command = AgentTerminalEnvironmentPolicy.interactiveCommand(
+            executableURL: prepared.executableURL,
+            arguments: prepared.arguments)
         let exports = environment.sorted(by: { $0.key < $1.key }).map {
             "export \($0.key)=\(AgentHookRuntime.shellQuote($0.value))"
         }.joined(separator: "\n")
@@ -411,6 +419,11 @@ final class AgentBridge {
     var onAggregateStateChanged: ((AggregateState) -> Void)?
     var onSendText: ((UUID, String) -> Void)?
     var onSurfaceDeath: ((UUID) -> Void)?
+    /// Fires when the set of presented agent surfaces changes, after the
+    /// presentation and after death teardown. The workspace owner owns
+    /// `currentlyViewedAgentId`, so it must reconcile from the surface that
+    /// actually exists rather than from launch intent.
+    var onSurfacePresentationChanged: ((UUID) -> Void)?
     private(set) var currentlyViewedAgentId: UUID?
 
     private var pendingRenames: [UUID: String] = [:]
@@ -682,6 +695,9 @@ final class AgentBridge {
 
     // MARK: - Activation
 
+    /// Starts or reveals an agent. This never declares the agent viewed:
+    /// viewing requires a presented live surface and a key workspace window,
+    /// which only the workspace owner can reconcile.
     func activateAgent(id: UUID, app: ghostty_app_t, detailVC: AgentDetailViewController,
                        project: AgentProject) {
         guard let agent = agents[id] else { return }
@@ -692,12 +708,9 @@ final class AgentBridge {
 
         if detailVC.hasSurface(id: id) {
             _ = detailVC.showOrSwitch(
-                id: id,
-                displayName: agent.name,
                 projectName: project.name,
                 agent: agent,
                 createConfig: { nil })
-            setCurrentlyViewedAgent(id)
             return
         }
 
@@ -705,7 +718,6 @@ final class AgentBridge {
         // reveals the existing launch state; it never creates a competing run.
         if agent.surfaceState == .opening, agent.processState == .launching {
             detailVC.selectAgent(agent, projectName: project.name)
-            setCurrentlyViewedAgent(id)
             return
         }
 
@@ -721,7 +733,6 @@ final class AgentBridge {
         agent.launchTime = Date()
         agent.lastHookTime = nil
         detailVC.selectAgent(agent, projectName: project.name)
-        setCurrentlyViewedAgent(id)
         scheduleLaunchTimeout(agentID: id, generation: generation)
 
         let provider = agent.provider
@@ -834,14 +845,9 @@ final class AgentBridge {
             } ?? launch.metadataAvailability
             removeLaunchScript(for: agentID)
             launchScripts[agentID] = launch.scriptURL
-            let shouldReveal = currentlyViewedAgentId == agentID && detailVC.activeID == agentID
-            let isNew = detailVC.showOrSwitch(
-                id: agentID,
-                displayName: agent.name,
+            let isNew = detailVC.presentPreparedSurface(
                 projectName: projectName,
-                agent: agent,
-                focusTerminal: shouldReveal,
-                select: shouldReveal
+                agent: agent
             ) {
                 var surfaceConfig = Ghostty.SurfaceConfiguration()
                 surfaceConfig.command = launch.scriptURL.path
@@ -869,6 +875,7 @@ final class AgentBridge {
                 }
             }
             surfaceObservers[agentID] = observer
+            onSurfacePresentationChanged?(agentID)
         }
     }
 
@@ -1500,6 +1507,7 @@ final class AgentBridge {
             apply(.surfaceDied(generation: agent.launchGeneration), to: agent)
         }
         onSurfaceDeath?(id)
+        onSurfacePresentationChanged?(id)
         updateAggregate()
         persistState()
     }

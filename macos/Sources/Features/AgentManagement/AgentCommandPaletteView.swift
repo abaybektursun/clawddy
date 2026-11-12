@@ -27,17 +27,15 @@ struct AgentCommandPaletteView: View {
                     let id = entry.id
                     let proj = project
                     options.append(CommandOption(
-                        id: entry.id,
                         title: entry.name,
                         subtitle: "\(entry.provider.displayName) · \(project.name) / \(task.name)",
+                        description: ([state.label]
+                            + entry.launchProfile.searchTerms
+                            + (instance?.metadata?.searchTerms ?? []))
+                            .joined(separator: " · "),
                         leadingIcon: state.iconName,
                         leadingColor: state.color,
                         badge: state.label,
-                        searchTerms: [
-                            project.name, task.name, state.label, entry.provider.displayName,
-                        ]
-                            + entry.launchProfile.searchTerms
-                            + (instance?.metadata?.searchTerms ?? []),
                         action: { onSelectAgent(id, proj) }
                     ))
                 }
@@ -50,10 +48,7 @@ struct AgentCommandPaletteView: View {
         CommandPaletteView(
             isPresented: $isPresented,
             options: commandOptions,
-            placeholder: "Search agents\u{2026}",
-            tableMaxHeight: 360,
-            showsBorder: false,
-            showsBackground: false
+            placeholder: "Search agents\u{2026}"
         )
         .onChange(of: isPresented) { _, newValue in
             guard !newValue else { return }

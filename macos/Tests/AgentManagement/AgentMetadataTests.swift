@@ -75,6 +75,20 @@ struct AgentMetadataTests {
         #expect(metadata.contextPercentText == nil)
     }
 
+    @MainActor
+    @Test func metadataFreshnessTracksAuthoritativeLifecycle() {
+        let agent = AgentInstance(entry: AgentEntry(name: "Metadata"))
+        #expect(agent.metadataIsHistorical)
+
+        agent.surfaceState = .open
+        agent.processState = .running
+        agent.metadataAvailability = .available
+        #expect(!agent.metadataIsHistorical)
+
+        agent.metadataAvailability = .waiting
+        #expect(agent.metadataIsHistorical)
+    }
+
     @Test func proxyHasValidPOSIXShellSyntax() throws {
         let process = Process()
         let input = Pipe()

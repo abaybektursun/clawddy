@@ -3,6 +3,18 @@ import Testing
 @testable import Ghostty
 
 struct AgentProviderTests {
+    @Test func reasoningEffortOptionsAreProviderData() {
+        for provider in AgentProviderID.allCases {
+            let options = provider.reasoningEffortOptions
+            #expect(options.first?.value == nil, "first option is the provider default")
+            #expect(Set(options.map(\.id)).count == options.count, "ids are unique")
+        }
+        #expect(AgentProviderID.claudeCode.reasoningEffortOptions.map(\.value)
+            == [nil, "low", "medium", "high", "xhigh", "max"])
+        #expect(AgentProviderID.codex.reasoningEffortOptions.map(\.value)
+            == [nil, "minimal", "low", "medium", "high", "xhigh"])
+    }
+
     @Test func providerProbeEnvironmentPreservesMacOSAccountIdentity() {
         let environment = AgentProcessProbe.environment(
             environmentPath: "/custom/bin:/usr/bin",
@@ -15,6 +27,9 @@ struct AgentProviderTests {
                 "LANG": "en_US.UTF-8",
                 "HTTPS_PROXY": "https://proxy.example",
                 "LOGNAME": "wrong-logname",
+                "CLAUDE_CODE_CHILD_SESSION": "1",
+                "CLAUDECODE": "1",
+                "CLAUDE_PID": "59562",
             ],
             accountHomeDirectory: URL(fileURLWithPath: "/Users/example", isDirectory: true),
             accountUserName: "example")
@@ -355,7 +370,10 @@ struct AgentProviderTests {
 
         let codexFailure = try rawEvent(name: "PostToolUseFailure")
         #expect(CodexProvider().normalize(codexFailure).isEmpty)
-        #expect(ClaudeCodeProvider().normalize(codexFailure) == [.turnFailed(nil)])
+        #expect(ClaudeCodeProvider().normalize(codexFailure) == [
+            .turnInteractionChanged(.none),
+            .turnActivityChanged(.reasoning),
+        ])
 
         let childCompleted = try rawEvent(name: "SubagentStop")
         #expect(CodexProvider().normalize(childCompleted) == [
@@ -366,6 +384,23 @@ struct AgentProviderTests {
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])
+    }
+
+    @Test func claudeToolFailureDoesNotNormalizeToTurnFailureButStopFailureDoes() throws {
+        let toolFailure = try rawEvent(name: "PostToolUseFailure")
+        let normalizedFailure = ClaudeCodeProvider().normalize(toolFailure)
+        #expect(!normalizedFailure.contains(.turnFailed(nil)))
+        #expect(!normalizedFailure.contains(.turnCompleted(turnID: nil)))
+        #expect(normalizedFailure == [
+            .turnInteractionChanged(.none),
+            .turnActivityChanged(.reasoning),
+        ])
+
+        let stopFailure = try rawEvent(name: "StopFailure")
+        #expect(ClaudeCodeProvider().normalize(stopFailure) == [.turnFailed(nil)])
+
+        let stop = try rawEvent(name: "Stop")
+        #expect(ClaudeCodeProvider().normalize(stop) == [.turnCompleted(turnID: nil)])
     }
 
     @Test func capabilityMatrixDoesNotPretendUnavailableCodexTelemetryExists() {
@@ -384,6 +419,22 @@ struct AgentProviderTests {
         #expect(profile.displayReasoningEffort == "Extra high")
         #expect(profile.searchTerms.contains("gpt-5.4"))
         #expect(profile.searchTerms.contains("Extra high"))
+    }
+
+    @Test func lifecyclePresentationDistinguishesNotStartedFromLiveIdle() {
+        #expect(DisplayState.inactive.label == "Not Started")
+        #expect(DisplayState.idle.label == "Ready")
+        #expect(DisplayState.inactive.label != DisplayState.idle.label)
+        #expect(!DisplayState.inactive.showsListLabel)
+        #expect(DisplayState.idle.showsListLabel)
+    }
+
+    @Test func activePresentationIncludesStartupAndContextCompaction() {
+        #expect(DisplayState.launching.isActive)
+        #expect(DisplayState.thinking.isActive)
+        #expect(DisplayState.working.isActive)
+        #expect(DisplayState.compacting.isActive)
+        #expect(!DisplayState.idle.isActive)
     }
 
     @Test func providerReconciliationOnlyReplacesAnUnboundInactiveRuntime() {

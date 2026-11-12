@@ -5,8 +5,10 @@
   build settings. It is the source of truth for platform policy and validation.
 - Use `swiftlint` for formatting and linting Swift code.
 - If code outside of `macos/` directory is modified, use
-  `./build.nu -Demit-macos-app=false` before building the macOS app to update
-  the underlying Ghostty library.
+  `GHOSTTY_ZIG=/Volumes/Xcode/GhosttyBuilds/ghostty/tools/zig-0.17.0/zig ./build.nu -Demit-macos-app=false`
+  before building the macOS app to update the underlying Ghostty library
+  (Zig 0.17 is not the `zig` on `PATH`). That wrapper keeps
+  `macos/GhosttyKit.xcframework` a symlink to external storage.
 - Use `macos/build.nu` to build the macOS app, do not use `zig build`
   (except to build the underlying library as mentioned above).
   - Build: `macos/build.nu [--scheme Ghostty] [--configuration Release] [--action build]`
