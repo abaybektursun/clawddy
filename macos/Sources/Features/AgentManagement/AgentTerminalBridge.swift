@@ -447,7 +447,7 @@ final class AgentBridge {
     private var lastAggregateState: AggregateState?
     private var isTerminating = false
 
-    private var heartbeatTimer: Timer?
+    private var heartbeatTimer: (any AgentTimer)?
     private var statusDirWatcher: DispatchSourceFileSystemObject?
     private let ioQueue = DispatchQueue(label: "clawddy.io", qos: .utility)
     private let healthQueue = DispatchQueue(
@@ -455,10 +455,11 @@ final class AgentBridge {
         qos: .utility,
         attributes: .concurrent)
     private var healthRefreshGenerations: [AgentProviderID: UUID] = [:]
-    private var compactingTimers: [UUID: Timer] = [:]
+    private var compactingTimers: [UUID: any AgentTimer] = [:]
     private var launchScripts: [UUID: URL] = [:]
     let root: AgentDataRoot
     private let providerRegistry: AgentProviderRegistry
+    private let scheduler: any AgentScheduler
     private var integrationIssues: [AgentProviderID: String] = [:]
     var environmentPath: String? {
         didSet {
@@ -481,16 +482,21 @@ final class AgentBridge {
 
     private var surfaceViews: [UUID: Ghostty.SurfaceView] = [:]
     private var surfaceObservers: [UUID: NSObjectProtocol] = [:]
-    private var launchTimers: [UUID: Timer] = [:]
+    private var launchTimers: [UUID: any AgentTimer] = [:]
 
     private var statusDir: URL { root.statusDir }
 
-    init(root: AgentDataRoot, isProduction: Bool) {
+    init(
+        root: AgentDataRoot,
+        isProduction: Bool,
+        scheduler: any AgentScheduler = AgentRunLoopScheduler()
+    ) {
         self.root = root
         providerRegistry = AgentProviderRegistry(
             root: root,
             codexHooksFile: AgentConfig.codexConfigDir.appendingPathComponent("hooks.json"),
             isProduction: isProduction)
+        self.scheduler = scheduler
     }
 
     // MARK: - Lifecycle
@@ -532,10 +538,8 @@ final class AgentBridge {
         startStatusDirWatcher()
 
         // Heartbeat timer: infrequent fallback for edge cases (crashes without notification)
-        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.heartbeat()
-            }
+        heartbeatTimer = scheduler.timer(interval: 10.0, repeats: true) { [weak self] in
+            self?.heartbeat()
         }
 
         // Opt-in diagnostics are available in the exact Release binary without
@@ -761,7 +765,7 @@ final class AgentBridge {
                     interaction: .authentication),
                 to: agent)
         }
-        agent.launchTime = Date()
+        agent.launchTime = scheduler.now
         agent.lastHookTime = nil
         detailVC.selectAgent(agent, projectName: project.name)
         scheduleLaunchTimeout(agentID: id, generation: generation)
@@ -811,20 +815,15 @@ final class AgentBridge {
 
     private func scheduleLaunchTimeout(agentID: UUID, generation: UUID) {
         launchTimers[agentID]?.invalidate()
-        launchTimers[agentID] = Timer.scheduledTimer(
-            withTimeInterval: 10,
-            repeats: false
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                guard let self, let agent = self.agents[agentID],
-                      agent.processState == .launching,
-                      agent.launchGeneration == generation,
-                      agent.lastHookTime == nil
-                else { return }
-                self.apply(.launchTimedOut(generation: generation), to: agent)
-                self.launchTimers.removeValue(forKey: agentID)
-                self.updateAggregate()
-            }
+        launchTimers[agentID] = scheduler.timer(interval: 10, repeats: false) { [weak self] in
+            guard let self, let agent = self.agents[agentID],
+                  agent.processState == .launching,
+                  agent.launchGeneration == generation,
+                  agent.lastHookTime == nil
+            else { return }
+            self.apply(.launchTimedOut(generation: generation), to: agent)
+            self.launchTimers.removeValue(forKey: agentID)
+            self.updateAggregate()
         }
     }
 
@@ -1062,7 +1061,8 @@ final class AgentBridge {
     /// Evaluates telemetry confidence only after a complete journal
     /// reconciliation. This prevents a stale heartbeat from briefly replacing a
     /// completion event that is already on disk but has not been applied yet.
-    private func updateTelemetryFreshness(now: Date = Date()) {
+    private func updateTelemetryFreshness() {
+        let now = scheduler.now
         var confidenceChanged = false
         for agent in agents.values {
             guard let generation = agent.launchGeneration,
@@ -1089,14 +1089,12 @@ final class AgentBridge {
             return
         }
         pollPending = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self, !self.isTerminating else { return }
-                self.pollPending = false
-                self.pollInFlight = true
-                BridgeMetrics.shared.recordPollFired()
-                self.pollStatusFiles()
-            }
+        scheduler.after(delay) { [weak self] in
+            guard let self, !self.isTerminating else { return }
+            self.pollPending = false
+            self.pollInFlight = true
+            BridgeMetrics.shared.recordPollFired()
+            self.pollStatusFiles()
         }
     }
 
@@ -1282,7 +1280,7 @@ final class AgentBridge {
                     removeLaunchScript(for: id)
                 }
                 if appliedNewProviderFact {
-                    agent.lastHookTime = Date()
+                    agent.lastHookTime = scheduler.now
                 }
                 updateCompactingTimer(for: agent)
 
@@ -1378,7 +1376,7 @@ final class AgentBridge {
         metadata.sessionID = rawEvent.sessionID ?? metadata.sessionID
         metadata.runtimeVersion = runtimeVersion(for: provider) ?? metadata.runtimeVersion
         metadata.permissionMode = rawEvent.permissionMode ?? metadata.permissionMode
-        metadata.observedAt = Date()
+        metadata.observedAt = scheduler.now
         agent.metadata = metadata
         agent.metadataAvailability = .available
     }
@@ -1432,7 +1430,7 @@ final class AgentBridge {
         let result = AgentStateReducer.reduce(old, event: event)
         agent.runtimeSnapshot = result.state
         if agent.displayState != oldDisplayState {
-            agent.lastAuthoritativeChange = Date()
+            agent.lastAuthoritativeChange = scheduler.now
         }
         if old.processState != result.state.processState {
             BridgeMetrics.shared.recordMutProcessState()
@@ -1454,20 +1452,18 @@ final class AgentBridge {
               let generation = agent.launchGeneration
         else { return }
 
-        compactingTimers[agent.id] = Timer.scheduledTimer(
-            withTimeInterval: Self.compactingTimeout,
+        compactingTimers[agent.id] = scheduler.timer(
+            interval: Self.compactingTimeout,
             repeats: false
-        ) { [weak self, weak agent] _ in
-            Task { @MainActor [weak self, weak agent] in
-                guard let self, let agent,
-                      agent.activityState == .compacting,
-                      agent.launchGeneration == generation
-                else { return }
-                self.apply(.compactionExpired(generation: generation), to: agent)
-                self.compactingTimers.removeValue(forKey: agent.id)
-                self.updateAggregate()
-                self.persistState()
-            }
+        ) { [weak self, weak agent] in
+            guard let self, let agent,
+                  agent.activityState == .compacting,
+                  agent.launchGeneration == generation
+            else { return }
+            self.apply(.compactionExpired(generation: generation), to: agent)
+            self.compactingTimers.removeValue(forKey: agent.id)
+            self.updateAggregate()
+            self.persistState()
         }
     }
 
