@@ -800,7 +800,7 @@ final class AgentBridge {
             io.onMainActor { [weak self] in
                 guard let self, let host = hostReference.value else {
                     if case .success(let launch) = outcome {
-                        DispatchQueue.global(qos: .utility).async {
+                        io.global {
                             try? FileManager.default.removeItem(at: launch.scriptURL)
                         }
                     }
@@ -1102,7 +1102,7 @@ final class AgentBridge {
         }
     }
 
-    private func pollStatusFiles() {
+    func pollStatusFiles() {
         guard !isTerminating else {
             pollInFlight = false
             return

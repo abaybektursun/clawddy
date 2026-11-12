@@ -72,6 +72,8 @@ protocol AgentIOExecutor: Sendable {
     func sync(_ work: @Sendable () -> Void)
     /// Runs a provider probe on the concurrent provider-health queue.
     func probe(_ work: @escaping @Sendable () -> Void)
+    /// Runs `work` on the global utility queue, in no order with the IO queue.
+    func global(_ work: @escaping @Sendable () -> Void)
     /// Runs `work` on the main actor in a new task.
     func onMainActor(_ work: @escaping @MainActor () -> Void)
     /// Runs `work` on the main dispatch queue.
@@ -97,6 +99,10 @@ struct AgentDispatchIO: AgentIOExecutor {
 
     func probe(_ work: @escaping @Sendable () -> Void) {
         healthQueue.async(execute: work)
+    }
+
+    func global(_ work: @escaping @Sendable () -> Void) {
+        DispatchQueue.global(qos: .utility).async(execute: work)
     }
 
     func onMainActor(_ work: @escaping @MainActor () -> Void) {
