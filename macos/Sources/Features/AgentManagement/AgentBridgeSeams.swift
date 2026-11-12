@@ -188,3 +188,17 @@ extension AgentProviderTable {
             cleanup: { registry.adapter(for: $0).cleanup(agentID: $1) })
     }
 }
+
+// MARK: - Diagnostics
+
+/// Where the bridge reports what it did, failed to do or chose to ignore,
+/// as a log level and a message. It can be called from any thread.
+typealias AgentDiagnosticsSink = @Sendable (OSLogType, String) -> Void
+
+enum AgentDiagnostics {
+    /// The unified log, in the bridge's category. The whole message is
+    /// public, including the agent IDs in it.
+    static let unifiedLog: AgentDiagnosticsSink = { level, message in
+        logger.log(level: level, "\(message, privacy: .public)")
+    }
+}

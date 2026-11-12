@@ -4,7 +4,6 @@ import GhosttyKit
 @preconcurrency import UserNotifications
 import os
 
-private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "AgentBridge")
 private let agentPollThrottle: TimeInterval = 0.2
 
 // MARK: - Display State (derived, never stored)
@@ -456,6 +455,7 @@ final class AgentBridge {
     private let scheduler: any AgentScheduler
     private let io: any AgentIOExecutor
     private let notifier: any AgentNotifier
+    private let diagnose: AgentDiagnosticsSink
     private var integrationIssues: [AgentProviderID: String] = [:]
     var environmentPath: String? {
         didSet {
@@ -487,13 +487,15 @@ final class AgentBridge {
         providers: AgentProviderTable,
         scheduler: any AgentScheduler = AgentRunLoopScheduler(),
         io: any AgentIOExecutor = AgentDispatchIO(),
-        notifier: any AgentNotifier = AgentUserNotificationCenter()
+        notifier: any AgentNotifier = AgentUserNotificationCenter(),
+        diagnose: @escaping AgentDiagnosticsSink = AgentDiagnostics.unifiedLog
     ) {
         self.root = root
         self.providers = providers
         self.scheduler = scheduler
         self.io = io
         self.notifier = notifier
+        self.diagnose = diagnose
     }
 
     // MARK: - Lifecycle
@@ -547,7 +549,7 @@ final class AgentBridge {
         // Consume any events that landed after the last persisted offset.
         requestStatusPoll(after: 0)
 
-        logger.info("started — \(self.agents.count) agents")
+        diagnose(.info, "started — \(agents.count) agents")
     }
 
     func shutdown() {
@@ -683,7 +685,8 @@ final class AgentBridge {
                     BridgeMetrics.shared.recordMutAgentsDict()
                     continue
                 case .preserveRuntimeAndRestoreConfig:
-                    logger.warning(
+                    diagnose(
+                        .error,
                         "rejected provider change for bound or active agent \(entry.id)")
                     _ = config.restoreProvider(id: entry.id, provider: agent.provider)
                 }
@@ -922,7 +925,7 @@ final class AgentBridge {
                   provider: source.provider,
                   directory: statusDir)
         else {
-            logger.warning("fork: no session for source \(sourceId)")
+            diagnose(.error, "fork: no session for source \(sourceId)")
             return nil
         }
 
@@ -952,7 +955,7 @@ final class AgentBridge {
             sourceSessionID: sourceSession.sessionID)
         guard AgentSessionStore.write(pending, for: entry.id, directory: statusDir) else {
             deleteAgent(id: entry.id, config: config)
-            logger.error("fork: failed to persist source session for \(entry.id)")
+            diagnose(.error, "fork: failed to persist source session for \(entry.id)")
             return nil
         }
 
@@ -979,10 +982,10 @@ final class AgentBridge {
             return
         }
         if isSafeForInput(agent.displayState) {
-            logger.info("rename: sending /rename for \(id) immediately")
+            diagnose(.info, "rename: sending /rename for \(id) immediately")
             onSendText?(id, "/rename \(safeName)\n")
         } else {
-            logger.info("rename: deferring /rename for \(id)")
+            diagnose(.info, "rename: deferring /rename for \(id)")
             pendingRenames[id] = safeName
             persistState()
         }
@@ -1110,6 +1113,7 @@ final class AgentBridge {
         let statusDir = statusDir
         let providers = agents.mapValues(\.provider)
         let io = self.io
+        let diagnose = self.diagnose
         io.async { [weak self] in
             var batches: [UUID: AgentEventJournalBatch] = [:]
             var metadataUpdates: [UUID: AgentMetadataFileUpdate] = [:]
@@ -1132,7 +1136,7 @@ final class AgentBridge {
                                 batches[id] = batch
                             }
                         } catch {
-                            logger.error("journal read failed for \(id): \(error.localizedDescription)")
+                            diagnose(.error, "journal read failed for \(id): \(error.localizedDescription)")
                         }
                         try? handle.close()
                     }
@@ -1175,7 +1179,7 @@ final class AgentBridge {
         for (id, update) in metadataUpdates {
             metadataFileData[id] = update.data
             guard let agent = agents[id], let snapshot = update.snapshot else {
-                logger.error("invalid metadata snapshot for \(id)")
+                diagnose(.error, "invalid metadata snapshot for \(id)")
                 continue
             }
             if agent.metadata != snapshot || agent.metadataAvailability != .available {
@@ -1195,7 +1199,7 @@ final class AgentBridge {
                 let eventProvider: AgentProviderID
                 if let taggedProvider = rawEvent.provider {
                     guard taggedProvider == agent.provider else {
-                        logger.error("ignored provider-mismatched event for \(id)")
+                        diagnose(.error, "ignored provider-mismatched event for \(id)")
                         continue
                     }
                     eventProvider = taggedProvider
@@ -1206,7 +1210,8 @@ final class AgentBridge {
                     eventProvider = .claudeCode
                 }
                 guard rawEvent.hasSupportedSchema(for: eventProvider) else {
-                    logger.error(
+                    diagnose(
+                        .error,
                         "ignored unsupported event schema for \(id): \(rawEvent.schemaVersion ?? -1)")
                     continue
                 }
@@ -1214,7 +1219,7 @@ final class AgentBridge {
                 let eventGeneration: UUID
                 if let taggedGeneration = rawEvent.launchGeneration {
                     guard taggedGeneration == currentGeneration else {
-                        logger.debug("ignored stale launch event for \(id)")
+                        diagnose(.debug, "ignored stale launch event for \(id)")
                         continue
                     }
                     eventGeneration = taggedGeneration
@@ -1392,6 +1397,7 @@ final class AgentBridge {
         let url = statusDir.appendingPathComponent("\(id.uuidString).events")
         let lockURL = statusDir.appendingPathComponent("\(id.uuidString).events.lock")
         let io = self.io
+        let diagnose = self.diagnose
         io.async { [weak self] in
             guard let self else { return }
             let compacted = AgentEventJournal.compact(
@@ -1399,7 +1405,7 @@ final class AgentBridge {
                 lockURL: lockURL,
                 acknowledgedOffset: acknowledgedOffset)
             if !compacted {
-                logger.debug("journal compaction deferred for \(id)")
+                diagnose(.debug, "journal compaction deferred for \(id)")
             }
             io.onMainQueue { [weak self] in
                 guard let self else { return }
@@ -1546,7 +1552,7 @@ final class AgentBridge {
     }
 
     private func handleSurfaceDeath(id: UUID) {
-        logger.info("surface death: \(id)")
+        diagnose(.info, "surface death: \(id)")
         BridgeMetrics.shared.recordSurfaceDestroyedExit()
         destroySurface(id: id)
     }
@@ -1637,7 +1643,7 @@ final class AgentBridge {
     private func startStatusDirWatcher() {
         let fd = open(statusDir.path, O_EVTONLY)
         guard fd >= 0 else {
-            logger.error("failed to open status dir for watching")
+            diagnose(.error, "failed to open status dir for watching")
             return
         }
         let source = DispatchSource.makeFileSystemObjectSource(
