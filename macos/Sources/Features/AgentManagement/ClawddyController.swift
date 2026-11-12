@@ -70,10 +70,10 @@ final class ClawddyController: NSObject {
         config = AgentConfig(root: root)
         bridge = AgentBridge(
             root: root,
-            providers: AgentProviderTable(registry: AgentProviderRegistry(
+            providers: AgentProviderTable(
                 root: root,
                 codexHooksFile: AgentConfig.codexConfigDir.appendingPathComponent("hooks.json"),
-                isProduction: isProduction)))
+                isProduction: isProduction))
         workspaceModel = AgentWorkspaceModel(defaults: isTestHost ? nil : .standard)
         super.init()
     }

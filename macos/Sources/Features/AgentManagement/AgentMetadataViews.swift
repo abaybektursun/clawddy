@@ -136,8 +136,7 @@ struct AgentMetadataSummaryButton: View {
                             ? "Requested effort" : "Effort",
                         value: metadata.displayEffort
                             ?? agent.launchProfile.displayReasoningEffort
-                            ?? agent.provider.capabilities.effortTelemetry
-                                .unreportedValue(verbose: false))
+                            ?? unreportedValue(agent.provider.effortUnavailableReason, verbose: false))
                     contextSummary(metadata)
                     freshnessSummary(metadata)
                 }
@@ -211,10 +210,9 @@ struct AgentMetadataSummaryButton: View {
                     Text("Updating")
                         .foregroundStyle(.primary.opacity(0.78))
                 } else {
-                    Text(agent.provider.capabilities.contextTelemetry
-                        .unreportedValue(verbose: false))
+                    Text(unreportedValue(agent.provider.contextUnavailableReason, verbose: false))
                         .foregroundStyle(.primary.opacity(0.78))
-                        .help(agent.provider.capabilities.contextTelemetry.explanation ?? "")
+                        .help(agent.provider.contextUnavailableReason ?? "")
                 }
             }
             .font(.caption.weight(.medium))
@@ -256,16 +254,12 @@ struct AgentMetadataSummaryButton: View {
 
 }
 
-extension AgentCapabilitySupport {
-    /// User-facing text when no value was reported. The verbose form carries
-    /// the capability's reason; the compact form uses fixed short labels.
-    func unreportedValue(verbose: Bool) -> String {
-        switch self {
-        case .supported: return "Not reported"
-        case .unavailable(let reason): return verbose ? reason : "Unavailable"
-        case .unsupported(let reason): return verbose ? reason : "Not supported"
-        }
-    }
+/// User-facing text for a value that was not reported: "Not reported" when
+/// the provider could have reported it, else why it never does (verbose) or
+/// "Unavailable".
+private func unreportedValue(_ unavailableReason: String?, verbose: Bool) -> String {
+    guard let unavailableReason else { return "Not reported" }
+    return verbose ? unavailableReason : "Unavailable"
 }
 
 private struct AgentMetadataInspectorView: View {
@@ -292,8 +286,7 @@ private struct AgentMetadataInspectorView: View {
                     detailRow(
                         "Reasoning effort",
                         metadata.displayEffort
-                            ?? agent.provider.capabilities.effortTelemetry
-                                .unreportedValue(verbose: true))
+                            ?? unreportedValue(agent.provider.effortUnavailableReason, verbose: true))
                     if let requested = agent.launchProfile.displayReasoningEffort {
                         detailRow("Requested effort", requested)
                     }
@@ -314,8 +307,7 @@ private struct AgentMetadataInspectorView: View {
                     }
                     detailRow(
                         "Reasoning effort",
-                        agent.provider.capabilities.effortTelemetry
-                            .unreportedValue(verbose: true))
+                        unreportedValue(agent.provider.effortUnavailableReason, verbose: true))
                     if let requested = agent.launchProfile.displayReasoningEffort {
                         detailRow("Requested effort", requested)
                     }
@@ -336,8 +328,7 @@ private struct AgentMetadataInspectorView: View {
                             .foregroundStyle(.secondary)
                             .monospacedDigit()
                     } else {
-                        Text(agent.provider.capabilities.contextTelemetry
-                            .unreportedValue(verbose: true))
+                        Text(unreportedValue(agent.provider.contextUnavailableReason, verbose: true))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -410,8 +401,7 @@ private struct AgentMetadataInspectorView: View {
               let percent = metadata.contextPercentText
         else {
             return metadata.contextPercentText
-                ?? agent.provider.capabilities.contextTelemetry
-                    .unreportedValue(verbose: true)
+                ?? unreportedValue(agent.provider.contextUnavailableReason, verbose: true)
         }
         return "\(AgentSessionMetadata.formatTokens(used)) of \(AgentSessionMetadata.formatTokens(limit)) · \(percent)"
     }
@@ -422,8 +412,7 @@ private struct AgentMetadataInspectorView: View {
               let percent = metadata.contextPercentText
         else {
             return metadata.contextPercentText
-                ?? agent.provider.capabilities.contextTelemetry
-                    .unreportedValue(verbose: true)
+                ?? unreportedValue(agent.provider.contextUnavailableReason, verbose: true)
         }
         return "\(percent), \(used.formatted()) of \(limit.formatted()) tokens"
     }

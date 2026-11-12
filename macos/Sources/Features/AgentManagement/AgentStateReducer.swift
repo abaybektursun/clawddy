@@ -168,17 +168,17 @@ enum AgentStateReducer {
             guard state.launchGeneration == generation else { break }
             if case .providerExited(let status) = domainEvent {
                 // "Pre-start" is the launch phase, not "not currently
-                // running". A session that started and ended has already
-                // moved the process to .exited via SessionEnd, so inferring
-                // a start failure from .exited would relabel a normal
-                // interrupted exit as a launch failure.
+                // running": a session that started has moved the process to
+                // .running, and its exit, with any status, is no launch
+                // failure. A launch that already failed because its session
+                // is missing keeps saying so.
                 let stillLaunching = state.processState == .notStarted
                     || state.processState == .launching
                 state.processState = .exited
                 state.activityState = .unknown
                 state.interactionState = .none
                 state.turnState = .inactive
-                if stillLaunching && status != 0 {
+                if stillLaunching && status != 0 && state.missingSessionID == nil {
                     state.failureMessage = "The provider exited before the agent session started (status \(status))."
                     effects.append(.failed)
                 }
@@ -255,14 +255,13 @@ enum AgentStateReducer {
                 effects.append(.failed)
 
             case .sessionEnded:
-                state.processState = .exited
-                state.turnState = .inactive
-                state.activityState = .idle
-                state.interactionState = .none
-                // Claude ends a resume of a session it cannot find before
-                // starting it: `SessionEnd`, no `SessionStart`, exit status 1.
-                // The exit record may come first and has then already marked
-                // the launch failed, without saying why.
+                // The process goes on after `/clear`, whose next
+                // `SessionStart` rebinds the agent, and reports its own exit.
+                // What a session end does tell: Claude ends a resume of a
+                // session it cannot find before starting it, with
+                // `SessionEnd`, no `SessionStart`, and exit status 1. The
+                // exit record may come first and has then already marked the
+                // launch failed, without saying why.
                 if let missing = state.resumingSessionID {
                     state.resumingSessionID = nil
                     state.missingSessionID = missing

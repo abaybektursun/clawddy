@@ -1,15 +1,48 @@
 import Foundation
 
-struct ClaudeCodeProvider: AgentProviderAdapter {
+struct ClaudeCodeProvider: Sendable {
     let id: AgentProviderID = .claudeCode
-    let capabilities: AgentProviderCapabilities = .claudeCode
     let root: AgentDataRoot
 
-    static let hookedEvents = [
-        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-        "PostToolUseFailure", "PermissionRequest", "Stop", "StopFailure",
-        "PreCompact", "PostCompact", "SubagentStart", "SubagentStop", "SessionEnd",
+    /// Claude's event table: each hook event it subscribes to, and what it
+    /// means. Claude never runs `Stop` for an interrupted turn.
+    static let hookEvents: [String: AgentProviderEntry.Meaning] = [
+        "SessionStart": { [.sessionStarted(sessionID: $0.sessionID, model: $0.model, permissionMode: $0.permissionMode)] },
+        "UserPromptSubmit": { [.turnStarted(turnID: $0.turnID)] },
+        "PreToolUse": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.executing)] },
+        "SubagentStart": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.executing)] },
+        "PostToolUse": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)] },
+        // One tool call failed inside the turn, and Claude goes on with the
+        // same turn: activity, not a failed turn, which only `StopFailure`
+        // reports. Ending the turn here would drop the rest of its events.
+        "PostToolUseFailure": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)] },
+        "SubagentStop": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)] },
+        "PermissionRequest": { _ in [.turnInteractionChanged(.permission)] },
+        "Stop": { [.turnCompleted(turnID: $0.turnID)] },
+        "StopFailure": { _ in [.turnFailed(nil)] },
+        "PreCompact": { _ in [.turnActivityChanged(.compacting)] },
+        "PostCompact": { _ in [.turnActivityChanged(.reasoning)] },
+        // Not an exit: `/clear` ends a session in a running process. A
+        // resume that ends its session before starting it found no such
+        // session, which nothing else tells apart.
+        "SessionEnd": { _ in [.sessionEnded] },
     ]
+
+    /// The payload field that names Claude's turn. Claude never sends
+    /// `turn_id`.
+    static let turnIDField = "prompt_id"
+
+    /// Claude's entry in the provider table.
+    var entry: AgentProviderEntry {
+        AgentProviderEntry(
+            turnActivity: .hookJournal,
+            hookEvents: Self.hookEvents,
+            recordsExit: true,
+            prepareIntegration: { prepareIntegration() },
+            prepareLaunch: { prepareLaunch($0) },
+            probe: { probe(environmentPath: $0) },
+            cleanup: { try cleanup(agentID: $0) })
+    }
 
     /// Claude's hooks travel only in each agent's settings overlay, so the
     /// only file this writes is the hook script in the data root.
@@ -22,8 +55,9 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
         }
     }
 
-    /// The `hooks` object of one launch's settings overlay: every hooked
-    /// event runs the hook script with this agent's identity as arguments.
+    /// The `hooks` object of one launch's settings overlay: every event of
+    /// Claude's event table runs the hook script with this agent's identity
+    /// as arguments.
     func overlayHooks(agentID: UUID, generation: UUID) -> [String: Any] {
         let group: [String: Any] = [
             "hooks": [[
@@ -36,7 +70,7 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
                 "timeout": 5,
             ]],
         ]
-        return Dictionary(uniqueKeysWithValues: Self.hookedEvents.map { ($0, [group]) })
+        return Self.hookEvents.mapValues { _ in [group] }
     }
 
     /// Older Clawddy builds registered the hook script globally in Claude's
@@ -122,43 +156,6 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
             metadataAvailability: availability,
             newSession: newSession,
             resumedSessionID: resumedSessionID))
-    }
-
-    func normalize(_ event: AgentRawProviderEvent) -> [AgentDomainEvent] {
-        switch event.hookEventName {
-        case "SessionStart":
-            return [.sessionStarted(
-                sessionID: event.sessionID,
-                model: event.model,
-                permissionMode: event.permissionMode)]
-        case "UserPromptSubmit":
-            return [.turnStarted(turnID: event.turnID)]
-        case "PreToolUse", "SubagentStart":
-            return [.turnInteractionChanged(.none), .turnActivityChanged(.executing)]
-        case "PostToolUse", "PostToolUseFailure", "SubagentStop":
-            // PostToolUseFailure reports one tool call that failed inside the
-            // nested agentic loop. Claude continues the same turn, so this is
-            // activity evidence, not a terminal turn failure (StopFailure).
-            // Ending the turn here would emit a false error and drop every
-            // later permission/activity/stop event in that turn.
-            return [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)]
-        case "PermissionRequest":
-            return [.turnInteractionChanged(.permission)]
-        case "Stop":
-            return [.turnCompleted(turnID: event.turnID)]
-        case "StopFailure":
-            return [.turnFailed(nil)]
-        case "PreCompact":
-            return [.turnActivityChanged(.compacting)]
-        case "PostCompact":
-            return [.turnActivityChanged(.reasoning)]
-        case "SessionEnd":
-            return [.sessionEnded]
-        case "ProviderExited":
-            return [.providerExited(status: event.exitStatus ?? -1)]
-        default:
-            return []
-        }
     }
 
     func probe(environmentPath: String) -> AgentProviderHealth {

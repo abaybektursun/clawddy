@@ -13,6 +13,7 @@ struct AgentHookIntegrationTests {
         defer { sandbox.remove() }
         let provider = ClaudeCodeProvider(root: sandbox.root)
         let request = sandbox.request(.claudeCode)
+        let subscribed = ClaudeCodeProvider.hookEvents.keys.sorted()
 
         let launch = try provider.prepareLaunch(request).get()
         let settingsIndex = try #require(launch.arguments.firstIndex(of: "--settings"))
@@ -28,15 +29,15 @@ struct AgentHookIntegrationTests {
         let expectedGroup: [String: Any] = [
             "hooks": [["type": "command", "command": command, "timeout": 5]],
         ]
-        #expect(Set(hooks.keys) == Set(ClaudeCodeProvider.hookedEvents))
-        for event in ClaudeCodeProvider.hookedEvents {
+        #expect(Set(hooks.keys) == Set(subscribed))
+        for event in subscribed {
             #expect(NSArray(array: hooks[event] as? [Any] ?? []).isEqual(to: [expectedGroup]))
         }
 
         // The command line in the overlay records each event for this agent,
         // with no identity anywhere in its environment.
         _ = try provider.prepareIntegration().get()
-        for event in ClaudeCodeProvider.hookedEvents {
+        for event in subscribed {
             let status = try sandbox.runShell(
                 command,
                 environment: sandbox.plainEnvironment,
@@ -44,10 +45,68 @@ struct AgentHookIntegrationTests {
             #expect(status == 0)
         }
         let events = try sandbox.events(request.agentID)
-        #expect(events.map(\.hookEventName) == ClaudeCodeProvider.hookedEvents)
+        #expect(events.map(\.hookEventName) == subscribed)
         #expect(events.allSatisfy {
             $0.provider == .claudeCode && $0.launchGeneration == request.launchGeneration
         })
+    }
+
+    /// Each provider's event table is the one list of its hooks: every event
+    /// it subscribes to has a meaning, and the hooks written for it (Claude's
+    /// settings overlay, Codex's global file) and the events the installed
+    /// hook script records are exactly its events. Codex's list is pinned:
+    /// a change rewrites `hooks.json`, and Codex then asks for a hook review
+    /// in every session on the machine.
+    @Test func providerTableMapsEveryHookEvent() throws {
+        let sandbox = try HookSandbox()
+        defer { sandbox.remove() }
+        let hooksFile = sandbox.home.appendingPathComponent(".codex/hooks.json")
+        let table = AgentProviderTable(root: sandbox.root, codexHooksFile: hooksFile, isProduction: true)
+        let record = try JSONDecoder().decode(
+            AgentRawProviderEvent.self,
+            from: Data(#"{"provider":"claudeCode","launchGeneration":"\#(UUID().uuidString)","hookEventName":"Any"}"#.utf8))
+        for provider in AgentProviderID.allCases {
+            for (event, meaning) in table[provider].hookEvents {
+                #expect(!meaning(record).isEmpty, "\(provider) \(event)")
+            }
+        }
+
+        let launch = try table.claudeCode.prepareLaunch(sandbox.request(.claudeCode)).get()
+        let settingsIndex = try #require(launch.arguments.firstIndex(of: "--settings"))
+        let overlay = try #require(JSONSerialization.jsonObject(
+            with: Data(contentsOf: URL(fileURLWithPath: launch.arguments[settingsIndex + 1]))) as? [String: Any])
+        let overlayHooks = try #require(overlay["hooks"] as? [String: Any])
+        #expect(Set(overlayHooks.keys) == Set(table.claudeCode.hookEvents.keys))
+
+        _ = try table.codex.prepareIntegration().get()
+        let codexHooks = try #require(
+            (JSONSerialization.jsonObject(with: Data(contentsOf: hooksFile)) as? [String: Any])?["hooks"]
+                as? [String: Any])
+        #expect(Set(codexHooks.keys) == Set(table.codex.hookEvents.keys))
+        #expect(table.codex.hookEvents.keys.sorted() == [
+            "PermissionRequest", "PostCompact", "PostToolUse", "PreCompact", "PreToolUse",
+            "SessionStart", "Stop", "SubagentStart", "SubagentStop", "UserPromptSubmit",
+        ])
+
+        // Every event either provider subscribes to, and one neither does.
+        let candidates = Set(AgentProviderID.allCases.flatMap { table[$0].hookEvents.keys })
+            .union(["Notification"])
+            .sorted()
+        for provider in AgentProviderID.allCases {
+            let agentID = UUID()
+            let command = AgentHookRuntime.command(
+                root: sandbox.root,
+                provider: provider,
+                agentID: agentID,
+                generation: UUID())
+            for event in candidates {
+                #expect(try sandbox.runShell(
+                    command,
+                    environment: sandbox.plainEnvironment,
+                    payload: #"{"session_id":"session-1","hook_event_name":"\#(event)"}"#) == 0)
+            }
+            #expect(try sandbox.events(agentID).map(\.hookEventName) == table[provider].hookEvents.keys.sorted())
+        }
     }
 
     @Test func claudeLaunchExportsNoAgentIdentity() throws {
@@ -133,7 +192,7 @@ struct AgentHookIntegrationTests {
         #expect(try Data(contentsOf: hooksFile.appendingPathExtension("clawddy-backup")) == seedBytes)
         let hooks = try #require(
             (JSONSerialization.jsonObject(with: installed) as? [String: Any])?["hooks"] as? [String: Any])
-        #expect(Set(hooks.keys) == Set(CodexProvider.hookedEvents))
+        #expect(Set(hooks.keys) == Set(CodexProvider.hookEvents.keys))
 
         // The user reviewed the hooks in Codex. A later launch must neither
         // rewrite the file nor ask again.
@@ -202,7 +261,7 @@ struct AgentHookIntegrationTests {
         let installed = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: codexHooks)) as? [String: Any])
         var expected = kept
-        for event in CodexProvider.hookedEvents {
+        for event in CodexProvider.hookEvents.keys {
             var groups = expected[event] as? [[String: Any]] ?? []
             groups.append(["hooks": [[
                 "type": "command",
@@ -393,14 +452,14 @@ private struct HookSandbox {
             pendingFork: nil)
     }
 
-    /// What the bridge prepares for a launch, with a non-production registry
-    /// whose Codex file is a stand-in.
+    /// What the bridge prepares for a launch, with a non-production provider
+    /// table whose Codex file is a stand-in.
     func prepareSurfaceLaunch(_ request: AgentLaunchRequest) throws -> AgentPreparedSurfaceLaunch {
         let coordinator = AgentLaunchCoordinator(
-            providers: AgentProviderTable(registry: AgentProviderRegistry(
+            providers: AgentProviderTable(
                 root: root,
                 codexHooksFile: home.appendingPathComponent(".codex/hooks.json"),
-                isProduction: false)),
+                isProduction: false),
             root: root)
         switch coordinator.prepare(request) {
         case .success(let launch): return launch

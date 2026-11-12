@@ -962,7 +962,6 @@ struct AgentListView: View {
                                 Button("Fork", systemImage: "arrow.triangle.branch") {
                                     onForkAgent(entry.id, project, task.name)
                                 }
-                                .disabled(!bridge.providerCapabilities(for: entry.provider).fork.isSupported)
                                 Divider()
                                 moveUpDownMenuButtons(
                                     canMoveUp: item.task.agents.first?.id != entry.id,
@@ -1013,8 +1012,6 @@ struct AgentListView: View {
                         Button("Fork", systemImage: "arrow.triangle.branch") {
                             onForkAgent(item.id, item.project, item.task.name)
                         }
-                        .disabled(!bridge.providerCapabilities(
-                            for: item.entry.provider).fork.isSupported)
                         Divider()
                         Button("Delete", systemImage: "trash", role: .destructive) {
                             deletion = .deleteAgent(id: item.id, name: item.entry.name)

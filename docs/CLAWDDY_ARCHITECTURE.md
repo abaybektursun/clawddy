@@ -18,8 +18,9 @@ independently derived runtime state.
 The feature has six boundaries:
 
 1. **Configuration:** projects, tasks, agent identities, and working directories.
-2. **Provider adapters:** each provider owns command construction, auth probing,
-   hook registration, capabilities, and normalization into shared domain events.
+2. **Provider table:** one entry per provider says which source reports its
+   turn activity, which hook events it subscribes to and what each means in
+   shared domain events, and how it is launched and probed.
 3. **Event ingestion:** provider hooks append minimal, provider-tagged lifecycle
    records; the app consumes them in order from persisted byte offsets.
 4. **Session metadata:** the UI presents provider-reported or explicitly
@@ -38,9 +39,9 @@ or process model.
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | `AgentConfig.swift`               | Versioned JSON model, atomic persistence, and provider-identity recovery                                          |
 | `AgentPreferences.swift`          | Versioned provider start-mode defaults, isolated persistence, and canonical launch policy                         |
-| `AgentProvider.swift`             | Provider protocol, capability matrix, health/auth state, launch records, and provider event vocabulary           |
-| `ClaudeCodeProvider.swift`        | Claude Code command construction, per-agent overlay hooks, old global hook removal, auth probe, and normalization |
-| `CodexProvider.swift`             | Codex command construction, hook installation, auth probe, and event normalization                               |
+| `AgentProvider.swift`             | Provider table, health/auth state, launch records, and provider event vocabulary                                 |
+| `ClaudeCodeProvider.swift`        | Claude Code command construction, per-agent overlay hooks, old global hook removal, auth probe, and event table  |
+| `CodexProvider.swift`             | Codex command construction, hook installation, auth probe, and event table                                       |
 | `AgentHookRuntime.swift`          | Provider-tagged POSIX hook, safe shell quoting, and provider-exit journaling                                      |
 | `AgentSessionStore.swift`         | Validated provider-tagged session and fork persistence plus legacy Claude migration                              |
 | `AgentEnvironmentResolver.swift`  | Asynchronous login-shell PATH discovery with timeout and deterministic fallback                                   |
@@ -234,8 +235,9 @@ owners. `AgentRuntimeSnapshot` contains five orthogonal dimensions:
 
 Every launch receives a new generation UUID. Surface callbacks, timeout events,
 and hook records carry that generation; the reducer rejects stale events from a
-previous process. Provider-specific adapters normalize raw hook names into the
-shared domain vocabulary before reduction.
+previous process. Each provider's event table maps raw hook names into the
+shared domain vocabulary before reduction, and `ingest` drops a hook record
+whose event is not in that table.
 
 Every observation, a hook record or a terminal's close or program-status
 report, enters through `AgentBridge.ingest`, which drops one from another
@@ -316,7 +318,10 @@ interactive terminal into a launch failure.
 The hook depends only on macOS system tools. For each invocation it:
 
 1. Reads the official hook payload from standard input into a private temporary file.
-2. Uses `plutil` to extract only session, event, turn, model, and permission identifiers.
+2. Uses `plutil` to extract only session, event, turn, model, and permission
+   identifiers, the turn from the field the provider's event table names
+   (`prompt_id` for Claude, `turn_id` for Codex). An event outside that table
+   records nothing.
 3. Adds a stable event ID plus the provider and launch generation from its
    arguments (Claude) or the `CLAWDDY_*` variables (Codex).
 4. Appends one JSONL record while holding the macOS `lockf` lock for that

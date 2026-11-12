@@ -131,7 +131,7 @@ struct AgentBridgeLifecycleTests {
         let id = try h.addAgent("Agent")
         h.start()
         // The real Claude launch, on a PATH that has no `claude`.
-        h.providers.prepareLaunch = h.providers.real.prepareLaunch
+        h.providers.prepareLaunch = h.providers.real.claudeCode.prepareLaunch
 
         try h.activate(id)
 
@@ -240,7 +240,7 @@ struct AgentBridgeLifecycleTests {
     @Test func missingSessionIsExplicitFailure() throws {
         // `SessionEnd` before `SessionStart` is the only sign; a Claude hook
         // list without `SessionEnd` cannot tell a missing session apart.
-        #expect(ClaudeCodeProvider.hookedEvents.contains("SessionEnd"))
+        #expect(ClaudeCodeProvider.hookEvents["SessionEnd"] != nil)
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         try h.useRealClaudeLaunch()

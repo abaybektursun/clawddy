@@ -144,10 +144,11 @@ struct AgentStateReducerTests {
                     permissionMode: nil)))
         #expect(started.state.processState == .running)
 
+        // A session end is not the process's exit.
         let ended = AgentStateReducer.reduce(
             started.state,
             event: providerEvent(generation, id: "session-end", event: .sessionEnded))
-        #expect(ended.state.processState == .exited)
+        #expect(ended.state.processState == .running)
         #expect(ended.state.failureMessage == nil)
 
         let exited = AgentStateReducer.reduce(
@@ -164,7 +165,10 @@ struct AgentStateReducerTests {
         #expect(exited.effects == [.providerExited(130)])
     }
 
-    @Test func sessionEndAloneAttributesTheExitToAStartedSession() {
+    /// A session end before any session start does not mark the process
+    /// exited, so a nonzero exit that follows is still a start failure: a
+    /// fork of a session Claude cannot find ends this way.
+    @Test func sessionEndBeforeSessionStartDoesNotHideAStartFailure() {
         let generation = UUID()
         var state = AgentStateReducer.reduce(
             AgentRuntimeSnapshot(),
@@ -172,11 +176,10 @@ struct AgentStateReducerTests {
         state = AgentStateReducer.reduce(
             state,
             event: .surfaceOpened(generation: generation)).state
-        // SessionEnd documents that a session ended, so the session started
-        // even if SessionStart was not observed by this launch.
         state = AgentStateReducer.reduce(
             state,
             event: providerEvent(generation, id: "session-end", event: .sessionEnded)).state
+        #expect(state.processState == .launching)
 
         let exited = AgentStateReducer.reduce(
             state,
@@ -185,8 +188,8 @@ struct AgentStateReducerTests {
                 id: "exit",
                 event: .providerExited(status: 130)))
 
-        #expect(exited.state.failureMessage == nil)
-        #expect(exited.effects == [.providerExited(130)])
+        #expect(exited.state.failureMessage == "The provider exited before the agent session started (status 130).")
+        #expect(exited.effects == [.failed, .providerExited(130)])
     }
 
     @Test func nonzeroExitAfterAStartedSessionWithoutSessionEndIsNotALaunchFailure() {
@@ -378,7 +381,7 @@ struct AgentStateReducerTests {
                 id: "tool-start",
                 event: .turnActivityChanged(.executing))).state
 
-        // ClaudeCodeProvider.normalize maps PostToolUseFailure to these
+        // Claude's event table maps PostToolUseFailure to these
         // non-terminal events because Claude keeps working in the same turn.
         state = AgentStateReducer.reduce(
             state,

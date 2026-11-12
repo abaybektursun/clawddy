@@ -37,9 +37,9 @@ integration points in `AppDelegate.swift` and the shared command palette. The
 macos/Sources/Features/AgentManagement/
   AgentConfig.swift                — Config persistence and provider identity
   AgentPreferences.swift           — Provider default start modes and atomic persistence
-  AgentProvider.swift              — Provider protocol, capabilities, health, and launch types
-  ClaudeCodeProvider.swift         — Claude Code launch, hooks, auth, and event normalization
-  CodexProvider.swift              — Codex launch, hooks, auth, and event normalization
+  AgentProvider.swift              — Provider table, health, and launch types
+  ClaudeCodeProvider.swift         — Claude Code launch, hooks, auth, and event table
+  CodexProvider.swift              — Codex launch, hooks, auth, and event table
   AgentHookRuntime.swift           — Minimal provider-tagged lifecycle journal hook
   AgentSessionStore.swift          — Provider-tagged resume and fork identity
   AgentEnvironmentResolver.swift   — Nonblocking login-shell PATH discovery

@@ -150,14 +150,17 @@ final class FakeProviders: @unchecked Sendable {
 
     var table: AgentProviderTable {
         var table = real
-        table.probe = { _, _ in self.health }
-        table.prepareLaunch = { request in
-            self.launchRequests.append(request)
-            return self.prepareLaunch(request)
-        }
-        table.cleanup = { provider, id in
-            self.cleanups.append(id)
-            try self.real.cleanup(provider, id)
+        for provider in AgentProviderID.allCases {
+            let cleanup = real[provider].cleanup
+            table[provider].probe = { _ in self.health }
+            table[provider].prepareLaunch = { request in
+                self.launchRequests.append(request)
+                return self.prepareLaunch(request)
+            }
+            table[provider].cleanup = { id in
+                self.cleanups.append(id)
+                try cleanup(id)
+            }
         }
         return table
     }
@@ -308,10 +311,10 @@ final class AgentBridgeHarness {
                 at: folder.appendingPathComponent(name, isDirectory: true),
                 withIntermediateDirectories: true)
         }
-        providers = FakeProviders(real: AgentProviderTable(registry: AgentProviderRegistry(
+        providers = FakeProviders(real: AgentProviderTable(
             root: root,
             codexHooksFile: folder.appendingPathComponent("home/.codex/hooks.json"),
-            isProduction: false)))
+            isProduction: false))
         config = AgentConfig(root: root)
         bridge = AgentBridge(
             root: root,

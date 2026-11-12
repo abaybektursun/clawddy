@@ -50,6 +50,35 @@ struct AgentHookScriptTests {
         #expect(events[0].permissionMode == "default")
     }
 
+    /// Claude names the turn `prompt_id` and never sends `turn_id`, so a
+    /// Claude record's turn is the prompt; Codex's stays `turn_id`. A field
+    /// the payload lacks is recorded as "", which decodes as absent.
+    @Test func claudeRecordsCarryPromptIDAsTurnIdentity() throws {
+        let fixture = try HookFixture()
+        defer { fixture.remove() }
+        func turn(_ provider: AgentProviderID, _ payload: String) throws -> String? {
+            let agentID = UUID()
+            #expect(try fixture.run(
+                agentID: agentID,
+                provider: provider,
+                generation: UUID(),
+                payload: Data(payload.utf8)) == 0)
+            let events = try fixture.events(agentID)
+            try #require(events.count == 1)
+            return events[0].turnID
+        }
+
+        #expect(try turn(
+            .claudeCode,
+            #"{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt_id":"prompt-1","turn_id":"turn-1"}"#)
+            == "prompt-1")
+        #expect(try turn(.claudeCode, #"{"session_id":"s","hook_event_name":"Stop","turn_id":"turn-1"}"#) == nil)
+        #expect(try turn(
+            .codex,
+            #"{"session_id":"s","hook_event_name":"Stop","prompt_id":"prompt-1","turn_id":"turn-1"}"#)
+            == "turn-1")
+    }
+
     @Test func concurrentHooksAppendOneValidRecordEach() throws {
         let fixture = try HookFixture()
         defer { fixture.remove() }
@@ -67,7 +96,7 @@ struct AgentHookScriptTests {
             process.standardInput = input
             try process.run()
             try input.fileHandleForWriting.write(contentsOf: Data(
-                "{\"session_id\":\"session-\(index)\",\"hook_event_name\":\"UserPromptSubmit\",\"turn_id\":\"turn-\(index)\"}\n".utf8))
+                "{\"session_id\":\"session-\(index)\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt_id\":\"turn-\(index)\"}\n".utf8))
             try input.fileHandleForWriting.close()
             processes.append((process, input))
         }

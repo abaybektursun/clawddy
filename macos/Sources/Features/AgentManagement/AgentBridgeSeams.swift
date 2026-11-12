@@ -167,35 +167,6 @@ struct AgentUserNotificationCenter: AgentNotifier {
     }
 }
 
-// MARK: - Providers
-
-/// How the bridge reaches its providers, one closure per operation, so a
-/// test can replace any of them.
-struct AgentProviderTable: Sendable {
-    var capabilities: @Sendable (AgentProviderID) -> AgentProviderCapabilities
-    var prepareIntegration: @Sendable (AgentProviderID) -> Result<AgentIntegrationPreparation, AgentProviderIssue>
-    /// Prepares the launch for the request's provider.
-    var prepareLaunch: @Sendable (AgentLaunchRequest) -> Result<AgentPreparedLaunch, AgentProviderIssue>
-    var normalize: @Sendable (AgentProviderID, AgentRawProviderEvent) -> [AgentDomainEvent]
-    /// Probes installation and sign-in with the given PATH.
-    var probe: @Sendable (AgentProviderID, String) -> AgentProviderHealth
-    /// Removes the provider's files for the agent with this ID.
-    var cleanup: @Sendable (AgentProviderID, UUID) throws -> Void
-}
-
-extension AgentProviderTable {
-    /// Every operation answered by the registry's adapter for the provider.
-    init(registry: AgentProviderRegistry) {
-        self.init(
-            capabilities: { registry.capabilities(for: $0) },
-            prepareIntegration: { registry.adapter(for: $0).prepareIntegration() },
-            prepareLaunch: { registry.adapter(for: $0.provider).prepareLaunch($0) },
-            normalize: { registry.adapter(for: $0).normalize($1) },
-            probe: { registry.adapter(for: $0).probe(environmentPath: $1) },
-            cleanup: { try registry.adapter(for: $0).cleanup(agentID: $1) })
-    }
-}
-
 // MARK: - Diagnostics
 
 /// Where the bridge reports what it did, failed to do or chose to ignore,

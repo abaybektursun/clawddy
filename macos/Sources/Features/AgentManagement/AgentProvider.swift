@@ -27,10 +27,22 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    var capabilities: AgentProviderCapabilities {
+    /// Why the provider never reports its reasoning effort, or nil when it
+    /// does: Claude's status line carries it.
+    var effortUnavailableReason: String? {
         switch self {
-        case .claudeCode: return .claudeCode
-        case .codex: return .codex
+        case .claudeCode: return nil
+        case .codex: return "Reasoning effort is not exposed by the interactive hook interface."
+        }
+    }
+
+    /// Why the provider never reports its context usage, or nil when it
+    /// does: Claude's status line carries it.
+    var contextUnavailableReason: String? {
+        switch self {
+        case .claudeCode: return nil
+        case .codex:
+            return "Context usage is not exposed by Codex lifecycle hooks in the interactive terminal integration."
         }
     }
 
@@ -129,53 +141,6 @@ struct AgentLaunchProfile: Codable, Equatable, Sendable {
     var searchTerms: [String] {
         [modelID, displayReasoningEffort, reasoningEffort].compactMap { $0 }
     }
-}
-
-enum AgentCapabilitySupport: Equatable, Sendable {
-    case supported
-    case unavailable(String)
-    case unsupported(String)
-
-    var isSupported: Bool {
-        if case .supported = self { return true }
-        return false
-    }
-
-    var explanation: String? {
-        switch self {
-        case .supported: return nil
-        case .unavailable(let reason), .unsupported(let reason): return reason
-        }
-    }
-}
-
-struct AgentProviderCapabilities: Equatable, Sendable {
-    var resume: AgentCapabilitySupport
-    var fork: AgentCapabilitySupport
-    var modelTelemetry: AgentCapabilitySupport
-    var effortTelemetry: AgentCapabilitySupport
-    var contextTelemetry: AgentCapabilitySupport
-    var costTelemetry: AgentCapabilitySupport
-    var approvalTelemetry: AgentCapabilitySupport
-
-    static let claudeCode = Self(
-        resume: .supported,
-        fork: .supported,
-        modelTelemetry: .supported,
-        effortTelemetry: .supported,
-        contextTelemetry: .supported,
-        costTelemetry: .supported,
-        approvalTelemetry: .supported)
-
-    static let codex = Self(
-        resume: .supported,
-        fork: .supported,
-        modelTelemetry: .supported,
-        effortTelemetry: .unavailable("Reasoning effort is not exposed by the interactive hook interface."),
-        contextTelemetry: .unavailable(
-            "Context usage is not exposed by Codex lifecycle hooks in the interactive terminal integration."),
-        costTelemetry: .unsupported("Session cost is not reported by the interactive Codex interface."),
-        approvalTelemetry: .supported)
 }
 
 enum AgentProviderAuthState: Equatable, Sendable {
@@ -308,6 +273,8 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
     var launchGeneration: UUID
     var hookEventName: String
     var sessionID: String?
+    /// The turn, from the payload field the hook script reads for the
+    /// provider: `prompt_id` for Claude, `turn_id` for Codex.
     var turnID: String?
     var model: String?
     var permissionMode: String?
@@ -352,39 +319,76 @@ enum AgentDomainEvent: Equatable, Sendable {
     case turnInteractionChanged(AgentInteractionState)
     case turnCompleted(turnID: String?)
     case turnFailed(String?)
+    /// A session ended. The process need not have: `/clear` ends one session
+    /// and starts the next in the same process, and an exit is reported by
+    /// its own record.
     case sessionEnded
     case providerExited(status: Int)
 }
 
-protocol AgentProviderAdapter: Sendable {
-    var id: AgentProviderID { get }
-    var capabilities: AgentProviderCapabilities { get }
+/// One provider's entry in the provider table: which source reports its turn
+/// activity, which hook events it subscribes to and what each means, and the
+/// functions that integrate, launch, probe and clean up after it. A test
+/// replaces any of them.
+struct AgentProviderEntry: Sendable {
+    /// What one record in the event file means for the agent.
+    typealias Meaning = @Sendable (AgentRawProviderEvent) -> [AgentDomainEvent]
 
-    func prepareIntegration() -> Result<AgentIntegrationPreparation, AgentProviderIssue>
-    func prepareLaunch(_ request: AgentLaunchRequest) -> Result<AgentPreparedLaunch, AgentProviderIssue>
-    func normalize(_ event: AgentRawProviderEvent) -> [AgentDomainEvent]
-    func probe(environmentPath: String) -> AgentProviderHealth
-    func cleanup(agentID: UUID) throws
+    /// The source that reports the agent's turn activity. An active turn
+    /// shows as delayed after a silence of that source only.
+    var turnActivity: AgentStatusObservation.Source
+    /// The hook events the provider subscribes to, each with what it means.
+    /// The provider's hooks and the hook script's list of the events it
+    /// records are made from the same table, and `ingest` drops a hook
+    /// record of any other event.
+    var hookEvents: [String: Meaning]
+    /// Whether the launch script records the provider's exit in the event
+    /// file, as a `ProviderExited` record.
+    var recordsExit: Bool
+    var prepareIntegration: @Sendable () -> Result<AgentIntegrationPreparation, AgentProviderIssue>
+    var prepareLaunch: @Sendable (AgentLaunchRequest) -> Result<AgentPreparedLaunch, AgentProviderIssue>
+    /// Probes installation and sign-in with the given PATH.
+    var probe: @Sendable (String) -> AgentProviderHealth
+    /// Removes the provider's files for the agent with this ID.
+    var cleanup: @Sendable (UUID) throws -> Void
+
+    /// What a record in the provider's event file means, or nil when the
+    /// entry does not allow it there.
+    func meaning(ofRecord name: String) -> Meaning? {
+        guard name == AgentHookRuntime.exitRecordName else { return hookEvents[name] }
+        guard recordsExit else { return nil }
+        return { [.providerExited(status: $0.exitStatus ?? -1)] }
+    }
 }
 
-struct AgentProviderRegistry: Sendable {
-    private let claude: ClaudeCodeProvider
-    private let codex: CodexProvider
+/// Every provider's entry.
+struct AgentProviderTable: Sendable {
+    var claudeCode: AgentProviderEntry
+    var codex: AgentProviderEntry
 
-    init(root: AgentDataRoot, codexHooksFile: URL, isProduction: Bool) {
-        claude = ClaudeCodeProvider(root: root)
-        codex = CodexProvider(root: root, hooksFile: codexHooksFile, isProduction: isProduction)
-    }
-
-    func adapter(for provider: AgentProviderID) -> any AgentProviderAdapter {
-        switch provider {
-        case .claudeCode: return claude
-        case .codex: return codex
+    subscript(provider: AgentProviderID) -> AgentProviderEntry {
+        get {
+            switch provider {
+            case .claudeCode: return claudeCode
+            case .codex: return codex
+            }
+        }
+        set {
+            switch provider {
+            case .claudeCode: claudeCode = newValue
+            case .codex: codex = newValue
+            }
         }
     }
+}
 
-    func capabilities(for provider: AgentProviderID) -> AgentProviderCapabilities {
-        adapter(for: provider).capabilities
+extension AgentProviderTable {
+    /// The real providers on `root`. Only `isProduction` writes
+    /// `codexHooksFile`, Codex's global hook file.
+    init(root: AgentDataRoot, codexHooksFile: URL, isProduction: Bool) {
+        self.init(
+            claudeCode: ClaudeCodeProvider(root: root).entry,
+            codex: CodexProvider(root: root, hooksFile: codexHooksFile, isProduction: isProduction).entry)
     }
 }
 

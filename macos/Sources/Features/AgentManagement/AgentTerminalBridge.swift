@@ -310,8 +310,9 @@ struct AgentLaunchCoordinator: Sendable {
                 generation: generation,
                 integrationIssue: nil)
         }
+        let entry = providers[provider]
         let prepared: AgentPreparedLaunch
-        switch providers.prepareLaunch(request) {
+        switch entry.prepareLaunch(request) {
         case .success(let launch): prepared = launch
         case .failure(let issue):
             return .failure(
@@ -337,7 +338,7 @@ struct AgentLaunchCoordinator: Sendable {
             }
         }
         let integrationIssue: String?
-        switch providers.prepareIntegration(provider) {
+        switch entry.prepareIntegration() {
         case .success(let preparation): integrationIssue = preparation.notice
         case .failure(let issue): integrationIssue = issue.localizedDescription
         }
@@ -354,6 +355,13 @@ struct AgentLaunchCoordinator: Sendable {
         let exports = environment.sorted(by: { $0.key < $1.key }).map {
             "export \($0.key)=\(AgentHookRuntime.shellQuote($0.value))"
         }.joined(separator: "\n")
+        let recordExit = entry.recordsExit
+            ? AgentHookRuntime.exitEventCommand(
+                provider: provider,
+                agentID: agentID,
+                generation: generation,
+                statusDirectory: root.statusDir)
+            : ""
         let script = """
             #!/bin/zsh -l
             \(AgentTerminalEnvironmentPolicy.shellPrelude)
@@ -362,11 +370,7 @@ struct AgentLaunchCoordinator: Sendable {
             clear
             \(command)
             command_status=$?
-            \(AgentHookRuntime.exitEventCommand(
-                provider: provider,
-                agentID: agentID,
-                generation: generation,
-                statusDirectory: root.statusDir))
+            \(recordExit)
             printf '\\n\\033[33mAgent exited (status %s). Continuing in your login shell.\\033[0m\\n' "$command_status"
             exec "${SHELL:-/bin/zsh}" -l
             """
@@ -549,12 +553,12 @@ final class AgentBridge {
         let path = effectiveEnvironmentPath
         let providers = targetProvider.map { [$0] } ?? AgentProviderID.allCases
         let io = self.io
-        let probe = self.providers.probe
         for provider in providers {
             let refreshGeneration = UUID()
             healthRefreshGenerations[provider] = refreshGeneration
+            let probe = self.providers[provider].probe
             io.probe { [weak self] in
-                var health = probe(provider, path)
+                var health = probe(path)
                 io.onMainActor { [weak self] in
                     guard let self,
                           self.healthRefreshGenerations[provider] == refreshGeneration
@@ -569,10 +573,6 @@ final class AgentBridge {
                 }
             }
         }
-    }
-
-    func providerCapabilities(for provider: AgentProviderID) -> AgentProviderCapabilities {
-        providers.capabilities(provider)
     }
 
     private func reconcileInactiveAuthentication(
@@ -897,10 +897,6 @@ final class AgentBridge {
         guard let source = agents[sourceId] else { return nil }
 
         // Read source session — abort if none
-        guard providers.capabilities(source.provider).fork.isSupported else {
-            diagnose(.error, "fork: \(source.provider.displayName) cannot fork")
-            return nil
-        }
         let sourceSession: AgentSessionBinding
         do {
             guard let session = try AgentSessionStore.session(
@@ -1041,8 +1037,9 @@ final class AgentBridge {
 
     /// The one way an observation about an agent reaches its state: the
     /// records its hooks append to its event file, and its terminal's close
-    /// and program-status reports. An observation from another launch, or
-    /// about an agent that is gone, changes nothing.
+    /// and program-status reports. An observation from another launch, about
+    /// an agent that is gone, or a record the provider's table does not allow
+    /// in the event file, changes nothing.
     func ingest(_ observation: AgentStatusObservation) {
         guard !isTerminating else { return }
         let id = observation.agentID
@@ -1088,8 +1085,14 @@ final class AgentBridge {
                 "ignored unsupported event schema for \(id): \(record.schemaVersion ?? -1)")
             return
         }
-        let domainEvents = providers.normalize(record.provider, record)
-        guard !domainEvents.isEmpty else { return }
+        let entry = providers[record.provider]
+        guard let meaning = entry.meaning(ofRecord: record.hookEventName) else {
+            diagnose(
+                .debug,
+                "ignored \(record.hookEventName) for \(id): not in the \(record.provider.displayName) table")
+            return
+        }
+        let domainEvents = meaning(record)
 
         // A completion is known by the record's ID and its event's place in
         // the record.
@@ -1108,7 +1111,9 @@ final class AgentBridge {
         }
         agent.lastHookTime = scheduler.now
         perform(effects, of: agent)
-        scheduleTelemetryDelay(for: agent)
+        if entry.turnActivity == .hookJournal {
+            scheduleTelemetryDelay(for: agent)
+        }
     }
 
     /// What provider facts set in motion once applied: the launch's cleanup
@@ -1167,8 +1172,9 @@ final class AgentBridge {
         updateAggregate()
     }
 
-    /// An active turn that goes `telemetryDelay` without a provider fact
-    /// shows as delayed until the next fact. Each fact starts the wait again.
+    /// An active turn that goes `telemetryDelay` without a fact from the
+    /// source of its turn activity shows as delayed until the next one. Each
+    /// fact starts the wait again.
     private func scheduleTelemetryDelay(for agent: AgentInstance) {
         telemetryDelayTimers.removeValue(forKey: agent.id)?.invalidate()
         guard case .active = agent.turnState,
@@ -1357,12 +1363,12 @@ final class AgentBridge {
     /// The provider's files for one launch of the agent, such as Claude's
     /// settings overlay.
     private func removeProviderFiles(of id: UUID, provider: AgentProviderID) {
-        let cleanup = providers.cleanup
+        let cleanup = providers[provider].cleanup
         store(
             root.runtimeDir.appendingPathComponent(id.uuidString),
             "The session settings of agent \(id) could not be removed"
         ) {
-            try cleanup(provider, id)
+            try cleanup(id)
         }
     }
 

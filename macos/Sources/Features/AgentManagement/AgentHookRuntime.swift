@@ -33,6 +33,9 @@ enum AgentHookRuntime {
     /// because an argument-less global entry left by an older Clawddy must not
     /// report a hook error in every Claude session on the machine. The script
     /// only appends records; the bridge writes the session binding from them.
+    /// It records only the events of the provider's event table, each with
+    /// the turn named by the payload field that table gives, and nothing for
+    /// any other event.
     /// A hook that has an identity but cannot record its event appends one
     /// line saying why to `hook-errors.log` in the status folder, and still
     /// exits 0. Once that log passes 64 KiB it becomes `hook-errors.log.1`,
@@ -84,7 +87,6 @@ enum AgentHookRuntime {
 
         SID=$(sanitize "$(extract session_id)")
         EVENT=$(sanitize "$(extract hook_event_name)")
-        TURN=$(sanitize "$(extract turn_id)")
         MODEL=$(sanitize "$(extract model)")
         PERMISSION=$(sanitize "$(extract permission_mode)")
         EVENT_ID=$(sanitize "$(/usr/bin/uuidgen 2>/dev/null)")
@@ -93,6 +95,12 @@ enum AgentHookRuntime {
         [ -z "$EVENT_ID" ] && EVENT_ID=$(sanitize "$GENERATION-$$-$(/bin/date +%s)")
 
         [ -z "$EVENT" ] && fail "the hook input names no hook_event_name"
+        case "$PROVIDER" in
+        \(providerCase(.claudeCode, turnIDField: ClaudeCodeProvider.turnIDField, events: ClaudeCodeProvider.hookEvents))
+        \(providerCase(.codex, turnIDField: CodexProvider.turnIDField, events: CodexProvider.hookEvents))
+          *) fail "unknown provider $PROVIDER" ;;
+        esac
+        TURN=$(sanitize "$(extract "$TURN_FIELD")")
         EVENTS="$DIR/$ID.events"
         LOCK="$DIR/$ID.events.lock"
         EVENT_LINE=$(printf \
@@ -104,6 +112,28 @@ enum AgentHookRuntime {
           || fail "could not append to $EVENTS (status $?)"
         exit 0
         """
+
+    /// One provider's part of the script, made from its event table: the
+    /// payload field that names its turn, and the hook events it records.
+    private static func providerCase(
+        _ provider: AgentProviderID,
+        turnIDField: String,
+        events: [String: AgentProviderEntry.Meaning]
+    ) -> String {
+        """
+          \(provider.rawValue))
+            TURN_FIELD=\(turnIDField)
+            case "$EVENT" in
+              \(events.keys.sorted().joined(separator: "|"))) ;;
+              *) exit 0 ;;
+            esac
+            ;;
+        """
+    }
+
+    /// The name of the record the launch script appends when the provider
+    /// returns, for a provider whose entry records its exit.
+    static let exitRecordName = "ProviderExited"
 
     static func install(root: AgentDataRoot) throws {
         try FileManager.default.createDirectory(
@@ -128,7 +158,7 @@ enum AgentHookRuntime {
         let eventFormat = "{\"schemaVersion\":1,\"eventID\":\"\(UUID().uuidString)\","
             + "\"provider\":\"\(provider.rawValue)\","
             + "\"launchGeneration\":\"\(generation.uuidString)\","
-            + "\"hookEventName\":\"ProviderExited\",\"exitStatus\":%s}"
+            + "\"hookEventName\":\"\(exitRecordName)\",\"exitStatus\":%s}"
         let directory = shellQuote(statusDirectory.path)
         let events = shellQuote(
             statusDirectory.appendingPathComponent("\(agentID.uuidString).events").path)

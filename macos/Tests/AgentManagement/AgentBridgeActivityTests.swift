@@ -126,7 +126,7 @@ struct AgentBridgeActivityTests {
 
         let agent = try h.agent(id)
         #expect(agent.displayState == .thinking)
-        // The script reads `turn_id`, which Claude does not send.
+        // The harness's records name no turn.
         #expect(agent.turnState == .active(turnID: nil))
         #expect(agent.runtimeErrorMessage == nil)
         #expect(h.notifier.posted.isEmpty)
@@ -346,8 +346,7 @@ struct AgentBridgeActivityTests {
 
         try run(#"{"session_id":"\#(session)","hook_event_name":"UserPromptSubmit","prompt":"hello","prompt_id":"prompt-1","permission_mode":"default"}"#)
         #expect(agent.displayState == .thinking)
-        // The script reads `turn_id`, which Claude does not send.
-        #expect(agent.turnState == .active(turnID: nil))
+        #expect(agent.turnState == .active(turnID: "prompt-1"))
 
         try run(#"{"session_id":"\#(session)","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"},"prompt_id":"prompt-1","permission_mode":"default"}"#)
         #expect(agent.displayState == .permission)
@@ -355,6 +354,7 @@ struct AgentBridgeActivityTests {
         try run(#"{"session_id":"\#(session)","hook_event_name":"Stop","prompt_id":"prompt-1","stop_hook_active":false}"#)
         #expect(agent.displayState == .finished)
         #expect(agent.unreadCompletion?.sessionID == session)
+        #expect(agent.unreadCompletion?.turnID == "prompt-1")
         #expect(h.notifier.posted.map(\.identifier) == [
             "clawddy.\(id.uuidString).waiting",
             "clawddy.\(id.uuidString).completed",
@@ -406,6 +406,53 @@ struct AgentBridgeActivityTests {
         try run(#"{"session_id":"\#(cleared)","hook_event_name":"SessionEnd","reason":"prompt_input_exit"}"#)
         #expect(agent.missingSessionID == nil)
         #expect(agent.failureMessage == nil)
+    }
+
+    /// `/clear` ends the session with `SessionEnd`, `reason: "clear"`, while
+    /// Claude's process goes on: the agent stays running and posts nothing,
+    /// and the next `SessionStart` rebinds it. Only the exit record ends the
+    /// process.
+    @Test func sessionEndWithReasonClearKeepsAgentAlive() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.activate(id)
+        let generation = try h.generation(id)
+        let groups = ClaudeCodeProvider(root: h.root)
+            .overlayHooks(agentID: id, generation: generation)["SessionEnd"] as? [[String: Any]]
+        let handlers = try #require(groups?.first?["hooks"] as? [[String: Any]])
+        let command = try #require(handlers.first?["command"] as? String)
+        func run(_ payload: String) throws {
+            #expect(try runHook(command, payload: payload, in: h.folder) == 0)
+            h.poll()
+        }
+        let launched = "3c9a7e1f-2b4d-4e6a-8c0b-5d7f9a1b3c5e"
+        let cleared = "7e5c3a1f-9d8b-4c6e-a2f0-1b3d5f7a9c2e"
+        let agent = try h.agent(id)
+
+        try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionStart","source":"startup"}"#)
+        #expect(agent.displayState == .idle)
+
+        try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionEnd","reason":"clear"}"#)
+        #expect(agent.processState == .running)
+        #expect(agent.displayState == .idle)
+        #expect(agent.failureMessage == nil)
+        #expect(h.bridge.runningAgentCount == 1)
+        #expect(h.notifier.posted.isEmpty)
+
+        try run(#"{"session_id":"\#(cleared)","hook_event_name":"SessionStart","source":"clear"}"#)
+        #expect(agent.sessionID == cleared)
+        #expect(try h.binding(id) == AgentSessionBinding(
+            provider: .claudeCode,
+            sessionID: cleared,
+            launchGeneration: generation))
+        try run(#"{"session_id":"\#(cleared)","hook_event_name":"UserPromptSubmit","prompt_id":"prompt-1"}"#)
+        #expect(agent.displayState == .thinking)
+
+        try h.providerExited(id, status: 0)
+        #expect(agent.processState == .exited)
+        #expect(agent.displayState == .dead)
     }
 }
 

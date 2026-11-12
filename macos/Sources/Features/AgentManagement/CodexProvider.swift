@@ -1,8 +1,7 @@
 import Foundation
 
-struct CodexProvider: AgentProviderAdapter {
+struct CodexProvider: Sendable {
     let id: AgentProviderID = .codex
-    let capabilities: AgentProviderCapabilities = .codex
     let root: AgentDataRoot
     /// Codex's global `hooks.json`, the only place Codex hooks can live
     /// without a trust review on every launch.
@@ -11,11 +10,36 @@ struct CodexProvider: AgentProviderAdapter {
     /// file makes Codex ask for a hook review in every session on the machine.
     let isProduction: Bool
 
-    static let hookedEvents = [
-        "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
-        "PermissionRequest", "Stop", "PreCompact", "PostCompact",
-        "SubagentStart", "SubagentStop",
+    /// Codex's event table: each hook event it subscribes to, and what it
+    /// means. Changing the set of events changes `hooksFile`.
+    static let hookEvents: [String: AgentProviderEntry.Meaning] = [
+        "SessionStart": { [.sessionStarted(sessionID: $0.sessionID, model: $0.model, permissionMode: $0.permissionMode)] },
+        "UserPromptSubmit": { [.turnStarted(turnID: $0.turnID)] },
+        "PreToolUse": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.executing)] },
+        "SubagentStart": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.executing)] },
+        "PostToolUse": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)] },
+        "SubagentStop": { _ in [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)] },
+        "PermissionRequest": { _ in [.turnInteractionChanged(.permission)] },
+        "Stop": { [.turnCompleted(turnID: $0.turnID)] },
+        "PreCompact": { _ in [.turnActivityChanged(.compacting)] },
+        "PostCompact": { _ in [.turnActivityChanged(.reasoning)] },
     ]
+
+    /// The payload field that names Codex's turn. No Codex hook payload has
+    /// been captured yet, so this is the field Clawddy has always read.
+    static let turnIDField = "turn_id"
+
+    /// Codex's entry in the provider table.
+    var entry: AgentProviderEntry {
+        AgentProviderEntry(
+            turnActivity: .hookJournal,
+            hookEvents: Self.hookEvents,
+            recordsExit: true,
+            prepareIntegration: { prepareIntegration() },
+            prepareLaunch: { prepareLaunch($0) },
+            probe: { probe(environmentPath: $0) },
+            cleanup: { _ in })
+    }
     private static let hookReviewNotice =
         "Review and trust Clawddy’s activity hook in Codex with /hooks. The terminal remains fully usable while status tracking is paused."
     private static let nonProductionNotice =
@@ -85,34 +109,6 @@ struct CodexProvider: AgentProviderAdapter {
             metadataAvailability: .waiting))
     }
 
-    func normalize(_ event: AgentRawProviderEvent) -> [AgentDomainEvent] {
-        switch event.hookEventName {
-        case "SessionStart":
-            return [.sessionStarted(
-                sessionID: event.sessionID,
-                model: event.model,
-                permissionMode: event.permissionMode)]
-        case "UserPromptSubmit":
-            return [.turnStarted(turnID: event.turnID)]
-        case "PreToolUse", "SubagentStart":
-            return [.turnInteractionChanged(.none), .turnActivityChanged(.executing)]
-        case "PostToolUse", "SubagentStop":
-            return [.turnInteractionChanged(.none), .turnActivityChanged(.reasoning)]
-        case "PermissionRequest":
-            return [.turnInteractionChanged(.permission)]
-        case "Stop":
-            return [.turnCompleted(turnID: event.turnID)]
-        case "PreCompact":
-            return [.turnActivityChanged(.compacting)]
-        case "PostCompact":
-            return [.turnActivityChanged(.reasoning)]
-        case "ProviderExited":
-            return [.providerExited(status: event.exitStatus ?? -1)]
-        default:
-            return []
-        }
-    }
-
     func probe(environmentPath: String) -> AgentProviderHealth {
         guard let executable = AgentExecutableLocator.locate(id.executableName, path: environmentPath)
         else {
@@ -156,8 +152,6 @@ struct CodexProvider: AgentProviderAdapter {
         return .unavailable("Codex returned an unreadable sign-in status.")
     }
 
-    func cleanup(agentID _: UUID) {}
-
     private func normalized(_ value: String?) -> String? {
         guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty
@@ -184,8 +178,8 @@ struct CodexProvider: AgentProviderAdapter {
     }
 
     /// Replaces the entries that run this root's hook script with one per
-    /// hooked event, leaving every other entry alone. Writes only when that
-    /// changes the file's content.
+    /// event of Codex's event table, leaving every other entry alone. Writes
+    /// only when that changes the file's content.
     private func installHooks() throws -> Bool {
         try AgentHookRuntime.updateJSONFile(
             at: hooksFile,
@@ -194,7 +188,7 @@ struct CodexProvider: AgentProviderAdapter {
             var hooks = AgentHookRuntime.removingHandlers(
                 runningScriptOf: root,
                 from: file["hooks"] as? [String: Any] ?? [:])
-            for event in Self.hookedEvents {
+            for event in Self.hookEvents.keys {
                 var groups = hooks[event] as? [[String: Any]] ?? []
                 groups.append([
                     "hooks": [[

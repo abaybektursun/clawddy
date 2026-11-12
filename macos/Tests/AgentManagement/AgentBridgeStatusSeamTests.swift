@@ -62,6 +62,45 @@ struct AgentBridgeStatusSeamTests {
         #expect(Set(h.surfaceDeaths) == [fromFile, direct])
     }
 
+    /// A hook record reaches the agent's state only when its provider's table
+    /// allows that event from the event file. Codex subscribes to neither
+    /// `StopFailure` nor `SessionEnd`, and Claude not to `Notification`:
+    /// those records change nothing and say why, where the same
+    /// `StopFailure` fails a Claude turn.
+    @Test func ingestDropsEventItsProviderTableDoesNotAllow() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let claude = try h.addAgent("Claude")
+        let codex = try h.addAgent("Codex", provider: .codex)
+        h.start()
+        for id in [claude, codex] {
+            try h.launch(id)
+            try h.hook(id, "UserPromptSubmit")
+        }
+        func ingest(_ id: UUID, _ event: String) throws {
+            let generation = try h.generation(id)
+            let line = h.record(event, generation: generation, provider: try h.agent(id).provider)
+            h.bridge.ingest(AgentStatusObservation(
+                agentID: id,
+                generation: generation,
+                source: .hookJournal,
+                event: .hook(try JSONDecoder().decode(AgentRawProviderEvent.self, from: Data(line.utf8)))))
+        }
+
+        for event in ["StopFailure", "SessionEnd"] {
+            try ingest(codex, event)
+            #expect(h.diagnostics.messages.last == "ignored \(event) for \(codex): not in the Codex table")
+        }
+        try ingest(claude, "Notification")
+        #expect(h.diagnostics.messages.last == "ignored Notification for \(claude): not in the Claude Code table")
+        #expect(try h.agent(codex).displayState == .thinking)
+        #expect(try h.agent(claude).displayState == .thinking)
+        #expect(h.notifier.posted.isEmpty)
+
+        try ingest(claude, "StopFailure")
+        #expect(try h.agent(claude).displayState == .error)
+    }
+
     /// A real watcher on a temporary folder: an append to an event file that
     /// already exists, which a watcher on the folder alone never sees, is
     /// delivered with no poll and no timer but the source's own throttle.

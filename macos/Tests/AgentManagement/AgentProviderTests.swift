@@ -3,16 +3,6 @@ import Testing
 @testable import Ghostty
 
 struct AgentProviderTests {
-    /// Never created: event normalization reads no files.
-    private let unusedRoot = AgentDataRoot(
-        url: URL(fileURLWithPath: "/nonexistent/clawddy-provider-tests", isDirectory: true))
-    private var unusedCodex: CodexProvider {
-        CodexProvider(
-            root: unusedRoot,
-            hooksFile: unusedRoot.url.appendingPathComponent("hooks.json"),
-            isProduction: false)
-    }
-
     @Test func reasoningEffortOptionsAreProviderData() {
         for provider in AgentProviderID.allCases {
             let options = provider.reasoningEffortOptions
@@ -330,32 +320,29 @@ struct AgentProviderTests {
         #expect(!standard.arguments.contains(where: { $0.contains("dangerously") }))
     }
 
-    @Test func adaptersNormalizeProviderSpecificHooksToSharedEvents() throws {
-        let event = try rawEvent(name: "PermissionRequest")
-        #expect(unusedCodex.normalize(event) == [.turnInteractionChanged(.permission)])
-        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(event) == [.turnInteractionChanged(.permission)])
+    @Test func eventTablesMapProviderSpecificHooksToSharedEvents() throws {
+        #expect(try meaning(CodexProvider.hookEvents, "PermissionRequest") == [.turnInteractionChanged(.permission)])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "PermissionRequest")
+            == [.turnInteractionChanged(.permission)])
 
-        let codexFailure = try rawEvent(name: "PostToolUseFailure")
-        #expect(unusedCodex.normalize(codexFailure).isEmpty)
-        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(codexFailure) == [
+        #expect(try meaning(CodexProvider.hookEvents, "PostToolUseFailure") == nil)
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "PostToolUseFailure") == [
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])
 
-        let childCompleted = try rawEvent(name: "SubagentStop")
-        #expect(unusedCodex.normalize(childCompleted) == [
+        #expect(try meaning(CodexProvider.hookEvents, "SubagentStop") == [
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])
-        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(childCompleted) == [
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "SubagentStop") == [
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])
     }
 
     @Test func claudeToolFailureDoesNotNormalizeToTurnFailureButStopFailureDoes() throws {
-        let toolFailure = try rawEvent(name: "PostToolUseFailure")
-        let normalizedFailure = ClaudeCodeProvider(root: unusedRoot).normalize(toolFailure)
+        let normalizedFailure = try #require(try meaning(ClaudeCodeProvider.hookEvents, "PostToolUseFailure"))
         #expect(!normalizedFailure.contains(.turnFailed(nil)))
         #expect(!normalizedFailure.contains(.turnCompleted(turnID: nil)))
         #expect(normalizedFailure == [
@@ -363,19 +350,15 @@ struct AgentProviderTests {
             .turnActivityChanged(.reasoning),
         ])
 
-        let stopFailure = try rawEvent(name: "StopFailure")
-        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(stopFailure) == [.turnFailed(nil)])
-
-        let stop = try rawEvent(name: "Stop")
-        #expect(ClaudeCodeProvider(root: unusedRoot).normalize(stop) == [.turnCompleted(turnID: nil)])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "StopFailure") == [.turnFailed(nil)])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "Stop") == [.turnCompleted(turnID: nil)])
     }
 
-    @Test func capabilityMatrixDoesNotPretendUnavailableCodexTelemetryExists() {
-        #expect(AgentProviderID.codex.capabilities.resume.isSupported)
-        #expect(AgentProviderID.codex.capabilities.fork.isSupported)
-        #expect(!AgentProviderID.codex.capabilities.contextTelemetry.isSupported)
-        #expect(AgentProviderID.codex.capabilities.contextTelemetry.explanation != nil)
-        #expect(AgentProviderID.claudeCode.capabilities.contextTelemetry.isSupported)
+    @Test func unreportableCodexTelemetrySaysWhy() {
+        #expect(AgentProviderID.codex.effortUnavailableReason != nil)
+        #expect(AgentProviderID.codex.contextUnavailableReason != nil)
+        #expect(AgentProviderID.claudeCode.effortUnavailableReason == nil)
+        #expect(AgentProviderID.claudeCode.contextUnavailableReason == nil)
     }
 
     @Test func requestedLaunchMetadataHasHonestPresentationAndSearchTerms() {
@@ -470,11 +453,16 @@ struct AgentProviderTests {
         }
     }
 
-    /// A record carrying only the hook name and the keys every record has;
-    /// the adapters read the name and ignore the provider.
-    private func rawEvent(name: String) throws -> AgentRawProviderEvent {
-        try JSONDecoder().decode(
+    /// What the event table says a record of the hook event `name` means, or
+    /// nil when the table has no such event. The record carries only the
+    /// hook name and the keys every record has.
+    private func meaning(
+        _ table: [String: AgentProviderEntry.Meaning],
+        _ name: String
+    ) throws -> [AgentDomainEvent]? {
+        let record = try JSONDecoder().decode(
             AgentRawProviderEvent.self,
             from: Data("{\"provider\":\"claudeCode\",\"launchGeneration\":\"\(UUID().uuidString)\",\"hookEventName\":\"\(name)\"}".utf8))
+        return table[name]?(record)
     }
 }
