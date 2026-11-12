@@ -54,6 +54,35 @@ struct AgentDataRootTests {
         #expect(mismatch(nil, production) != nil)
     }
 
+    /// The dev seed runs for the dev bundle only, only while its root is
+    /// absent, and only when there is a production `agents.json` to copy.
+    @Test func onlyDevIdentitySeedsAbsentRoot() {
+        let bundles: [String?] = [
+            "com.mitchellh.ghostty", "com.mitchellh.ghostty.clawddy-dev",
+            "com.mitchellh.ghostty.clawddy-tests", "com.mitchellh.ghostty.debug", nil,
+        ]
+        for bundle in bundles {
+            for rootExists in [false, true] {
+                for productionConfigExists in [false, true] {
+                    let seeds = AgentDataRoot.seedsDevCopy(
+                        bundleIdentifier: bundle,
+                        rootExists: rootExists,
+                        productionConfigExists: productionConfigExists)
+                    let expected = bundle == "com.mitchellh.ghostty.clawddy-dev"
+                        && !rootExists && productionConfigExists
+                    #expect(seeds == expected, "\(bundle ?? "nil") root \(rootExists) production \(productionConfigExists)")
+                }
+            }
+        }
+        #expect(AgentDataRoot.production(homeDirectory: home).url.path
+            == "/Users/example/.config/ghostty-agents")
+        // The test host is never the dev identity, so it never seeds.
+        #expect(!AgentDataRoot.seedsDevCopy(
+            bundleIdentifier: Bundle.main.bundleIdentifier,
+            rootExists: false,
+            productionConfigExists: true))
+    }
+
     @Test @MainActor func onlyProductionBundleTakesHotKeyAndUpdater() throws {
         #expect(AgentDataRoot.isProductionBundle("com.mitchellh.ghostty"))
         #expect(!AgentDataRoot.isProductionBundle("com.mitchellh.ghostty.clawddy-dev"))

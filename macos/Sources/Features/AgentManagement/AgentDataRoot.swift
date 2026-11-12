@@ -9,6 +9,7 @@ struct AgentDataRoot: Equatable, Sendable {
     static let infoKey = "ClawddyDataDirectoryName"
     static let productionBundleIdentifier = "com.mitchellh.ghostty"
     static let productionDirectoryName = "ghostty-agents"
+    static let devBundleIdentifier = "com.mitchellh.ghostty.clawddy-dev"
 
     let url: URL
 
@@ -58,6 +59,25 @@ struct AgentDataRoot: Equatable, Sendable {
             .appendingPathComponent(directoryName, isDirectory: true))
     }
 
+    static func production(homeDirectory: URL) -> AgentDataRoot {
+        AgentDataRoot(url: homeDirectory
+            .appendingPathComponent(".config", isDirectory: true)
+            .appendingPathComponent(productionDirectoryName, isDirectory: true))
+    }
+
+    /// Whether this start first copies the production root's Claude agents
+    /// into its own root (`seedAgentDevCopy`). Only the dev bundle does,
+    /// only while its own root does not exist, and only when the production
+    /// root has an `agents.json` to copy (agent-cron alone may have created
+    /// that folder). Every other start uses its root as it is, or empty.
+    static func seedsDevCopy(
+        bundleIdentifier: String?,
+        rootExists: Bool,
+        productionConfigExists: Bool
+    ) -> Bool {
+        bundleIdentifier == devBundleIdentifier && !rootExists && productionConfigExists
+    }
+
     /// Why this bundle must not run on this root, or nil when the pairing is
     /// allowed. Only the production bundle may use the production root, and
     /// the production bundle may use no other.
@@ -66,9 +86,7 @@ struct AgentDataRoot: Equatable, Sendable {
         root: AgentDataRoot,
         homeDirectory: URL
     ) -> String? {
-        let productionRoot = homeDirectory
-            .appendingPathComponent(".config", isDirectory: true)
-            .appendingPathComponent(productionDirectoryName, isDirectory: true)
+        let productionRoot = production(homeDirectory: homeDirectory).url
         let isProductionRoot = root.url.standardizedFileURL.path
             == productionRoot.standardizedFileURL.path
         switch (isProductionBundle(bundleIdentifier), isProductionRoot) {

@@ -240,6 +240,60 @@ struct AgentHookIntegrationTests {
         }
         #expect(try filesUnder(sandbox.url) == before)
     }
+
+    /// A fork launches as `--resume <source> --fork-session --session-id
+    /// <new>`, and the new ID is the agent's binding before the process
+    /// starts. Until the fork is seen alive its marker stays, and a relaunch
+    /// forks again under another new ID; once the bridge has cleared the
+    /// marker, the next launch resumes the fork's own session.
+    @Test func forkLaunchAnnouncesItsNewSessionID() throws {
+        let sandbox = try HookSandbox()
+        defer { sandbox.remove() }
+        let request = sandbox.request(.claudeCode)
+        let statusDir = sandbox.root.statusDir
+        try FileManager.default.createDirectory(at: statusDir, withIntermediateDirectories: true)
+        #expect(AgentSessionStore.write(
+            AgentPendingFork(provider: .claudeCode, sourceSessionID: "live-session"),
+            for: request.agentID,
+            directory: statusDir))
+        func launch() throws -> (binding: AgentSessionBinding, script: String) {
+            let launch = try sandbox.prepareSurfaceLaunch(request)
+            let binding = try #require(AgentSessionStore.session(
+                for: request.agentID,
+                provider: .claudeCode,
+                directory: statusDir))
+            return (binding, try String(contentsOf: launch.scriptURL, encoding: .utf8))
+        }
+        func command(_ arguments: [String]) -> String {
+            arguments.map(AgentHookRuntime.shellQuote).joined(separator: " ")
+        }
+
+        let first = try launch()
+        let forkID = first.binding.sessionID
+        #expect(UUID(uuidString: forkID) != nil && forkID == forkID.lowercased())
+        #expect(first.binding == AgentSessionBinding(
+            provider: .claudeCode,
+            sessionID: forkID,
+            launchGeneration: request.launchGeneration))
+        #expect(first.script.contains(command([
+            sandbox.bin.appendingPathComponent("claude").path,
+            "--resume", "live-session", "--fork-session", "--session-id", forkID, "--name", "Agent",
+        ])))
+
+        let again = try launch()
+        #expect(again.binding.sessionID != forkID)
+        #expect(again.script.contains(command([
+            "--resume", "live-session", "--fork-session", "--session-id", again.binding.sessionID,
+        ])))
+
+        AgentSessionStore.clearPendingFork(for: request.agentID, directory: statusDir)
+        let resumed = try launch()
+        #expect(resumed.binding == again.binding)
+        #expect(resumed.script.contains(command([
+            sandbox.bin.appendingPathComponent("claude").path, "--resume", again.binding.sessionID,
+        ])))
+        #expect(!resumed.script.contains("--fork-session"))
+    }
 }
 
 private func isAgentIdentity(_ name: String) -> Bool {

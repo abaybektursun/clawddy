@@ -427,11 +427,13 @@ struct AgentMigrationTests {
         try setWritable(false, source.url)
         defer { recordIssues { try setWritable(true, source.url) } }
         let before = try tree(source.url)
+        let datesBefore = try modificationDates(source.url)
         let dev = AgentDataRoot(url: sandbox.url.appendingPathComponent("dev", isDirectory: true))
 
         let report = try seedAgentDevCopy(from: source, to: dev)
 
         #expect(try tree(source.url) == before)
+        #expect(try modificationDates(source.url) == datesBefore)
         #expect(report.agents == 66 && report.forkMarkers == 17)
         let forks = (MigrationFixture.taggedClaudeIDs + MigrationFixture.legacyOnlyIDs + MigrationFixture.bothBoundIDs)
             .map { "status/\($0.uuidString).fork.json" }
@@ -442,6 +444,31 @@ struct AgentMigrationTests {
         // folder is left beside it.
         #expect(throws: AgentMigrationAbort.self) { try seedAgentDevCopy(from: source, to: dev) }
         #expect(try FileManager.default.contentsOfDirectory(atPath: sandbox.url.path).sorted() == ["dev", "root"])
+    }
+
+    /// The seeded root, as the app loads it, holds the Claude agents only,
+    /// and no file in it belongs to or names a Codex agent, although every
+    /// Codex agent in the source has a binding.
+    @Test func seedContainsNoCodexAgents() throws {
+        let sandbox = MigrationSandbox()
+        defer { sandbox.remove() }
+        try MigrationFixture.messy().write(to: sandbox.root)
+        let dev = AgentDataRoot(url: sandbox.url.appendingPathComponent("dev", isDirectory: true))
+
+        let report = try seedAgentDevCopy(from: sandbox.root, to: dev)
+
+        #expect(report.codexAgents == 0 && report.claudeAgents == 66)
+        let config = AgentConfig(root: dev)
+        #expect(config.errorMessage == nil)
+        #expect(config.allAgentEntries.map(\.id) == MigrationFixture.claudeIDs)
+        #expect(config.allAgentEntries.allSatisfy { $0.provider == .claudeCode })
+        for (path, contents) in try tree(dev.url) {
+            let text = try #require(String(data: contents, encoding: .utf8))
+            for id in MigrationFixture.codexIDs.map(\.uuidString) {
+                #expect(!path.contains(id) && !text.contains(id), "\(path)")
+            }
+            #expect(!text.contains("codex-session"), "\(path)")
+        }
     }
 
     @Test func interruptedApplyResumesCorrectly() throws {
@@ -769,6 +796,18 @@ private func tree(_ url: URL) throws -> [String: Data] {
         }
     }
     return files
+}
+
+/// The modification date of `url` and of every item under it, folders
+/// included, by path relative to `url`.
+private func modificationDates(_ url: URL) throws -> [String: Date] {
+    let fm = FileManager.default
+    var dates: [String: Date] = [:]
+    for path in try fm.subpathsOfDirectory(atPath: url.path) + [""] {
+        let item = path.isEmpty ? url : url.appendingPathComponent(path)
+        dates[path] = try #require(fm.attributesOfItem(atPath: item.path)[.modificationDate] as? Date)
+    }
+    return dates
 }
 
 private func write(_ files: [String: String], under url: URL) throws {

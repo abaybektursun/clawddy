@@ -302,6 +302,10 @@ struct AgentPreparedLaunch: Sendable {
     var arguments: [String]
     var environment: [String: String]
     var metadataAvailability: AgentMetadataAvailability
+    /// The session this launch creates under an ID it chose, recorded as the
+    /// agent's binding before the process starts. Nil when the ID is learned
+    /// from the provider's `SessionStart` hook.
+    var newSession: AgentSessionBinding?
 }
 
 struct AgentIntegrationPreparation: Equatable, Sendable {

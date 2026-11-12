@@ -344,6 +344,16 @@ struct AgentLaunchCoordinator: Sendable {
                 generation: generation,
                 integrationIssue: nil)
         }
+        // A session ID the launch chose is the agent's binding before the
+        // process starts; the `SessionStart` hook later writes the same one.
+        if let session = prepared.newSession,
+           !AgentSessionStore.write(session, for: agentID, directory: root.statusDir) {
+            return .failure(
+                .launchPreparationFailed(provider, "The new session's ID could not be saved."),
+                provider: provider,
+                generation: generation,
+                integrationIssue: nil)
+        }
         let integrationIssue: String?
         switch adapter.prepareIntegration() {
         case .success(let preparation): integrationIssue = preparation.notice

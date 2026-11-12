@@ -69,14 +69,26 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
             root: root,
             hooks: overlayHooks(agentID: request.agentID, generation: request.launchGeneration))
         var arguments: [String] = []
+        var newSession: AgentSessionBinding?
 
-        if let session = request.session, session.provider == id {
-            arguments += ["--resume", session.sessionID]
-        } else if let pending = request.pendingFork, pending.provider == id {
+        // A fork marker stays until the forked process is seen alive, so
+        // while it exists the fork has not started, and this launch forks
+        // again rather than resuming a session that may not exist. The launch
+        // chooses the fork's ID, in Claude's lowercase form; Claude accepts
+        // `--session-id` together with `--resume` only with `--fork-session`.
+        if let pending = request.pendingFork, pending.provider == id {
+            let session = AgentSessionBinding(
+                provider: id,
+                sessionID: UUID().uuidString.lowercased(),
+                launchGeneration: request.launchGeneration)
+            newSession = session
             arguments += [
                 "--resume", pending.sourceSessionID,
-                "--fork-session", "--name", request.name,
+                "--fork-session", "--session-id", session.sessionID,
+                "--name", request.name,
             ]
+        } else if let session = request.session, session.provider == id {
+            arguments += ["--resume", session.sessionID]
         } else {
             arguments += ["--name", request.name]
         }
@@ -101,7 +113,8 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
             executableURL: executable,
             arguments: arguments,
             environment: environment,
-            metadataAvailability: availability))
+            metadataAvailability: availability,
+            newSession: newSession))
     }
 
     func normalize(_ event: AgentRawProviderEvent) -> [AgentDomainEvent] {
