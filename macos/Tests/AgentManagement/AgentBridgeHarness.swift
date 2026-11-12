@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import GhosttyKit
 import os
@@ -29,6 +30,11 @@ final class ManualScheduler: AgentScheduler {
 
     func after(_ delay: TimeInterval, _ action: @escaping @MainActor () -> Void) {
         scheduled.append(ScheduledCall(at: now + delay, every: nil, action))
+    }
+
+    /// Whether a timer that repeats is scheduled.
+    var hasRepeatingTimer: Bool {
+        scheduled.contains { $0.interval != nil && !$0.isCancelled }
     }
 
     /// Moves the clock forward, running every timer and delayed call that
@@ -158,14 +164,16 @@ final class FakeProviders: @unchecked Sendable {
 }
 
 /// Stands in for a terminal: the object a test posts its close and
-/// program-status notifications with.
+/// program-status notifications with, and whose `childExited` it sends when
+/// the process exits without a close, as Ghostty publishes
+/// `childExitedMessage`.
 @MainActor
 final class FakeSurface {
-    var processExited = false
+    let childExited = PassthroughSubject<Void, Never>()
     let configuration: Ghostty.SurfaceConfiguration
     /// The launch the surface was created for.
     let generation: UUID?
-    fileprivate var observers: [NSObjectProtocol] = []
+    fileprivate var observers: [AnyCancellable] = []
 
     init(configuration: Ghostty.SurfaceConfiguration, generation: UUID?) {
         self.configuration = configuration
@@ -221,12 +229,6 @@ final class FakeSurfaceHost: AgentSurfaceHost {
         return create(agent, createConfig)
     }
 
-    func reportExitedSurfaces() {
-        for (id, surface) in surfaces where surface.processExited {
-            bridge?.surfaceClosed(id: id, generation: surface.generation, processAlive: false)
-        }
-    }
-
     /// Records the question; `answerClose` gives the user's answer.
     func confirmClose(id: UUID, then close: @escaping @MainActor () -> Void) {
         calls.append(.confirmClose(id))
@@ -242,7 +244,7 @@ final class FakeSurfaceHost: AgentSurfaceHost {
 
     func removeSurface(id: UUID) {
         calls.append(.remove(id))
-        surfaces.removeValue(forKey: id)?.observers.forEach(NotificationCenter.default.removeObserver)
+        surfaces.removeValue(forKey: id)?.observers.forEach { $0.cancel() }
     }
 
     private func create(
@@ -254,6 +256,7 @@ final class FakeSurfaceHost: AgentSurfaceHost {
         if let bridge {
             surface.observers = observeAgentSurface(
                 surface,
+                childExited: surface.childExited,
                 agentID: agent.id,
                 generation: agent.launchGeneration,
                 bridge: bridge)
@@ -329,7 +332,7 @@ final class AgentBridgeHarness {
             provider: provider)).id
     }
 
-    /// Starts the bridge and runs the poll it requests at start.
+    /// Starts the bridge and runs the read it requests at start.
     func start() {
         bridge.start(config: config)
         scheduler.advance(by: 0)
@@ -467,8 +470,10 @@ final class AgentBridgeHarness {
         poll()
     }
 
+    /// Reads the status folder now, as the watcher asks the journal source
+    /// to after a change.
     func poll() {
-        bridge.pollStatusFiles()
+        bridge.journal?.read()
     }
 
     /// Rewrites the task's agents in `agents.json` as an editor would, then
@@ -501,8 +506,10 @@ final class AgentBridgeHarness {
     }
 
     /// One `[UUID: X]` field of `state.json`, which JSONEncoder writes as a
-    /// flat `[key, value, key, value, …]` array.
+    /// flat `[key, value, key, value, …]` array. Empty while nothing has
+    /// been saved.
     func persisted(_ key: String) throws -> [UUID: Any] {
+        guard exists(root.stateFile) else { return [:] }
         let object = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: root.stateFile)) as? [String: Any])
         let flat = try #require(object[key] as? [Any])

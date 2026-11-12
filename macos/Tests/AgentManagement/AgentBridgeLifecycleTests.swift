@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 import UserNotifications
@@ -230,7 +231,7 @@ struct AgentBridgeLifecycleTests {
         #expect(try h.binding(fork.id).sessionID == "fork-session")
     }
 
-    @Test func surfaceDeathIsExitedAndCleansUp() throws {
+    @Test func surfaceDeathIsExitedAndCleansUp() async throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent")
@@ -238,10 +239,9 @@ struct AgentBridgeLifecycleTests {
         try h.activate(id)
         let surface = try #require(h.host.surfaces[id])
 
-        // The heartbeat, every 10 s, asks each surface whether its process
-        // has exited.
-        surface.processExited = true
-        h.scheduler.advance(by: 10)
+        // The terminal shows that its process exited, and stays open.
+        surface.childExited.send()
+        await yieldToMainActor(until: { !h.surfaceDeaths.isEmpty })
 
         let agent = try h.agent(id)
         #expect(agent.displayState == .dead)
@@ -254,8 +254,38 @@ struct AgentBridgeLifecycleTests {
         #expect(h.providers.cleanups == [id])
         #expect(h.presentationChanges == [id, id])
 
-        h.scheduler.advance(by: 10)
+        // The removed surface reports nothing more.
+        surface.childExited.send()
+        await yieldToMainActor(until: { false }, limit: 10)
         #expect(h.surfaceDeaths == [id])
+    }
+
+    /// An exit that leaves the terminal open (after an abnormally short run,
+    /// or with `wait-after-command`) is an event, not something a timer
+    /// finds: it ends the launch with no time passing, and is handled after
+    /// the app tick that raised it, which must not free the surface.
+    @Test func childExitWithoutCloseEndsLaunchAtOnce() async throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        #expect(!h.scheduler.hasRepeatingTimer)
+        try h.launch(id)
+        try h.hook(id, "UserPromptSubmit")
+        let agent = try h.agent(id)
+        let surface = try #require(h.host.surfaces[id])
+
+        surface.childExited.send()
+        #expect(agent.surfaceState == .open)
+        await yieldToMainActor(until: { agent.surfaceState == .closed })
+
+        #expect(agent.displayState == .dead)
+        #expect(agent.processState == .exited)
+        #expect(agent.turnState == .inactive)
+        #expect(!h.host.hasSurface(id: id))
+        #expect(h.surfaceDeaths == [id])
+        #expect(h.aggregateChanges == [.idle, .running(1), .idle])
+        #expect(!h.scheduler.hasRepeatingTimer)
     }
 
     /// The host owns the only record of a surface. A close it reports ends
@@ -482,34 +512,18 @@ struct AgentBridgeLifecycleTests {
         #expect(try h.agent(id).displayState == .idle)
         #expect(h.diagnostics.messages.contains("ignored provider-mismatched event for \(id)"))
         #expect(h.diagnostics.messages.contains("ignored unsupported event schema for \(id): 2"))
-        let offset = try h.persisted("eventOffsets")[id] as? Int
-        #expect(offset == (try h.size(h.statusFile(id, "events"))))
 
+        // The next read starts after them.
         try h.hook(id, "UserPromptSubmit")
         #expect(try h.agent(id).displayState == .thinking)
+        #expect(h.diagnostics.messages.filter { $0.hasPrefix("ignored provider-mismatched") }.count == 1)
+        #expect(h.diagnostics.messages.filter { $0.hasPrefix("ignored unsupported event schema") }.count == 1)
     }
 
-    @Test func replayedEventIDAppliesOnce() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        try h.launch(id)
-        try h.hook(id, "UserPromptSubmit", eventID: "prompt-1")
-        try h.hook(id, "Stop", eventID: "stop-1")
-        let agent = try h.agent(id)
-        let completion = try #require(agent.unreadCompletion)
-        #expect(completion.eventID == "stop-1:0")
-
-        // The same records again, as a duplicated or replayed file holds them.
-        try h.hook(id, "UserPromptSubmit", eventID: "prompt-1")
-        try h.hook(id, "Stop", eventID: "stop-1")
-
-        #expect(agent.displayState == .finished)
-        #expect(agent.unreadCompletion == completion)
-        #expect(h.notifier.posted.count == 1)
-    }
-
+    /// Reading starts at the end of each event file when the bridge starts:
+    /// records already there, here a whole earlier turn, are never read, so
+    /// they reach neither the state nor the generation check. A record
+    /// appended later is read.
     @Test func eventsPresentAtStartupNeverApply() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -520,16 +534,54 @@ struct AgentBridgeLifecycleTests {
         }
 
         h.start()
+        h.poll()
 
         let agent = try h.agent(id)
         #expect(agent.displayState == .inactive)
+        #expect(agent.unreadCompletion == nil)
         #expect(h.notifier.posted.isEmpty)
-        let offset = try h.persisted("eventOffsets")[id] as? Int
-        #expect(offset == (try h.size(h.statusFile(id, "events"))))
+        #expect(!h.diagnostics.messages.contains("ignored stale launch event for \(id)"))
+
+        try h.append(id, h.record("UserPromptSubmit", generation: earlier))
+        h.poll()
+        #expect(h.diagnostics.messages.filter { $0 == "ignored stale launch event for \(id)" }.count == 1)
 
         try h.activate(id)
         h.poll()
         #expect(agent.displayState == .launching)
+    }
+
+    /// No terminal outlives the app. An agent that was working when the app
+    /// quit is not running after the restart, and what its hooks wrote after
+    /// the last read never applies; another agent's unread completion stays.
+    @Test func agentRunningAtQuitIsNotRunningAfterRestart() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        let other = try h.addAgent("Other")
+        h.start()
+        try h.launch(id)
+        try h.hook(id, "UserPromptSubmit")
+        try h.launch(other)
+        try h.hook(other, "UserPromptSubmit")
+        try h.hook(other, "Stop")
+        let generation = try h.generation(id)
+        let posted = h.notifier.posted.count
+
+        try h.restart {
+            try h.append(id, h.record("Stop", generation: generation))
+        }
+        h.poll()
+
+        let agent = try h.agent(id)
+        #expect(agent.displayState == .inactive)
+        #expect(agent.surfaceState == .inactive)
+        #expect(agent.processState == .notStarted)
+        #expect(agent.unreadCompletion == nil)
+        #expect(try h.agent(other).displayState == .finished)
+        #expect(h.bridge.runningAgentCount == 0)
+        #expect(h.notifier.posted.count == posted)
+        #expect(!h.diagnostics.messages.contains("ignored stale launch event for \(id)"))
     }
 
     /// When the host is gone by the time the launch is prepared, the script

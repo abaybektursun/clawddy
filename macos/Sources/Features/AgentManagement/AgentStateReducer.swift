@@ -322,20 +322,6 @@ enum AgentStateReducer {
     }
 }
 
-enum AgentTelemetryFreshnessPolicy {
-    static func isDelayed(
-        turnState: AgentTurnState,
-        lastProviderEventAt: Date?,
-        now: Date,
-        threshold: TimeInterval
-    ) -> Bool {
-        guard case .active = turnState,
-              let lastProviderEventAt
-        else { return false }
-        return now.timeIntervalSince(lastProviderEventAt) >= threshold
-    }
-}
-
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }

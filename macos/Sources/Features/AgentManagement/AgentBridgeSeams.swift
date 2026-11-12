@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 @preconcurrency import UserNotifications
 import os
@@ -235,8 +236,6 @@ protocol AgentSurfaceHost: AnyObject {
         agent: AgentInstance,
         createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool
-    /// Reports each surface whose process has exited to the bridge as closed.
-    func reportExitedSurfaces()
     /// Asks the user before closing the agent's terminal while its process
     /// runs, and calls `close` only if they agree.
     func confirmClose(id: UUID, then close: @escaping @MainActor () -> Void)
@@ -246,16 +245,19 @@ protocol AgentSurfaceHost: AnyObject {
 extension AgentDetailViewController: AgentSurfaceHost {}
 
 /// Reports one agent surface to the bridge, tagged with the agent and the
-/// launch the surface was created for: its close, and each program-status
-/// report. The host calls this in the same main-thread turn that creates the
-/// surface, so no report is missed, and removes the returned observers when
-/// it drops the surface.
+/// launch the surface was created for: its close, the exit of its process,
+/// and each program-status report. `childExited` publishes when Ghostty shows
+/// that the process exited, which after an abnormally short run, or with
+/// `wait-after-command`, it does without closing the terminal. The host calls
+/// this in the same main-thread turn that creates the surface, so no report
+/// is missed, and cancels the returned observations when it drops the surface.
 func observeAgentSurface(
     _ surface: AnyObject,
+    childExited: some Publisher<Void, Never>,
     agentID: UUID,
     generation: UUID?,
     bridge: AgentBridge
-) -> [NSObjectProtocol] {
+) -> [AnyCancellable] {
     let center = NotificationCenter.default
     let close = center.addObserver(
         forName: Ghostty.Notification.ghosttyCloseSurface,
@@ -267,6 +269,12 @@ func observeAgentSurface(
         // tick that posted this.
         Task { @MainActor [bridge] in
             bridge?.surfaceClosed(id: agentID, generation: generation, processAlive: processAlive)
+        }
+    }
+    let exit = childExited.sink { [weak bridge] in
+        // Published inside the app tick too, so reported after it.
+        Task { @MainActor [bridge] in
+            bridge?.surfaceClosed(id: agentID, generation: generation, processAlive: false)
         }
     }
     let status = center.addObserver(
@@ -282,5 +290,40 @@ func observeAgentSurface(
             bridge?.programStatus(id: agentID, generation: generation, report: report)
         }
     }
-    return [close, status]
+    return [
+        AnyCancellable { center.removeObserver(close) },
+        AnyCancellable { center.removeObserver(status) },
+        exit,
+    ]
+}
+
+// MARK: - Status observations
+
+/// Something observed about one launch of an agent. Every observation
+/// reaches the agent's state through `AgentBridge.ingest(_:)`, which drops
+/// one that belongs to another launch.
+struct AgentStatusObservation: Equatable, Sendable {
+    /// Where the observation was made.
+    enum Source: Equatable, Sendable {
+        /// The agent's event file, which its hooks append to.
+        case hookJournal
+        /// The agent's terminal.
+        case surface
+    }
+
+    enum Event: Equatable, Sendable {
+        /// A record the agent's hook or launch script wrote.
+        case hook(AgentRawProviderEvent)
+        /// The terminal closed, or its process exited; `processAlive` when
+        /// closing it would kill a running process.
+        case surfaceClosed(processAlive: Bool)
+        /// A program-status report the terminal received.
+        case programStatus(Ghostty.Action.ProgramStatus)
+    }
+
+    let agentID: UUID
+    /// The launch the observation belongs to.
+    let generation: UUID?
+    let source: Source
+    let event: Event
 }

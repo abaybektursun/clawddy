@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import GhosttyKit
 import os
@@ -15,8 +16,8 @@ private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "Agent
 /// All keys are UUID-based. Zero rekey on rename.
 ///
 /// This controller is the only owner of agent surfaces. It reports each
-/// surface's close and program status to the bridge, tagged with the launch
-/// the surface was created for.
+/// surface's close, process exit and program status to the bridge, tagged
+/// with the launch the surface was created for.
 final class AgentDetailViewController: NSViewController {
 
     /// Everything one agent's terminal needs, created and destroyed together.
@@ -26,8 +27,8 @@ final class AgentDetailViewController: NSViewController {
         let surface: Ghostty.SurfaceView
         /// The launch the surface was created for.
         let generation: UUID?
-        /// Report the surface to the bridge; removed with the pane.
-        let observers: [NSObjectProtocol]
+        /// Report the surface to the bridge; cancelled with the pane.
+        let observers: [AnyCancellable]
     }
 
     private weak var ghostty: Ghostty.App?
@@ -61,9 +62,6 @@ final class AgentDetailViewController: NSViewController {
 
     deinit {
         for o in keyObservers { NotificationCenter.default.removeObserver(o) }
-        for pane in panesByID.values {
-            pane.observers.forEach(NotificationCenter.default.removeObserver)
-        }
     }
 
     override func loadView() {
@@ -155,7 +153,7 @@ final class AgentDetailViewController: NSViewController {
             pane.container.removeFromSuperview()
         }
         let pane = activePane
-        if let pane { attach(pane.container) }
+        if let pane, let activeID { attach(pane, id: activeID) }
         let hasSurface = pane != nil
         if headerModel.hasSurface != hasSurface {
             headerModel.hasSurface = hasSurface
@@ -209,6 +207,7 @@ final class AgentDetailViewController: NSViewController {
                 generation: agent.launchGeneration,
                 observers: observeAgentSurface(
                     surface,
+                    childExited: surface.$childExitedMessage.compactMap { $0 }.map { _ in },
                     agentID: id,
                     generation: agent.launchGeneration,
                     bridge: bridge))
@@ -277,15 +276,6 @@ final class AgentDetailViewController: NSViewController {
         headerModel.showsAgentDetails = true
     }
 
-    /// Reports each agent terminal whose process has exited as closed. An
-    /// abnormal exit keeps its terminal open with an error message and posts
-    /// no close, so the bridge's heartbeat asks.
-    func reportExitedSurfaces() {
-        for (id, pane) in panesByID where pane.surface.processExited {
-            bridge.surfaceClosed(id: id, generation: pane.generation, processAlive: false)
-        }
-    }
-
     /// Asks before closing an agent terminal whose process is still running,
     /// in the words and form of Ghostty's terminal windows
     /// (`BaseTerminalController.closeSurface`): one sheet at a time, and with
@@ -315,7 +305,7 @@ final class AgentDetailViewController: NSViewController {
     func removeSurface(id: UUID) {
         logger.info("removeSurface \(id)")
         guard let pane = panesByID.removeValue(forKey: id) else { return }
-        pane.observers.forEach(NotificationCenter.default.removeObserver)
+        pane.observers.forEach { $0.cancel() }
         pane.host.focusedSurface = nil
         pane.container.removeFromSuperview()
         refreshPresentation()
@@ -333,7 +323,8 @@ final class AgentDetailViewController: NSViewController {
 
     var hasActiveSurface: Bool { activePane != nil }
 
-    private func attach(_ container: TerminalViewContainer) {
+    private func attach(_ pane: Pane, id: UUID) {
+        let container = pane.container
         guard container.superview == nil else { return }
         view.addSubview(container)
         NSLayoutConstraint.activate([
@@ -342,6 +333,15 @@ final class AgentDetailViewController: NSViewController {
             container.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             container.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+        // Ghostty shows a process's exit, the only sign of an exit that
+        // leaves the terminal open, only on a surface in a window. A detached
+        // terminal has none, so an exit it missed is reported once it is back.
+        guard pane.surface.processExited else { return }
+        let generation = pane.generation
+        // After this presentation pass, which the close changes.
+        Task { @MainActor [bridge] in
+            bridge.surfaceClosed(id: id, generation: generation, processAlive: false)
+        }
     }
 
     /// Send text to a specific agent's terminal pty.

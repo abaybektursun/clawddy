@@ -59,8 +59,6 @@ struct AgentBridgeKnownWrongTests {
 
         #expect(try h.agent(id).displayState == .idle)
         #expect(h.diagnostics.messages == before)
-        let offset = try h.persisted("eventOffsets")[id] as? Int
-        #expect(offset == (try h.size(h.statusFile(id, "events"))))
     }
 
     /// Right: an unreadable state file is an error the user sees, and is not replaced (P3.9).

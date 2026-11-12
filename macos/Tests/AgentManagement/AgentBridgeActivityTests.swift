@@ -161,7 +161,7 @@ struct AgentBridgeActivityTests {
         try h.hook(id, "UserPromptSubmit")
         let agent = try h.agent(id)
 
-        // Freshness is judged after each poll; the heartbeat polls every 10 s.
+        // A turn with no provider fact for 120 s shows as delayed.
         h.scheduler.advance(by: 115)
         #expect(agent.displayState == .thinking)
         h.scheduler.advance(by: 10)
@@ -208,9 +208,47 @@ struct AgentBridgeActivityTests {
         h.poll()
 
         #expect(try h.size(events) == 0)
-        #expect(try h.persisted("eventOffsets")[id] as? Int == 0)
         try h.hook(id, "UserPromptSubmit")
         #expect(try h.agent(id).displayState == .thinking)
+    }
+
+    /// Compaction cuts off only what was read: records read before it never
+    /// apply again, and the unread rest, here a record still being written,
+    /// applies once it is complete.
+    @Test func compactionNeitherReplaysNorLoses() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.launch(id)
+        let agent = try h.agent(id)
+        let launch = try h.generation(id)
+        let waiting = "clawddy.\(id.uuidString).waiting"
+        let completed = "clawddy.\(id.uuidString).completed"
+
+        try h.append(id, h.record("UserPromptSubmit", generation: launch))
+        try h.append(id, h.record("PermissionRequest", generation: launch))
+        try h.append(id, h.record(
+            "Padding",
+            generation: launch,
+            session: String(repeating: "x", count: 1_048_576)))
+        let unfinished = h.record("Stop", generation: launch)
+        try h.appendRaw(id, unfinished)
+        h.poll()
+
+        #expect(agent.displayState == .permission)
+        #expect(h.notifier.posted.map(\.identifier) == [waiting])
+        #expect(try Data(contentsOf: h.statusFile(id, "events")) == Data(unfinished.utf8))
+
+        try h.appendRaw(id, "\n")
+        h.poll()
+        #expect(agent.displayState == .finished)
+        #expect(h.notifier.posted.map(\.identifier) == [waiting, completed])
+
+        h.poll()
+        try h.hook(id, "UserPromptSubmit")
+        #expect(agent.displayState == .thinking)
+        #expect(h.notifier.posted.map(\.identifier) == [waiting, completed])
     }
 
     @Test func renameWhileIdleIsTypedImmediately() throws {

@@ -461,6 +461,22 @@ struct AgentMigrationTests {
         }
     }
 
+    /// The app since P3.4 starts every journal at its end and saves no
+    /// offsets, so a state file it wrote leaves no unread record to judge.
+    @Test func stateWithoutOffsetsLeavesNoJournalTail() throws {
+        let sandbox = MigrationSandbox()
+        defer { sandbox.remove() }
+        let id = MigrationFixture.claudeIDs[0].uuidString
+        var fixture = MigrationFixture()
+        fixture.status["\(id).events"] = #"{"hook_event_name":"Stop","session_id":"session"}"# + "\n"
+        fixture.state = ["unreadCompletions": [] as [Any], "pendingRenames": [] as [Any]]
+        try fixture.write(to: sandbox.root)
+
+        let snapshot = try AgentDataSnapshot.read(from: sandbox.root, defaults: nil)
+        #expect(snapshot.journalTails.isEmpty)
+        _ = try planAgentMigration(snapshot, mode: .cleanupV5)
+    }
+
     @Test func cronAndUnknownTopLevelFilesAreNeverPlanned() throws {
         let sandbox = MigrationSandbox()
         defer { sandbox.remove() }

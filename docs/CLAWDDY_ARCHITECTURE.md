@@ -45,7 +45,7 @@ or process model.
 | `AgentSessionStore.swift`         | Validated provider-tagged session and fork persistence plus legacy Claude migration                              |
 | `AgentEnvironmentResolver.swift`  | Asynchronous login-shell PATH discovery with timeout and deterministic fallback                                   |
 | `AgentEventJournal.swift`         | Complete-record parsing across append bursts, partial writes, and journal replacement                             |
-| `AgentProviderEventLedger.swift`  | Exact-once provider-fact delivery within one launch generation                                                     |
+| `AgentHookJournalSource.swift`    | File-level watcher, in-memory offsets and compaction for the event files; feeds `AgentBridge.ingest`              |
 | `AgentMetadataRuntime.swift`      | Per-agent Claude settings overlay, status-line forwarding, and atomic metadata publication                        |
 | `AgentSessionMetadata.swift`      | Provider-neutral metadata plus strict decoding and presentation-safe normalization of official telemetry fields   |
 | `AgentMetadataViews.swift`        | Compact list summary, persistent detail disclosure, exact inspector, freshness, and accessibility                 |
@@ -237,11 +237,11 @@ and hook records carry that generation; the reducer rejects stale events from a
 previous process. Provider-specific adapters normalize raw hook names into the
 shared domain vocabulary before reduction.
 
-The provider-event ledger is the exact-once ingress barrier for the current
-generation. Persisted byte offsets make normal reads efficient, while stable
-event IDs prevent a truncated or replaced journal from replaying an older start
-fact after a completion. The ledger resets only when the launch generation
-changes and is intentionally not copied through reducer snapshots.
+Every observation, a hook record or a terminal's close or program-status
+report, enters through `AgentBridge.ingest`, which drops one from another
+generation. Exactly-once delivery lives in the transport: the journal source
+keeps byte offsets in memory, starts each journal at its end when the app
+starts, and resets an offset only after its own compaction.
 
 Telemetry freshness is confidence, not guessed activity. If an active turn has
 no provider fact for two minutes, presentation becomes **Status Delayed** while
@@ -335,17 +335,18 @@ migrated to a tagged record. A session or fork tagged for one provider is
 never passed to another provider. The journal intentionally excludes prompts,
 tool inputs, tool results, and transcript content.
 
-`AgentBridge` watches the status directory. Filesystem events are throttled into
-one nonoverlapping poll per 200-millisecond window. Reads seek directly to the
-persisted byte offset and stop at the last complete newline, so cost follows new
+`AgentHookJournalSource` watches the status directory with FSEvents file
+events, which report appends to existing files. Events are throttled into one
+nonoverlapping read per 200-millisecond window. Reads seek directly to the
+in-memory byte offset and stop at the last complete newline, so cost follows new
 events rather than total history and a concurrent partial write is never decoded.
-Every complete record is applied sequentially on the main thread and the
-resulting offset is persisted. Once an acknowledged prefix reaches one MiB, the
-bridge compacts it under the same kernel-managed per-agent lock used by hooks,
-retains any concurrent suffix, resets the offset, and immediately repolls. A
-10-second reconciliation heartbeat also polls journals and checks process exits,
-so filesystem notifications accelerate state changes but do not own correctness.
-This fallback reads authoritative records; it never infers a completion.
+Every complete record is handed to `AgentBridge.ingest` in order on the main
+thread. Offsets start at the end of each journal when the app starts, so a
+restarted app never replays history. Once an acknowledged prefix reaches one MiB,
+the source compacts it under the same kernel-managed per-agent lock used by
+hooks, retains any concurrent suffix, resets the offset, and immediately reads
+again. There is no polling timer: a process exit that leaves its terminal open
+reaches the bridge from the surface's child-exited message.
 
 Every record must carry its provider and launch generation, and use the
 supported event schema; an untagged record does not decode and is skipped. Unknown schema versions and

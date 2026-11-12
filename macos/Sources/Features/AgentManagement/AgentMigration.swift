@@ -33,7 +33,9 @@ struct AgentDataSnapshot {
     /// files, by name.
     var bindingFiles: [String: Data]
     /// For each configured agent's journal, the bytes the app has not read
-    /// yet: from its persisted offset to the end.
+    /// yet and would read: from its persisted offset to the end. None when
+    /// the state file was written by the app since P3.4, which never reads
+    /// journal history.
     var journalTails: [UUID: Data]
     /// Every name in `hooks/`.
     var hookFileNames: [String]
@@ -637,7 +639,9 @@ private struct FlatPairs<Value: Codable>: Codable {
     }
 }
 
-/// `state.json`. The engine steps that drop fields from it also drop them here.
+/// `state.json`. Since P3.4 the app neither reads nor writes
+/// `lastAppliedCompletions` and `eventOffsets`, but files the old app wrote
+/// carry them, and the journal-tail check reads the offsets.
 private struct StateFormat: Codable {
     var unreadCompletions: FlatPairs<AgentCompletionID>?
     var lastAppliedCompletions: FlatPairs<AgentCompletionID>?
@@ -727,8 +731,13 @@ extension AgentDataSnapshot {
         let hookFileNames = try fm.fileExists(atPath: root.hooksDir.path)
             ? fm.contentsOfDirectory(atPath: root.hooksDir.path) : []
         let names = Set(statusFileNames)
-        let offsets = Dictionary(
-            uniqueKeysWithValues: (try decodeState(stateJSON).eventOffsets?.pairs ?? []).map { ($0.key, $0.value) })
+        // The app before P3.4 read each journal from its persisted offset, or
+        // from the start. The app since starts every journal at its end and
+        // persists no offsets, so a state file it wrote leaves nothing unread.
+        let offsets = try decodeState(stateJSON).eventOffsets.map {
+            Dictionary(uniqueKeysWithValues: $0.pairs.map { ($0.key, $0.value) })
+        }
+        let readsHistory = stateJSON == nil || offsets != nil
         var bindingFiles: [String: Data] = [:]
         var journalTails: [UUID: Data] = [:]
         for agent in try decodeConfig(agentsJSON).agents {
@@ -736,10 +745,10 @@ extension AgentDataSnapshot {
             for name in ["\(id).session", "\(id).session.json", "\(id).fork.json"] where names.contains(name) {
                 bindingFiles[name] = try Data(contentsOf: root.statusDir.appendingPathComponent(name))
             }
-            if names.contains("\(id).events") {
+            if readsHistory, names.contains("\(id).events") {
                 journalTails[agent.id] = try unreadBytes(
                     of: root.statusDir.appendingPathComponent("\(id).events"),
-                    from: offsets[agent.id] ?? 0)
+                    from: offsets?[agent.id] ?? 0)
             }
         }
         return AgentDataSnapshot(

@@ -493,25 +493,6 @@ struct AgentStateReducerTests {
         #expect(recovered.activityState == .reasoning)
     }
 
-    @Test func freshnessPolicyRequiresAnActiveTurnAndElapsedThreshold() {
-        let now = Date()
-        #expect(AgentTelemetryFreshnessPolicy.isDelayed(
-            turnState: .active(turnID: "turn"),
-            lastProviderEventAt: now.addingTimeInterval(-120),
-            now: now,
-            threshold: 120))
-        #expect(!AgentTelemetryFreshnessPolicy.isDelayed(
-            turnState: .active(turnID: "turn"),
-            lastProviderEventAt: now.addingTimeInterval(-119),
-            now: now,
-            threshold: 120))
-        #expect(!AgentTelemetryFreshnessPolicy.isDelayed(
-            turnState: .inactive,
-            lastProviderEventAt: now.addingTimeInterval(-1_000),
-            now: now,
-            threshold: 120))
-    }
-
     @Test func timeoutDegradesTelemetryAndFirstEventRecovers() {
         let generation = UUID()
         var state = AgentStateReducer.reduce(

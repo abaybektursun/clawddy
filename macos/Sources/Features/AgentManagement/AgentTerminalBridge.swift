@@ -4,8 +4,6 @@ import GhosttyKit
 @preconcurrency import UserNotifications
 import os
 
-private let agentPollThrottle: TimeInterval = 0.2
-
 // MARK: - Display State (derived, never stored)
 
 enum DisplayState: Equatable, Sendable {
@@ -136,7 +134,6 @@ final class AgentInstance: Identifiable {
     /// asks the workspace to choose among equally urgent agents. It never
     /// changes list order or steals focus as runtime state evolves.
     @ObservationIgnored var lastAuthoritativeChange: Date?
-    @ObservationIgnored var providerEventLedger = AgentProviderEventLedger()
 
     var surfaceState: AgentSurfaceState { runtime.surfaceState }
     var processState: AgentProcessState { runtime.processState }
@@ -223,14 +220,14 @@ enum AggregateState: Equatable {
 
 // MARK: - Persisted Bridge State
 
+/// `state.json`. Files the app wrote before P3.4 also hold
+/// `lastAppliedCompletions` and `eventOffsets`, which are no longer read.
 private struct PersistedState: Codable {
     var unreadCompletions: [UUID: AgentCompletionID] = [:]
-    var lastAppliedCompletions: [UUID: AgentCompletionID] = [:]
     var pendingRenames: [UUID: String] = [:]
-    var eventOffsets: [UUID: Int] = [:]
 
     private enum CodingKeys: String, CodingKey {
-        case unreadCompletions, lastAppliedCompletions, pendingRenames, eventOffsets
+        case unreadCompletions, pendingRenames
     }
 
     init() {}
@@ -240,21 +237,10 @@ private struct PersistedState: Codable {
         unreadCompletions = try container.decodeIfPresent(
             [UUID: AgentCompletionID].self,
             forKey: .unreadCompletions) ?? [:]
-        lastAppliedCompletions = try container.decodeIfPresent(
-            [UUID: AgentCompletionID].self,
-            forKey: .lastAppliedCompletions) ?? [:]
         pendingRenames = try container.decodeIfPresent(
             [UUID: String].self,
             forKey: .pendingRenames) ?? [:]
-        eventOffsets = try container.decodeIfPresent(
-            [UUID: Int].self,
-            forKey: .eventOffsets) ?? [:]
     }
-}
-
-private struct AgentMetadataFileUpdate: Sendable {
-    let data: Data
-    let snapshot: AgentSessionMetadata?
 }
 
 struct AgentPreparedSurfaceLaunch: Sendable {
@@ -401,15 +387,14 @@ final class AgentBridge {
     private(set) var currentlyViewedAgentId: UUID?
 
     private var pendingRenames: [UUID: String] = [:]
-    private var eventOffsets: [UUID: Int] = [:]
-    private var metadataFileData: [UUID: Data] = [:]
     private var lastAggregateState: AggregateState?
     private var isTerminating = false
 
-    private var heartbeatTimer: (any AgentTimer)?
-    private var statusDirWatcher: DispatchSourceFileSystemObject?
+    /// Brings the hook records to `ingest`, from `start` on.
+    @ObservationIgnored private(set) var journal: AgentHookJournalSource?
     private var healthRefreshGenerations: [AgentProviderID: UUID] = [:]
     private var compactingTimers: [UUID: any AgentTimer] = [:]
+    private var telemetryDelayTimers: [UUID: any AgentTimer] = [:]
     private var launchScripts: [UUID: URL] = [:]
     let root: AgentDataRoot
     private let providers: AgentProviderTable
@@ -425,21 +410,15 @@ final class AgentBridge {
         }
     }
 
-    /// Throttle file watcher: hooks fire bursts (4 fs events per claude event,
-    /// ×N agents = 100+/sec). Coalesce into one poll per window.
-    private var pollPending = false
-    private var pollInFlight = false
-    private var pollAgainNeeded = false
-    private var compactingJournals: Set<UUID> = []
-    private static let journalCompactionThreshold = 1_048_576
-
     /// Compacting is provably bounded (~5-15s). If no PostCompact arrives
     /// within this window, the state is stale (e.g., user cancelled).
     private static let compactingTimeout: TimeInterval = 30
+    /// An active turn with no provider fact for this long shows as delayed.
+    private static let telemetryDelay: TimeInterval = 120
 
     /// The host of the last activation. The surfaces are its own; the bridge
     /// keeps only this weak reference, to present launches that finish
-    /// preparing and to ask for processes that exited.
+    /// preparing and to have closes confirmed.
     @ObservationIgnored private weak var surfaceHost: (any AgentSurfaceHost)?
     /// The last program-status report from each agent's current launch.
     /// Nothing derives agent state from it yet.
@@ -474,28 +453,30 @@ final class AgentBridge {
         }
         let persisted = loadPersistedState()
         pendingRenames = persisted.pendingRenames
-        eventOffsets = persisted.eventOffsets
 
-        // Reconstruct agents from config
+        // Reconstruct agents from config. No terminal outlives the app, so
+        // every agent starts not running; only an unread completion stays.
         for entry in config.allAgentEntries {
             let unread = persisted.unreadCompletions[entry.id]
             agents[entry.id] = AgentInstance(entry: entry, runtime: AgentRuntimeSnapshot(
                 unreadCompletion: unread,
-                lastAppliedCompletion: persisted.lastAppliedCompletions[entry.id] ?? unread))
+                lastAppliedCompletion: unread))
         }
 
         refreshProviderHealth()
 
-        // File watcher for real-time state updates
-        startStatusDirWatcher()
-
-        // Heartbeat timer: infrequent fallback for edge cases (crashes without notification)
-        heartbeatTimer = scheduler.timer(interval: 10.0, repeats: true) { [weak self] in
-            self?.heartbeat()
-        }
-
-        // Consume any events that landed after the last persisted offset.
-        requestStatusPoll(after: 0)
+        // From here on, each record a hook appends reaches `ingest`; what the
+        // event files hold now is history and never applies.
+        let journal = AgentHookJournalSource(
+            statusDir: statusDir,
+            scheduler: scheduler,
+            io: io,
+            diagnose: diagnose)
+        journal.start(
+            agents: { [weak self] in self?.agents.mapValues(\.provider) ?? [:] },
+            observe: { [weak self] in self?.ingest($0) },
+            statusLine: { [weak self] id, snapshot in self?.applyStatusLine(snapshot, to: id) })
+        self.journal = journal
 
         // The restored state, unread completions included, reaches the
         // observers, which the owner attaches before calling `start`.
@@ -506,14 +487,8 @@ final class AgentBridge {
 
     func shutdown() {
         isTerminating = true
-        heartbeatTimer?.invalidate()
-        heartbeatTimer = nil
-        statusDirWatcher?.cancel()
-        statusDirWatcher = nil
-        for timer in launchTimers.values { timer.invalidate() }
-        launchTimers.removeAll()
-        for timer in compactingTimers.values { timer.invalidate() }
-        compactingTimers.removeAll()
+        journal?.stop()
+        for id in agents.keys { invalidateTimers(for: id) }
         removeAllLaunchScripts(synchronously: true)
         persistState(synchronously: true)
     }
@@ -593,8 +568,6 @@ final class AgentBridge {
             destroySurface(id: id)
             agents.removeValue(forKey: id)
             pendingRenames.removeValue(forKey: id)
-            eventOffsets.removeValue(forKey: id)
-            metadataFileData.removeValue(forKey: id)
         }
 
         // Sync editable values. Provider identity can replace only a runtime
@@ -945,8 +918,6 @@ final class AgentBridge {
         destroySurface(id: id)
         agents.removeValue(forKey: id)
         pendingRenames.removeValue(forKey: id)
-        eventOffsets.removeValue(forKey: id)
-        metadataFileData.removeValue(forKey: id)
 
         // Clean status files
         let cleanup = providers.cleanup
@@ -957,283 +928,162 @@ final class AgentBridge {
         }
     }
 
-    // MARK: - Heartbeat (infrequent correctness fallback)
+    // MARK: - Status observations
 
-    private func heartbeat() {
+    /// The one way an observation about an agent reaches its state: the
+    /// records its hooks append to its event file, and its terminal's close
+    /// and program-status reports. An observation from another launch, or
+    /// about an agent that is gone, changes nothing.
+    func ingest(_ observation: AgentStatusObservation) {
         guard !isTerminating else { return }
-
-        // Directory notifications accelerate updates but do not own
-        // correctness. This heals dropped/coalesced FSEvents without
-        // manufacturing any lifecycle state.
-        requestStatusPoll(after: 0)
-
-        // Process exits that posted no close (an abnormal exit keeps its
-        // terminal open with an error message).
-        surfaceHost?.reportExitedSurfaces()
-    }
-
-    /// Evaluates telemetry confidence only after a complete journal
-    /// reconciliation. This prevents a stale heartbeat from briefly replacing a
-    /// completion event that is already on disk but has not been applied yet.
-    private func updateTelemetryFreshness() {
-        let now = scheduler.now
-        var confidenceChanged = false
-        for agent in agents.values {
-            guard let generation = agent.launchGeneration,
-                  AgentTelemetryFreshnessPolicy.isDelayed(
-                    turnState: agent.turnState,
-                    lastProviderEventAt: agent.lastHookTime,
-                    now: now,
-                    threshold: 120)
-            else { continue }
-            let oldHealth = agent.telemetryHealth
-            apply(.telemetryDelayed(generation: generation), to: agent)
-            confidenceChanged = confidenceChanged || oldHealth != agent.telemetryHealth
-        }
-        if confidenceChanged { updateAggregate() }
-    }
-
-    // MARK: - Event-Driven Polling (triggered by file watcher only)
-
-    private func requestStatusPoll(after delay: TimeInterval = agentPollThrottle) {
-        guard !isTerminating else { return }
-        guard !pollPending, !pollInFlight else {
-            pollAgainNeeded = true
+        let id = observation.agentID
+        guard let agent = agents[id],
+              let generation = agent.launchGeneration,
+              observation.generation == generation
+        else {
+            switch observation.event {
+            case .hook: diagnose(.debug, "ignored stale launch event for \(id)")
+            case .surfaceClosed: diagnose(.debug, "ignored close of an earlier surface of \(id)")
+            case .programStatus: diagnose(.debug, "ignored program status for \(id)")
+            }
             return
         }
-        pollPending = true
-        scheduler.after(delay) { [weak self] in
-            guard let self, !self.isTerminating else { return }
-            self.pollPending = false
-            self.pollInFlight = true
-            self.pollStatusFiles()
+        switch observation.event {
+        case .hook(let record):
+            ingestHook(record, agent: agent, generation: generation)
+        case .surfaceClosed(let processAlive):
+            closeSurface(of: agent, generation: generation, processAlive: processAlive)
+        case .programStatus(let report):
+            // Recorded only; nothing derives agent state from it yet.
+            lastProgramStatus[id] = report
+            let kind = report.kind.map { String(describing: $0) } ?? "-"
+            diagnose(
+                .debug,
+                "program status \(id) generation \(generation): \(report.state) kind=\(kind) id=\(report.id ?? "-")")
         }
     }
 
-    func pollStatusFiles() {
-        guard !isTerminating else {
-            pollInFlight = false
-            return
-        }
-
-        let ids = Array(agents.keys)
-        let compactingIDs = compactingJournals
-        let offsets = eventOffsets
-        let knownMetadataData = metadataFileData
-        let statusDir = statusDir
-        let providers = agents.mapValues(\.provider)
-        let io = self.io
-        let diagnose = self.diagnose
-        io.async { [weak self] in
-            var batches: [UUID: AgentEventJournalBatch] = [:]
-            var metadataUpdates: [UUID: AgentMetadataFileUpdate] = [:]
-            for id in ids {
-                if !compactingIDs.contains(id) {
-                    let url = statusDir.appendingPathComponent("\(id.uuidString).events")
-                    let requestedOffset = offsets[id] ?? 0
-                    if let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-                       let size = attributes[.size] as? NSNumber,
-                       let handle = try? FileHandle(forReadingFrom: url) {
-                        let startOffset = requestedOffset <= size.intValue ? requestedOffset : 0
-                        do {
-                            try handle.seek(toOffset: UInt64(startOffset))
-                            let data = try handle.readToEnd() ?? Data()
-                            let relative = AgentEventJournal.read(data, from: 0)
-                            let batch = AgentEventJournalBatch(
-                                records: relative.records,
-                                endOffset: startOffset + relative.endOffset)
-                            if !batch.records.isEmpty || batch.endOffset != requestedOffset {
-                                batches[id] = batch
-                            }
-                        } catch {
-                            diagnose(.error, "journal read failed for \(id): \(error.localizedDescription)")
-                        }
-                        try? handle.close()
-                    }
-                }
-
-                guard providers[id] == .claudeCode else { continue }
-                let metadataURL = statusDir.appendingPathComponent("\(id.uuidString).metadata.json")
-                guard let metadataData = try? Data(contentsOf: metadataURL),
-                      metadataData != knownMetadataData[id]
-                else { continue }
-                let attributes = try? FileManager.default.attributesOfItem(
-                    atPath: metadataURL.path)
-                let observedAt = attributes?[.modificationDate] as? Date ?? Date()
-                let snapshot = try? AgentSessionMetadata.decodeStatusLinePayload(
-                    metadataData,
-                    observedAt: observedAt)
-                metadataUpdates[id] = AgentMetadataFileUpdate(
-                    data: metadataData,
-                    snapshot: snapshot)
-            }
-            io.onMainActor { [weak self] in
-                self?.applyRawEvents(batches, metadataUpdates: metadataUpdates)
-            }
-        }
-    }
-
-    private func applyRawEvents(
-        _ batches: [UUID: AgentEventJournalBatch],
-        metadataUpdates: [UUID: AgentMetadataFileUpdate]
+    private func ingestHook(
+        _ record: AgentRawProviderEvent,
+        agent: AgentInstance,
+        generation: UUID
     ) {
-        guard !isTerminating else {
-            pollInFlight = false
+        let id = agent.id
+        guard record.provider == agent.provider else {
+            diagnose(.error, "ignored provider-mismatched event for \(id)")
             return
         }
-        var anyChanged = false
-        var shouldPersist = false
-        var compactionCandidates: [(UUID, Int)] = []
+        guard record.hasSupportedSchema else {
+            diagnose(
+                .error,
+                "ignored unsupported event schema for \(id): \(record.schemaVersion ?? -1)")
+            return
+        }
+        let domainEvents = providers.normalize(record.provider, record)
+        guard !domainEvents.isEmpty else { return }
 
-        for (id, update) in metadataUpdates {
-            metadataFileData[id] = update.data
-            guard let agent = agents[id], let snapshot = update.snapshot else {
-                diagnose(.error, "invalid metadata snapshot for \(id)")
-                continue
+        // A completion is known by the record's ID and its event's place in
+        // the record.
+        let eventID = record.eventID ?? UUID().uuidString
+        var effects: [AgentRuntimeEffect] = []
+        for (index, domainEvent) in domainEvents.enumerated() {
+            effects += apply(
+                .provider(
+                    generation: generation,
+                    provider: record.provider,
+                    eventID: "\(eventID):\(index)",
+                    event: domainEvent,
+                    isViewed: currentlyViewedAgentId == id),
+                to: agent)
+            applyMetadata(record, domainEvent: domainEvent, provider: record.provider, to: agent)
+        }
+        agent.lastHookTime = scheduler.now
+        perform(effects, of: agent)
+        scheduleTelemetryDelay(for: agent)
+    }
+
+    /// What provider facts set in motion once applied: the launch's cleanup
+    /// when the provider is seen alive or gone, notifications while the
+    /// agent is not viewed, a deferred rename, and saving the unread state.
+    private func perform(_ effects: [AgentRuntimeEffect], of agent: AgentInstance) {
+        let id = agent.id
+        if effects.contains(.becameAlive) {
+            launchTimers[id]?.invalidate()
+            launchTimers.removeValue(forKey: id)
+            removeLaunchScript(for: id)
+            let provider = agent.provider
+            integrationIssues[provider] = nil
+            let root = root
+            io.async {
+                AgentSessionStore.clearPendingFork(for: id, directory: root.statusDir)
+                if provider == .codex {
+                    CodexProvider.clearHookReviewRequired(root: root)
+                }
             }
-            if agent.metadata != snapshot || agent.metadataAvailability != .available {
-                agent.metadata = snapshot
-                agent.metadataAvailability = .available
-                shouldPersist = true
+            refreshProviderHealth(provider)
+        }
+        if effects.contains(where: {
+            if case .providerExited = $0 { return true }
+            return false
+        }) {
+            launchTimers[id]?.invalidate()
+            launchTimers.removeValue(forKey: id)
+            removeLaunchScript(for: id)
+        }
+        updateCompactingTimer(for: agent)
+
+        if currentlyViewedAgentId != id {
+            if effects.contains(.completed) {
+                postNotification(agentId: id, kind: .finished,
+                    title: "Agent completed", body: "\(agent.name) is ready for review")
+            }
+            if effects.contains(.waitingForUser) {
+                postNotification(agentId: id, kind: .permission,
+                    title: "Agent is waiting for you", body: "\(agent.name) needs your response")
+            }
+            if effects.contains(.failed) {
+                postNotification(agentId: id, kind: .error,
+                    title: "Agent needs attention", body: "\(agent.name) encountered an error")
             }
         }
 
-        for (id, batch) in batches {
-            guard let agent = agents[id] else { continue }
-            for (recordIndex, data) in batch.records.enumerated() {
-                guard let rawEvent = try? JSONDecoder().decode(
-                    AgentRawProviderEvent.self,
-                    from: data)
-                else { continue }
-                guard rawEvent.provider == agent.provider else {
-                    diagnose(.error, "ignored provider-mismatched event for \(id)")
-                    continue
-                }
-                guard rawEvent.hasSupportedSchema else {
-                    diagnose(
-                        .error,
-                        "ignored unsupported event schema for \(id): \(rawEvent.schemaVersion ?? -1)")
-                    continue
-                }
-                guard let currentGeneration = agent.launchGeneration else { continue }
-                guard rawEvent.launchGeneration == currentGeneration else {
-                    diagnose(.debug, "ignored stale launch event for \(id)")
-                    continue
-                }
-                let eventProvider = rawEvent.provider
-                let eventGeneration = rawEvent.launchGeneration
-                let domainEvents = providers.normalize(eventProvider, rawEvent)
-                guard !domainEvents.isEmpty else { continue }
-
-                let oldSnapshot = agent.runtime
-                var effects: [AgentRuntimeEffect] = []
-                var appliedNewProviderFact = false
-                for (domainIndex, domainEvent) in domainEvents.enumerated() {
-                    let providerEventID = rawEvent.eventID
-                        .map { "\($0):\(domainIndex)" }
-                        ?? "\(eventGeneration.uuidString):\(batch.endOffset):\(recordIndex):\(domainIndex)"
-                    guard agent.providerEventLedger.shouldApply(
-                        eventID: providerEventID,
-                        generation: eventGeneration)
-                    else { continue }
-                    appliedNewProviderFact = true
-                    effects += apply(
-                        .provider(
-                            generation: eventGeneration,
-                            provider: eventProvider,
-                            eventID: providerEventID,
-                            event: domainEvent,
-                            isViewed: currentlyViewedAgentId == id),
-                        to: agent)
-                    applyMetadata(
-                        rawEvent,
-                        domainEvent: domainEvent,
-                        provider: eventProvider,
-                        to: agent)
-                }
-                if oldSnapshot != agent.runtime {
-                    anyChanged = true
-                }
-
-                if effects.contains(.becameAlive) {
-                    launchTimers[id]?.invalidate()
-                    launchTimers.removeValue(forKey: id)
-                    removeLaunchScript(for: id)
-                    let provider = agent.provider
-                    integrationIssues[provider] = nil
-                    let root = root
-                    io.async {
-                        AgentSessionStore.clearPendingFork(for: id, directory: root.statusDir)
-                        if provider == .codex {
-                            CodexProvider.clearHookReviewRequired(root: root)
-                        }
-                    }
-                    refreshProviderHealth(provider)
-                }
-                if effects.contains(where: {
-                    if case .providerExited = $0 { return true }
-                    return false
-                }) {
-                    launchTimers[id]?.invalidate()
-                    launchTimers.removeValue(forKey: id)
-                    removeLaunchScript(for: id)
-                }
-                if appliedNewProviderFact {
-                    agent.lastHookTime = scheduler.now
-                }
-                updateCompactingTimer(for: agent)
-
-                let newDisplay = agent.displayState
-                if effects.contains(.unreadChanged) {
-                    shouldPersist = true
-                }
-
-                if currentlyViewedAgentId != id {
-                    if effects.contains(.completed) {
-                        postNotification(agentId: id, kind: .finished,
-                            title: "Agent completed", body: "\(agent.name) is ready for review")
-                    }
-                    if effects.contains(.waitingForUser) {
-                        postNotification(agentId: id, kind: .permission,
-                            title: "Agent is waiting for you", body: "\(agent.name) needs your response")
-                    }
-                    if effects.contains(.failed) {
-                        postNotification(agentId: id, kind: .error,
-                            title: "Agent needs attention", body: "\(agent.name) encountered an error")
-                    }
-                }
-
-                if isSafeForInput(newDisplay),
-                   let pendingName = pendingRenames.removeValue(forKey: id) {
-                    onSendText?(id, "/rename \(pendingName)\n")
-                    shouldPersist = true
-                }
-            }
-            eventOffsets[id] = batch.endOffset
-            if batch.endOffset >= Self.journalCompactionThreshold {
-                compactionCandidates.append((id, batch.endOffset))
-            }
+        var shouldPersist = effects.contains(.unreadChanged)
+        if isSafeForInput(agent.displayState),
+           let pendingName = pendingRenames.removeValue(forKey: id) {
+            onSendText?(id, "/rename \(pendingName)\n")
             shouldPersist = true
-        }
-
-        if anyChanged {
-            updateAggregate()
         }
         if shouldPersist {
             persistState()
         }
-        for (id, offset) in compactionCandidates {
-            scheduleJournalCompaction(id: id, acknowledgedOffset: offset)
-        }
-        finishStatusPoll()
+        updateAggregate()
     }
 
-    private func finishStatusPoll() {
-        pollInFlight = false
-        updateTelemetryFreshness()
-        guard pollAgainNeeded else { return }
-        pollAgainNeeded = false
-        requestStatusPoll(after: 0)
+    /// An active turn that goes `telemetryDelay` without a provider fact
+    /// shows as delayed until the next fact. Each fact starts the wait again.
+    private func scheduleTelemetryDelay(for agent: AgentInstance) {
+        telemetryDelayTimers.removeValue(forKey: agent.id)?.invalidate()
+        guard case .active = agent.turnState,
+              let generation = agent.launchGeneration
+        else { return }
+        telemetryDelayTimers[agent.id] = scheduler.timer(
+            interval: Self.telemetryDelay,
+            repeats: false
+        ) { [weak self, weak agent] in
+            guard let self, let agent else { return }
+            self.telemetryDelayTimers.removeValue(forKey: agent.id)
+            self.apply(.telemetryDelayed(generation: generation), to: agent)
+            self.updateAggregate()
+        }
+    }
+
+    /// Claude's latest status-line snapshot for the agent.
+    private func applyStatusLine(_ snapshot: AgentSessionMetadata, to id: UUID) {
+        guard let agent = agents[id],
+              agent.metadata != snapshot || agent.metadataAvailability != .available
+        else { return }
+        agent.metadata = snapshot
+        agent.metadataAvailability = .available
     }
 
     private func applyMetadata(
@@ -1281,33 +1131,6 @@ final class AgentBridge {
             return nil
         }
         return version
-    }
-
-    private func scheduleJournalCompaction(id: UUID, acknowledgedOffset: Int) {
-        guard compactingJournals.insert(id).inserted else { return }
-        let url = statusDir.appendingPathComponent("\(id.uuidString).events")
-        let lockURL = statusDir.appendingPathComponent("\(id.uuidString).events.lock")
-        let io = self.io
-        let diagnose = self.diagnose
-        io.async { [weak self] in
-            guard let self else { return }
-            let compacted = AgentEventJournal.compact(
-                url: url,
-                lockURL: lockURL,
-                acknowledgedOffset: acknowledgedOffset)
-            if !compacted {
-                diagnose(.debug, "journal compaction deferred for \(id)")
-            }
-            io.onMainQueue { [weak self] in
-                guard let self else { return }
-                if compacted, self.eventOffsets[id] == acknowledgedOffset {
-                    self.eventOffsets[id] = 0
-                    self.persistState()
-                }
-                self.compactingJournals.remove(id)
-                self.requestStatusPoll(after: 0)
-            }
-        }
     }
 
     private func isSafeForInput(_ state: DisplayState) -> Bool {
@@ -1376,17 +1199,30 @@ final class AgentBridge {
 
     /// The host reports that an agent's terminal closed, or that its process
     /// exited. `generation` is the launch the surface was created for: a
-    /// close from an earlier launch changes nothing, and nil closes the
-    /// current one. A close that would kill a running process asks first, as
-    /// for any Ghostty terminal.
+    /// close from an earlier launch changes nothing. A close that would kill
+    /// a running process asks first, as for any Ghostty terminal.
     func surfaceClosed(id: UUID, generation: UUID?, processAlive: Bool) {
-        guard !isTerminating, let agent = agents[id] else { return }
-        if let generation, agent.launchGeneration != generation {
-            diagnose(.debug, "ignored close of an earlier surface of \(id)")
-            return
-        }
+        ingest(AgentStatusObservation(
+            agentID: id,
+            generation: generation,
+            source: .surface,
+            event: .surfaceClosed(processAlive: processAlive)))
+    }
+
+    /// One program-status report from the terminal of an agent's launch. It
+    /// arrives inside the app tick, so nothing it causes may free a surface.
+    func programStatus(id: UUID, generation: UUID?, report: Ghostty.Action.ProgramStatus) {
+        ingest(AgentStatusObservation(
+            agentID: id,
+            generation: generation,
+            source: .surface,
+            event: .programStatus(report)))
+    }
+
+    private func closeSurface(of agent: AgentInstance, generation: UUID, processAlive: Bool) {
         // A surface closes once, however many reports of it arrive.
         guard agent.surfaceState == .open else { return }
+        let id = agent.id
         if processAlive, let surfaceHost {
             surfaceHost.confirmClose(id: id) { [weak self] in
                 // Agreed, so nothing is left to ask; the launch may have
@@ -1399,42 +1235,28 @@ final class AgentBridge {
         destroySurface(id: id)
     }
 
-    /// One program-status report from the terminal of an agent's launch. It
-    /// arrives inside the app tick, so nothing here may free a surface.
-    func programStatus(id: UUID, generation: UUID?, report: Ghostty.Action.ProgramStatus) {
-        guard let agent = agents[id], let generation, agent.launchGeneration == generation else {
-            diagnose(.debug, "ignored program status for \(id)")
-            return
-        }
-        lastProgramStatus[id] = report
-        let kind = report.kind.map { String(describing: $0) } ?? "-"
-        diagnose(
-            .debug,
-            "program status \(id) generation \(generation): \(report.state) kind=\(kind) id=\(report.id ?? "-")")
-    }
-
     private func discardSurfaceForRestart(
         id: UUID,
         host: any AgentSurfaceHost,
         provider: AgentProviderID
     ) {
         lastProgramStatus.removeValue(forKey: id)
-        launchTimers[id]?.invalidate()
-        launchTimers.removeValue(forKey: id)
-        compactingTimers[id]?.invalidate()
-        compactingTimers.removeValue(forKey: id)
+        invalidateTimers(for: id)
         removeLaunchScript(for: id)
         let cleanup = providers.cleanup
         io.async { cleanup(provider, id) }
         host.removeSurface(id: id)
     }
 
+    private func invalidateTimers(for id: UUID) {
+        launchTimers.removeValue(forKey: id)?.invalidate()
+        compactingTimers.removeValue(forKey: id)?.invalidate()
+        telemetryDelayTimers.removeValue(forKey: id)?.invalidate()
+    }
+
     private func destroySurface(id: UUID) {
         lastProgramStatus.removeValue(forKey: id)
-        launchTimers[id]?.invalidate()
-        launchTimers.removeValue(forKey: id)
-        compactingTimers[id]?.invalidate()
-        compactingTimers.removeValue(forKey: id)
+        invalidateTimers(for: id)
         removeLaunchScript(for: id)
         if let provider = agents[id]?.provider {
             let cleanup = providers.cleanup
@@ -1513,12 +1335,7 @@ final class AgentBridge {
             guard let completion = $0.unreadCompletion else { return nil }
             return ($0.id, completion)
         })
-        state.lastAppliedCompletions = Dictionary(uniqueKeysWithValues: agents.values.compactMap {
-            guard let completion = $0.lastAppliedCompletion else { return nil }
-            return ($0.id, completion)
-        })
         state.pendingRenames = pendingRenames
-        state.eventOffsets = eventOffsets
         guard let data = try? JSONEncoder().encode(state) else { return }
         let stateFile = root.stateFile
         let write: @Sendable () -> Void = {
@@ -1529,25 +1346,6 @@ final class AgentBridge {
         } else {
             io.async(write)
         }
-    }
-
-    // MARK: - File Watcher
-
-    private func startStatusDirWatcher() {
-        let fd = open(statusDir.path, O_EVTONLY)
-        guard fd >= 0 else {
-            diagnose(.error, "failed to open status dir for watching")
-            return
-        }
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd, eventMask: .write, queue: .main
-        )
-        source.setEventHandler { [weak self] in
-            self?.requestStatusPoll()
-        }
-        source.setCancelHandler { close(fd) }
-        source.resume()
-        statusDirWatcher = source
     }
 
     // MARK: - Cleanup
