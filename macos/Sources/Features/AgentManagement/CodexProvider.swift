@@ -29,10 +29,9 @@ struct CodexProvider: AgentProviderAdapter {
             try AgentHookRuntime.install(root: root)
             let changed = try installHooks()
             if changed {
-                guard AgentConfig.atomicWrite(
+                try AgentConfig.atomicWrite(
                     Data(Self.hookReviewNotice.utf8),
                     to: root.codexHookReviewMarker)
-                else { throw CocoaError(.fileWriteUnknown) }
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o600],
                     ofItemAtPath: root.codexHookReviewMarker.path)
@@ -176,8 +175,8 @@ struct CodexProvider: AgentProviderAdapter {
         return value
     }
 
-    static func clearHookReviewRequired(root: AgentDataRoot) {
-        try? FileManager.default.removeItem(at: root.codexHookReviewMarker)
+    static func clearHookReviewRequired(root: AgentDataRoot) throws {
+        try FileManager.default.removeItemIfPresent(at: root.codexHookReviewMarker)
     }
 
     private var isHookReviewRequired: Bool {

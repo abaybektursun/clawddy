@@ -49,11 +49,29 @@ struct AgentPreferences: Codable, Equatable, Sendable {
 }
 
 enum AgentPreferencesStore {
-    static func load(from url: URL) -> AgentPreferences {
-        guard let data = try? Data(contentsOf: url),
-              let preferences = try? JSONDecoder().decode(AgentPreferences.self, from: data)
-        else { return AgentPreferences() }
-        return preferences
+    /// What `load` read.
+    struct Loaded: Equatable {
+        var preferences: AgentPreferences
+        /// Why the file could not be read, or nil.
+        var error: String?
+    }
+
+    /// The saved preferences, and the defaults while there is no file. A
+    /// file that cannot be read or decoded gives standard mode for every
+    /// provider, the least permissive, and says why.
+    static func load(from url: URL) -> Loaded {
+        do {
+            let data = try Data(contentsOf: url)
+            return Loaded(preferences: try JSONDecoder().decode(AgentPreferences.self, from: data))
+        } catch CocoaError.fileReadNoSuchFile {
+            return Loaded(preferences: AgentPreferences())
+        } catch {
+            return Loaded(
+                preferences: AgentPreferences(
+                    claudeCodeDefaultStartMode: .standard,
+                    codexDefaultStartMode: .standard),
+                error: "Agent defaults could not be read from \(url.path) (\(AgentConfig.describeLoadFailure(error))), so new agents start with standard permissions.")
+        }
     }
 
     static func save(_ preferences: AgentPreferences, to url: URL) throws {
@@ -64,9 +82,7 @@ enum AgentPreferencesStore {
             attributes: [.posixPermissions: 0o700])
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard AgentConfig.atomicWrite(try encoder.encode(preferences), to: url) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
+        try AgentConfig.atomicWrite(try encoder.encode(preferences), to: url)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o600],
             ofItemAtPath: url.path)

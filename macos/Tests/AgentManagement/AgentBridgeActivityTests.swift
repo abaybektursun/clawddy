@@ -126,7 +126,8 @@ struct AgentBridgeActivityTests {
 
         let agent = try h.agent(id)
         #expect(agent.displayState == .thinking)
-        #expect(agent.turnState == .active(turnID: ""))
+        // The script reads `turn_id`, which Claude does not send.
+        #expect(agent.turnState == .active(turnID: nil))
         #expect(agent.runtimeErrorMessage == nil)
         #expect(h.notifier.posted.isEmpty)
         try h.hook(id, "PermissionRequest")
@@ -284,8 +285,8 @@ struct AgentBridgeActivityTests {
     }
 
     /// Status-line metadata is stamped with its file's modification time, and
-    /// metadata from a hook record with the scheduler's time. The hook
-    /// record's empty model then replaces the status line's model.
+    /// metadata from a hook record with the scheduler's time. A hook record
+    /// that carries no model leaves the status line's model as it is.
     @Test func metadataFromStatusLineThenHook() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -306,7 +307,7 @@ struct AgentBridgeActivityTests {
 
         try h.hook(id, "UserPromptSubmit")
         #expect(agent.metadata?.observedAt == h.scheduler.now)
-        #expect(agent.metadata?.modelID == "")
+        #expect(agent.metadata?.modelID == "claude-test")
         #expect(agent.metadata?.displayModel == "Claude Test")
     }
 
@@ -345,7 +346,8 @@ struct AgentBridgeActivityTests {
 
         try run(#"{"session_id":"\#(session)","hook_event_name":"UserPromptSubmit","prompt":"hello","prompt_id":"prompt-1","permission_mode":"default"}"#)
         #expect(agent.displayState == .thinking)
-        #expect(agent.turnState == .active(turnID: ""))
+        // The script reads `turn_id`, which Claude does not send.
+        #expect(agent.turnState == .active(turnID: nil))
 
         try run(#"{"session_id":"\#(session)","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"},"prompt_id":"prompt-1","permission_mode":"default"}"#)
         #expect(agent.displayState == .permission)

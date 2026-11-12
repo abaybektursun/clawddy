@@ -33,6 +33,10 @@ enum AgentHookRuntime {
     /// because an argument-less global entry left by an older Clawddy must not
     /// report a hook error in every Claude session on the machine. The script
     /// only appends records; the bridge writes the session binding from them.
+    /// A hook that has an identity but cannot record its event appends one
+    /// line saying why to `hook-errors.log` in the status folder, and still
+    /// exits 0. Once that log passes 64 KiB it becomes `hook-errors.log.1`,
+    /// replacing the previous one, so the two stay near 128 KiB at most.
     static let script = """
         #!/bin/sh
         umask 077
@@ -50,11 +54,25 @@ enum AgentHookRuntime {
           exit 0
         fi
 
-        mkdir -p "$DIR" 2>/dev/null || exit 0
+        if ! mkdir -p "$DIR" 2>/dev/null; then
+          echo "clawddy-provider-hook.sh: cannot create $DIR" >&2
+          exit 0
+        fi
+
+        fail() {
+          LOG="$DIR/hook-errors.log"
+          SIZE=$(/usr/bin/stat -f %z "$LOG" 2>/dev/null) || SIZE=0
+          if [ "$SIZE" -gt 65536 ]; then
+            /bin/mv -f "$LOG" "$LOG.1" 2>/dev/null
+          fi
+          printf '%s %s %s %s: %s\n' "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "$PROVIDER" "$ID" "${EVENT:-?}" "$1" >> "$LOG" 2>/dev/null
+          exit 0
+        }
 
         INPUT="${TMPDIR:-/tmp}/clawddy-hook-$ID-$$.json"
         trap 'rm -f "$INPUT"' EXIT HUP INT TERM
-        cat > "$INPUT" || exit 0
+        cat > "$INPUT" || fail "could not save the hook input to $INPUT"
         chmod 600 "$INPUT" 2>/dev/null
 
         extract() {
@@ -74,7 +92,7 @@ enum AgentHookRuntime {
         GENERATION=$(sanitize "$GENERATION")
         [ -z "$EVENT_ID" ] && EVENT_ID=$(sanitize "$GENERATION-$$-$(/bin/date +%s)")
 
-        [ -z "$EVENT" ] && exit 0
+        [ -z "$EVENT" ] && fail "the hook input names no hook_event_name"
         EVENTS="$DIR/$ID.events"
         LOCK="$DIR/$ID.events.lock"
         EVENT_LINE=$(printf \
@@ -82,7 +100,8 @@ enum AgentHookRuntime {
           "$EVENT_ID" "$PROVIDER" "$GENERATION" "$EVENT" "$SID" "$TURN" "$MODEL" "$PERMISSION")
         export EVENTS EVENT_LINE
         /usr/bin/lockf -s -k "$LOCK" /bin/sh -c \
-          'printf "%s\n" "$EVENT_LINE" >> "$EVENTS"' 2>/dev/null || true
+          'printf "%s\n" "$EVENT_LINE" >> "$EVENTS"' 2>/dev/null \
+          || fail "could not append to $EVENTS (status $?)"
         exit 0
         """
 
@@ -92,11 +111,8 @@ enum AgentHookRuntime {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
         let scriptURL = Self.scriptURL(root: root)
-        let existing = (try? String(contentsOf: scriptURL, encoding: .utf8)) ?? ""
-        if existing != script {
-            guard AgentConfig.atomicWrite(Data(script.utf8), to: scriptURL) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
+        if try text(of: scriptURL) != script {
+            try AgentConfig.atomicWrite(Data(script.utf8), to: scriptURL)
         }
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
@@ -127,6 +143,16 @@ enum AgentHookRuntime {
         "'\(value.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 
+    /// The file's text, or nil when there is no file. Any other read
+    /// failure throws.
+    static func text(of url: URL) throws -> String? {
+        do {
+            return try String(contentsOf: url, encoding: .utf8)
+        } catch CocoaError.fileReadNoSuchFile {
+            return nil
+        }
+    }
+
     /// Mutates a provider JSON settings file while serializing Clawddy writers
     /// and detecting uncoordinated external replacements before committing.
     /// The transform always receives the latest complete object. The file is
@@ -153,8 +179,8 @@ enum AgentHookRuntime {
                 attributes: [.posixPermissions: 0o600])
             else { throw CocoaError(.fileWriteUnknown) }
         }
+        // The handle closes its descriptor when it is released.
         let lockHandle = try FileHandle(forUpdating: lockURL)
-        defer { try? lockHandle.close() }
         guard lockf(lockHandle.fileDescriptor, F_LOCK, 0) == 0 else {
             throw CocoaError(.fileWriteUnknown)
         }
@@ -176,9 +202,7 @@ enum AgentHookRuntime {
                     [.posixPermissions: 0o600],
                     ofItemAtPath: backupURL.path)
             }
-            guard AgentConfig.atomicWrite(updated, to: url) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
+            try AgentConfig.atomicWrite(updated, to: url)
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600],
                 ofItemAtPath: url.path)

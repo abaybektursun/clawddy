@@ -25,84 +25,6 @@ struct AgentBridgeKnownWrongTests {
         #expect(try h.binding(id).sessionID == "nested-session")
     }
 
-    /// Right: an undecodable record is logged with its offset (P3.9).
-    @Test func knownWrong_undecodableRecordDroppedSilently() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        try h.launch(id)
-        let before = h.diagnostics.messages
-
-        try h.append(id, h.record("UserPromptSubmit", generation: try h.generation(id))
-            .replacingOccurrences(of: #""provider":"claudeCode""#, with: #""provider":"""#))
-        h.poll()
-
-        #expect(try h.agent(id).displayState == .idle)
-        #expect(h.diagnostics.messages == before)
-    }
-
-    /// Right: an unreadable state file is an error the user sees, and is not replaced (P3.9).
-    @Test func knownWrong_corruptStateFileStartsEmpty() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
-        let reported = h.diagnostics.messages.count
-
-        try h.restart {
-            let data = try Data(contentsOf: h.root.stateFile)
-            try data.prefix(data.count / 2).write(to: h.root.stateFile)
-        }
-
-        let agent = try h.agent(id)
-        #expect(agent.unreadCompletion == nil)
-        #expect(agent.displayState == .inactive)
-        #expect(h.diagnostics.messages.dropFirst(reported).allSatisfy { $0.hasPrefix("started") })
-        // The next save replaces the unreadable file.
-        h.config.load()
-        #expect(try h.persisted("unreadCompletions").isEmpty)
-    }
-
-    /// Right: a corrupt preferences file falls back to standard mode and shows the error (P3.9).
-    @Test func knownWrong_corruptPreferencesAreUnrestricted() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let url = h.root.preferencesFile
-        try AgentPreferencesStore.save(
-            AgentPreferences(claudeCodeDefaultStartMode: .standard, codexDefaultStartMode: .standard),
-            to: url)
-        #expect(AgentPreferencesStore.load(from: url).defaultStartMode(for: .claudeCode) == .standard)
-
-        let data = try Data(contentsOf: url)
-        try data.prefix(data.count - 2).write(to: url)
-
-        let loaded = AgentPreferencesStore.load(from: url)
-        #expect(loaded == AgentPreferences())
-        #expect(loaded.defaultStartMode(for: .claudeCode) == .unrestricted)
-        #expect(loaded.defaultStartMode(for: .codex) == .unrestricted)
-    }
-
-    /// Right: an unreadable binding is an explicit failed state, not a fresh session (P3.9).
-    @Test func knownWrong_corruptBindingLaunchesFresh() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        try Data(#"{"provider":"claudeCode","sessionID":"session-"#.utf8)
-            .write(to: h.statusFile(id, "session.json"))
-        h.start()
-
-        try h.activate(id)
-
-        let request = try #require(h.providers.launchRequests.first)
-        #expect(request.session == nil)
-        #expect(request.pendingFork == nil)
-        #expect(try h.agent(id).displayState == .launching)
-    }
-
     /// Right: every removal route deletes the agent's `<uuid>.*` status files (P3.10).
     @Test func knownWrong_externalDeleteLeavesStatusFiles() throws {
         let h = try AgentBridgeHarness()
@@ -122,24 +44,5 @@ struct AgentBridgeKnownWrongTests {
         #expect(h.bridge.deleteAgent(id: other, config: h.config))
         #expect(!h.exists(h.statusFile(other, "events")))
         #expect(!h.exists(h.statusFile(other, "session.json")))
-    }
-
-    /// Right: a field the hook payload did not carry is absent, so the turn ID is nil (P3.9).
-    @Test func knownWrong_emptyTurnIDKeptAsEmptyString() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        try h.launch(id)
-
-        try h.hook(id, "UserPromptSubmit", turn: "")
-        let agent = try h.agent(id)
-        #expect(agent.turnState == .active(turnID: ""))
-
-        try h.hook(id, "Stop", turn: "")
-        #expect(agent.unreadCompletion?.turnID == "")
-        #expect(agent.lastAppliedCompletion?.turnID == "")
-        #expect(agent.metadata?.modelID == "")
-        #expect(agent.metadata?.permissionMode == "")
     }
 }

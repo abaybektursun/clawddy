@@ -8,7 +8,9 @@ struct SettingsView: View {
 
     init(preferencesFile: URL) {
         self.preferencesFile = preferencesFile
-        _preferences = State(initialValue: AgentPreferencesStore.load(from: preferencesFile))
+        let loaded = AgentPreferencesStore.load(from: preferencesFile)
+        _preferences = State(initialValue: loaded.preferences)
+        _persistenceError = State(initialValue: loaded.error)
     }
 
     var body: some View {

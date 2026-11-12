@@ -235,7 +235,8 @@ enum AgentAuthenticationPresentation {
 enum AgentProviderIssue: Error, Equatable, LocalizedError, Sendable {
     case executableMissing(AgentProviderID)
     case integrationFailed(AgentProviderID, String)
-    case invalidSession(AgentProviderID)
+    /// The saved session could not be read; the agent can only start fresh.
+    case unreadableSession(AgentProviderID, String)
     case launchPreparationFailed(AgentProviderID, String)
 
     var errorDescription: String? {
@@ -244,8 +245,8 @@ enum AgentProviderIssue: Error, Equatable, LocalizedError, Sendable {
             return "\(provider.displayName) is not installed or is not available on the login-shell PATH."
         case .integrationFailed(let provider, let reason):
             return "\(provider.displayName) activity tracking could not be configured: \(reason)"
-        case .invalidSession(let provider):
-            return "The saved \(provider.displayName) session is invalid."
+        case .unreadableSession(let provider, let reason):
+            return "The saved \(provider.displayName) session could not be read, so the agent was not started. \(reason)"
         case .launchPreparationFailed(let provider, let reason):
             return "\(provider.displayName) could not be prepared: \(reason)"
         }
@@ -315,6 +316,35 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
     var hasSupportedSchema: Bool { schemaVersion == 1 }
 }
 
+extension AgentRawProviderEvent {
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, eventID, provider, launchGeneration, hookEventName
+        case sessionID, turnID, model, permissionMode, exitStatus
+    }
+
+    /// The hook script writes "" for each field its payload did not carry;
+    /// such a field is absent, never an empty value.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        func text(_ key: CodingKeys) throws -> String? {
+            guard let value = try container.decodeIfPresent(String.self, forKey: key),
+                  !value.isEmpty
+            else { return nil }
+            return value
+        }
+        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
+        eventID = try text(.eventID)
+        provider = try container.decode(AgentProviderID.self, forKey: .provider)
+        launchGeneration = try container.decode(UUID.self, forKey: .launchGeneration)
+        hookEventName = try container.decode(String.self, forKey: .hookEventName)
+        sessionID = try text(.sessionID)
+        turnID = try text(.turnID)
+        model = try text(.model)
+        permissionMode = try text(.permissionMode)
+        exitStatus = try container.decodeIfPresent(Int.self, forKey: .exitStatus)
+    }
+}
+
 enum AgentDomainEvent: Equatable, Sendable {
     case sessionStarted(sessionID: String?, model: String?, permissionMode: String?)
     case turnStarted(turnID: String?)
@@ -334,7 +364,7 @@ protocol AgentProviderAdapter: Sendable {
     func prepareLaunch(_ request: AgentLaunchRequest) -> Result<AgentPreparedLaunch, AgentProviderIssue>
     func normalize(_ event: AgentRawProviderEvent) -> [AgentDomainEvent]
     func probe(environmentPath: String) -> AgentProviderHealth
-    func cleanup(agentID: UUID)
+    func cleanup(agentID: UUID) throws
 }
 
 struct AgentProviderRegistry: Sendable {

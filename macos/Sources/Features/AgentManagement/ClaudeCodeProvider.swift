@@ -203,8 +203,8 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
         return .unavailable("Claude Code returned an unreadable sign-in status.")
     }
 
-    func cleanup(agentID: UUID) {
-        AgentMetadataRuntime.remove(agentID: agentID, root: root)
+    func cleanup(agentID: UUID) throws {
+        try AgentMetadataRuntime.remove(agentID: agentID, root: root)
     }
 
     private struct AuthenticationStatus: Decodable {

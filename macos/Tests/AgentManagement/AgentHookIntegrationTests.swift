@@ -137,7 +137,7 @@ struct AgentHookIntegrationTests {
 
         // The user reviewed the hooks in Codex. A later launch must neither
         // rewrite the file nor ask again.
-        CodexProvider.clearHookReviewRequired(root: sandbox.root)
+        try CodexProvider.clearHookReviewRequired(root: sandbox.root)
         let second = try codex.prepareIntegration().get()
         #expect(second.notice == nil)
         #expect(try Data(contentsOf: hooksFile) == installed)
@@ -250,7 +250,7 @@ struct AgentHookIntegrationTests {
         let request = sandbox.request(.claudeCode)
         let claude = sandbox.bin.appendingPathComponent("claude").path
         func binding() throws -> AgentSessionBinding {
-            try #require(AgentSessionStore.session(
+            try #require(try AgentSessionStore.session(
                 for: request.agentID,
                 provider: .claudeCode,
                 directory: sandbox.root.statusDir))
@@ -288,13 +288,13 @@ struct AgentHookIntegrationTests {
         let request = sandbox.request(.claudeCode)
         let statusDir = sandbox.root.statusDir
         try FileManager.default.createDirectory(at: statusDir, withIntermediateDirectories: true)
-        #expect(AgentSessionStore.write(
+        try AgentSessionStore.write(
             AgentPendingFork(provider: .claudeCode, sourceSessionID: "live-session"),
             for: request.agentID,
-            directory: statusDir))
+            directory: statusDir)
         func launch() throws -> (binding: AgentSessionBinding, script: String) {
             let launch = try sandbox.prepareSurfaceLaunch(request)
-            let binding = try #require(AgentSessionStore.session(
+            let binding = try #require(try AgentSessionStore.session(
                 for: request.agentID,
                 provider: .claudeCode,
                 directory: statusDir))
@@ -322,7 +322,7 @@ struct AgentHookIntegrationTests {
             "--resume", "live-session", "--fork-session", "--session-id", again.binding.sessionID,
         ])))
 
-        AgentSessionStore.clearPendingFork(for: request.agentID, directory: statusDir)
+        try AgentSessionStore.clearPendingFork(for: request.agentID, directory: statusDir)
         let resumed = try launch()
         #expect(resumed.binding == again.binding)
         #expect(resumed.script.contains(command([

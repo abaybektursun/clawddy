@@ -306,11 +306,19 @@ class AgentConfig {
             for taskIndex in projects[projectIndex].tasks.indices {
                 for agentIndex in projects[projectIndex].tasks[taskIndex].agents.indices {
                     let entry = projects[projectIndex].tasks[taskIndex].agents[agentIndex]
-                    guard let provider = AgentSessionStore.persistedProvider(
-                        for: entry.id,
-                        directory: statusDirectory),
-                          provider != entry.provider
-                    else { continue }
+                    let persisted: AgentProviderID?
+                    do {
+                        persisted = try AgentSessionStore.persistedProvider(
+                            for: entry.id,
+                            directory: statusDirectory)
+                    } catch {
+                        // The agent's next launch stops on the same file and
+                        // shows why.
+                        logger.error(
+                            "provider identity of agent \(entry.id) not checked: \(error.localizedDescription)")
+                        continue
+                    }
+                    guard let provider = persisted, provider != entry.provider else { continue }
                     projects[projectIndex].tasks[taskIndex].agents[agentIndex] = AgentEntry(
                         id: entry.id,
                         name: entry.name,
@@ -352,8 +360,11 @@ class AgentConfig {
             logger.error("save encode failed: \(error.localizedDescription)")
             return false
         }
-        guard Self.atomicWrite(data, to: root.agentsFile) else {
-            errorMessage = "Agents configuration could not be saved. Check the file permissions and available storage."
+        do {
+            try Self.atomicWrite(data, to: root.agentsFile)
+        } catch {
+            errorMessage = "Agents configuration could not be saved: \(error.localizedDescription)"
+            logger.error("save failed: \(error.localizedDescription)")
             return false
         }
         // Update the cache only after the durable replacement succeeds.
@@ -587,8 +598,8 @@ class AgentConfig {
             at: root.statusDir,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.url.path)
-        try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.statusDir.path)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.url.path)
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.statusDir.path)
     }
 
     /// Watch the config DIRECTORY (not the file). Handles atomic external edits
@@ -606,8 +617,16 @@ class AgentConfig {
             // Compare raw bytes (definitive — no hash collisions).
             // This also suppresses our own writes (save() updates lastConfigData
             // before the kqueue event arrives).
-            guard let data = try? Data(contentsOf: self.root.agentsFile) else { return }
-            guard data != self.lastConfigData else { return }
+            let changed: Bool
+            do {
+                changed = try Data(contentsOf: self.root.agentsFile) != self.lastConfigData
+            } catch CocoaError.fileReadNoSuchFile {
+                changed = false
+            } catch {
+                // `load` reports why the file cannot be read.
+                changed = true
+            }
+            guard changed else { return }
             self.load()
         }
         source.setCancelHandler { close(fd) }
@@ -617,23 +636,46 @@ class AgentConfig {
 
     // MARK: - Atomic Write
 
-    @discardableResult
-    static func atomicWrite(_ data: Data, to url: URL) -> Bool {
+    /// Replaces `url` with `data` in one step: the bytes go to a temporary
+    /// file beside it, reach the disk, and only then take its place, keeping
+    /// the permissions of the file they replace. Throws what failed; the
+    /// temporary file of a failed write is removed.
+    static func atomicWrite(_ data: Data, to url: URL) throws {
+        let fm = FileManager.default
         let tmp = url.deletingLastPathComponent()
             .appendingPathComponent(UUID().uuidString + ".tmp")
         do {
             try data.write(to: tmp)
-            if FileManager.default.fileExists(atPath: url.path) {
-                _ = try FileManager.default.replaceItem(at: url, withItemAt: tmp,
-                    backupItemName: nil, resultingItemURL: nil)
+            // The handle closes its descriptor when it is released, also
+            // when `synchronize` throws.
+            let handle = try FileHandle(forWritingTo: tmp)
+            try handle.synchronize()
+            try handle.close()
+            if fm.fileExists(atPath: url.path) {
+                _ = try fm.replaceItem(
+                    at: url, withItemAt: tmp, backupItemName: nil, resultingItemURL: nil)
             } else {
-                try FileManager.default.moveItem(at: tmp, to: url)
+                try fm.moveItem(at: tmp, to: url)
             }
-            return true
         } catch {
-            logger.error("atomicWrite failed: \(error.localizedDescription)")
-            try? FileManager.default.removeItem(at: tmp)
-            return false
+            do {
+                try fm.removeItemIfPresent(at: tmp)
+            } catch let cleanup {
+                logger.error("could not remove \(tmp.path): \(cleanup.localizedDescription)")
+            }
+            throw error
+        }
+    }
+}
+
+extension FileManager {
+    /// Removes the item at `url`. An item that is already gone is not an
+    /// error; every other failure throws.
+    func removeItemIfPresent(at url: URL) throws {
+        do {
+            try removeItem(at: url)
+        } catch CocoaError.fileNoSuchFile {
+            // Gone already, which is what was asked for.
         }
     }
 }

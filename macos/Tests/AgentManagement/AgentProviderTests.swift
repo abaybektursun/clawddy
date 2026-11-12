@@ -132,16 +132,16 @@ struct AgentProviderTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("preferences.json")
 
-        var preferences = AgentPreferencesStore.load(from: url)
+        var preferences = AgentPreferencesStore.load(from: url).preferences
         #expect(preferences.defaultStartMode(for: .claudeCode) == .unrestricted)
         #expect(preferences.defaultStartMode(for: .codex) == .unrestricted)
 
         preferences.setDefaultStartMode(.standard, for: .codex)
         try AgentPreferencesStore.save(preferences, to: url)
-        #expect(AgentPreferencesStore.load(from: url) == preferences)
-        #expect(AgentPreferencesStore.load(from: url)
+        #expect(AgentPreferencesStore.load(from: url) == AgentPreferencesStore.Loaded(preferences: preferences))
+        #expect(AgentPreferencesStore.load(from: url).preferences
             .defaultStartMode(for: .claudeCode) == .unrestricted)
-        #expect(AgentPreferencesStore.load(from: url)
+        #expect(AgentPreferencesStore.load(from: url).preferences
             .defaultStartMode(for: .codex) == .standard)
     }
 
@@ -161,11 +161,11 @@ struct AgentProviderTests {
         try Data("legacy-session\n".utf8).write(to: directory
             .appendingPathComponent("\(agentID.uuidString).session"))
 
-        #expect(AgentSessionStore.session(
+        #expect(try AgentSessionStore.session(
             for: agentID,
             provider: .codex,
             directory: directory) == nil)
-        let migrated = AgentSessionStore.session(
+        let migrated = try AgentSessionStore.session(
             for: agentID,
             provider: .claudeCode,
             directory: directory)
@@ -183,12 +183,12 @@ struct AgentProviderTests {
             provider: .codex,
             sessionID: "codex-session",
             launchGeneration: UUID())
-        #expect(AgentSessionStore.write(binding, for: agentID, directory: directory))
-        #expect(AgentSessionStore.session(
+        try AgentSessionStore.write(binding, for: agentID, directory: directory)
+        #expect(try AgentSessionStore.session(
             for: agentID,
             provider: .codex,
             directory: directory) == binding)
-        #expect(AgentSessionStore.session(
+        #expect(try AgentSessionStore.session(
             for: agentID,
             provider: .claudeCode,
             directory: directory) == nil)
@@ -202,7 +202,7 @@ struct AgentProviderTests {
             provider: .codex,
             sessionID: "codex-session",
             launchGeneration: UUID())
-        #expect(AgentSessionStore.write(binding, for: agentID, directory: directory))
+        try AgentSessionStore.write(binding, for: agentID, directory: directory)
 
         var projects = [AgentProject(
             name: "Project",
@@ -229,12 +229,12 @@ struct AgentProviderTests {
         let agentID = UUID()
         let pending = AgentPendingFork(provider: .codex, sourceSessionID: "source.session-1")
 
-        #expect(AgentSessionStore.write(pending, for: agentID, directory: directory))
-        #expect(AgentSessionStore.pendingFork(
+        try AgentSessionStore.write(pending, for: agentID, directory: directory)
+        #expect(try AgentSessionStore.pendingFork(
             for: agentID,
             provider: .codex,
             directory: directory) == pending)
-        #expect(AgentSessionStore.pendingFork(
+        #expect(try AgentSessionStore.pendingFork(
             for: agentID,
             provider: .claudeCode,
             directory: directory) == nil)

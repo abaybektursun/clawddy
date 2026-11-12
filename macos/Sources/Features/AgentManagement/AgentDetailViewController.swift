@@ -423,9 +423,9 @@ private struct AgentDetailHeaderView: View {
                         .accessibilitySortPriority(1)
                     } else {
                         Button {
-                            // A missing session can only be replaced; a
-                            // restart would resume it and fail again.
-                            if agent.missingSessionID != nil {
+                            // A missing or unreadable session can only be
+                            // replaced; a restart would fail on it again.
+                            if agent.canOnlyStartFresh {
                                 model.onStartFresh?(agent.id)
                             } else {
                                 model.onStart?(agent.id)
@@ -465,7 +465,7 @@ private struct AgentDetailHeaderView: View {
     }
 
     private func primaryActionTitle(for agent: AgentInstance) -> String {
-        if agent.missingSessionID != nil { return "Start Fresh" }
+        if agent.canOnlyStartFresh { return "Start Fresh" }
         if agent.interactionState == .authentication { return "Open Terminal to Sign In" }
         if agent.surfaceState == .failed { return "Retry" }
         if agent.processState == .exited { return "Restart" }
@@ -539,7 +539,11 @@ private struct AgentPlaceholderView: View {
                     .padding(.top, 10)
 
                 Button {
-                    model.onStart?(agent.id)
+                    if agent.canOnlyStartFresh {
+                        model.onStartFresh?(agent.id)
+                    } else {
+                        model.onStart?(agent.id)
+                    }
                 } label: {
                     if agent.isStarting {
                         HStack(spacing: 7) {
@@ -613,6 +617,7 @@ private struct AgentPlaceholderView: View {
     }
 
     private func placeholderButtonTitle(for agent: AgentInstance) -> String {
+        if agent.canOnlyStartFresh { return "Start Fresh" }
         if agent.interactionState == .authentication { return "Open Terminal to Sign In" }
         if agent.surfaceState == .failed { return "Retry" }
         if agent.runtimeErrorMessage != nil { return "Restart Agent" }

@@ -73,13 +73,16 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// The saved session this launch found missing. The agent can only
     /// start fresh; `failureMessage` says why.
     var missingSessionID: String?
+    /// The saved session could not be read, so this launch did not start.
+    /// The agent can only start fresh; `failureMessage` says why.
+    var sessionUnreadable = false
 }
 
 enum AgentRuntimeEvent: Equatable, Sendable {
     case launchRequested(generation: UUID)
     case surfaceOpened(generation: UUID, resumedSessionID: String? = nil)
     case launchTimedOut(generation: UUID)
-    case launchFailed(generation: UUID, message: String)
+    case launchFailed(generation: UUID, message: String, sessionUnreadable: Bool = false)
     case interactionRequired(generation: UUID, interaction: AgentInteractionState)
     case provider(
         generation: UUID,
@@ -140,8 +143,9 @@ enum AgentStateReducer {
             state.telemetryHealth = .unavailable(
                 "The terminal is running, but agent activity status is unavailable.")
 
-        case .launchFailed(let generation, let message):
+        case .launchFailed(let generation, let message, let sessionUnreadable):
             guard state.launchGeneration == generation else { break }
+            state.sessionUnreadable = sessionUnreadable
             state.surfaceState = .failed
             state.processState = .exited
             state.activityState = .unknown
@@ -301,6 +305,7 @@ enum AgentStateReducer {
             state.failureMessage = nil
             state.resumingSessionID = nil
             state.missingSessionID = nil
+            state.sessionUnreadable = false
 
         case .completionViewed:
             clearUnread(&state, effects: &effects)

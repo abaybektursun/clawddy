@@ -171,6 +171,43 @@ struct AgentHookScriptTests {
         #expect(!fm.fileExists(atPath: home.appendingPathComponent(".config").path))
     }
 
+    /// A hook that cannot record its event says why in the status folder's
+    /// `hook-errors.log`, still exiting 0; past 64 KiB the log moves to
+    /// `hook-errors.log.1` and starts again.
+    @Test func hookFailuresGoToABoundedErrorLog() throws {
+        let fixture = try HookFixture()
+        defer { fixture.remove() }
+        let agentID = UUID()
+        let log = fixture.status.appendingPathComponent("hook-errors.log")
+        let events = fixture.status.appendingPathComponent("\(agentID.uuidString).events")
+        func run(_ payload: String) throws -> [Substring] {
+            #expect(try fixture.run(
+                agentID: agentID,
+                provider: .claudeCode,
+                generation: UUID(),
+                payload: Data(payload.utf8)) == 0)
+            return try String(contentsOf: log, encoding: .utf8).split(separator: "\n")
+        }
+
+        var lines = try run(#"{"session_id":"session-1"}"#)
+        #expect(lines.count == 1)
+        #expect(lines.last?.hasSuffix(
+            " claudeCode \(agentID.uuidString) ?: the hook input names no hook_event_name") == true)
+        #expect(!FileManager.default.fileExists(atPath: events.path))
+
+        try FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
+        lines = try run(#"{"session_id":"session-1","hook_event_name":"SessionStart"}"#)
+        #expect(lines.count == 2)
+        #expect(lines.last?.hasSuffix(
+            " claudeCode \(agentID.uuidString) SessionStart: could not append to \(events.path) (status 1)") == true)
+
+        let full = Data(repeating: UInt8(ascii: "x"), count: 70_000)
+        try full.write(to: log)
+        lines = try run(#"{"session_id":"session-1"}"#)
+        #expect(lines.count == 1)
+        #expect(try Data(contentsOf: log.appendingPathExtension("1")) == full)
+    }
+
     @Test func providerExitIsJournaledBeforeFallbackShell() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("clawddy-exit-hook-tests-\(UUID().uuidString)")

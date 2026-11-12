@@ -157,7 +157,7 @@ final class FakeProviders: @unchecked Sendable {
         }
         table.cleanup = { provider, id in
             self.cleanups.append(id)
-            self.real.cleanup(provider, id)
+            try self.real.cleanup(provider, id)
         }
         return table
     }

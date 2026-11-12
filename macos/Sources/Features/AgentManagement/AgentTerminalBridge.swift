@@ -192,6 +192,9 @@ final class AgentInstance: Identifiable {
     }
 
     var isUnread: Bool { unreadCompletion != nil }
+    /// The saved session is missing or unreadable, so the agent can only
+    /// start a new one.
+    var canOnlyStartFresh: Bool { missingSessionID != nil || runtime.sessionUnreadable }
     var isStarting: Bool {
         surfaceState == .opening && processState == .launching
     }
@@ -283,20 +286,30 @@ struct AgentLaunchCoordinator: Sendable {
                 return .failure(
                     .launchPreparationFailed(
                         provider,
-                        "The missing session could not be forgotten: \(error.localizedDescription)"),
+                        "The saved session could not be forgotten: \(error.localizedDescription)"),
                     provider: provider,
                     generation: generation,
                     integrationIssue: nil)
             }
         }
-        request.session = AgentSessionStore.session(
-            for: agentID,
-            provider: provider,
-            directory: root.statusDir)
-        request.pendingFork = AgentSessionStore.pendingFork(
-            for: agentID,
-            provider: provider,
-            directory: root.statusDir)
+        do {
+            request.session = try AgentSessionStore.session(
+                for: agentID,
+                provider: provider,
+                directory: root.statusDir)
+            request.pendingFork = try AgentSessionStore.pendingFork(
+                for: agentID,
+                provider: provider,
+                directory: root.statusDir)
+        } catch {
+            // Starting a new session instead would leave the saved
+            // conversation behind without a word.
+            return .failure(
+                .unreadableSession(provider, error.localizedDescription),
+                provider: provider,
+                generation: generation,
+                integrationIssue: nil)
+        }
         let prepared: AgentPreparedLaunch
         switch providers.prepareLaunch(request) {
         case .success(let launch): prepared = launch
@@ -310,13 +323,18 @@ struct AgentLaunchCoordinator: Sendable {
         // A session ID the launch chose is the agent's binding before the
         // process starts; the bridge rewrites the binding from each
         // `SessionStart` of the launch.
-        if let session = prepared.newSession,
-           !AgentSessionStore.write(session, for: agentID, directory: root.statusDir) {
-            return .failure(
-                .launchPreparationFailed(provider, "The new session's ID could not be saved."),
-                provider: provider,
-                generation: generation,
-                integrationIssue: nil)
+        if let session = prepared.newSession {
+            do {
+                try AgentSessionStore.write(session, for: agentID, directory: root.statusDir)
+            } catch {
+                return .failure(
+                    .launchPreparationFailed(
+                        provider,
+                        "The new session's ID could not be saved: \(error.localizedDescription)"),
+                    provider: provider,
+                    generation: generation,
+                    integrationIssue: nil)
+            }
         }
         let integrationIssue: String?
         switch providers.prepareIntegration(provider) {
@@ -353,23 +371,18 @@ struct AgentLaunchCoordinator: Sendable {
             exec "${SHELL:-/bin/zsh}" -l
             """
         let scriptURL = root.newLaunchScriptURL(agentID: agentID)
-        guard AgentConfig.atomicWrite(Data(script.utf8), to: scriptURL) else {
-            return .failure(
-                .launchPreparationFailed(provider, "The launch script could not be created."),
-                provider: provider,
-                generation: generation,
-                integrationIssue: integrationIssue)
-        }
         do {
+            try AgentConfig.atomicWrite(Data(script.utf8), to: scriptURL)
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o700],
                 ofItemAtPath: scriptURL.path)
         } catch {
-            try? FileManager.default.removeItem(at: scriptURL)
+            // A script left behind goes with the launch folder at the next
+            // start.
             return .failure(
                 .launchPreparationFailed(
                     provider,
-                    "The launch script could not be made executable."),
+                    "The launch script could not be created: \(error.localizedDescription)"),
                 provider: provider,
                 generation: generation,
                 integrationIssue: integrationIssue)
@@ -405,8 +418,18 @@ final class AgentBridge {
     var onSurfacePresentationChanged: ((UUID) -> Void)?
     private(set) var currentlyViewedAgentId: UUID?
 
+    /// Files of the data root that could not be read, saved or removed,
+    /// each with what went wrong; the workspace shows them with the
+    /// configuration issue. An entry stays until the same file is next
+    /// saved or removed. The key of an agent's whole set of status files is
+    /// `<status folder>/<agent id>`.
+    private(set) var storageErrors: [URL: String] = [:]
+
     private var lastAggregateState: AggregateState?
     private var isTerminating = false
+    /// Set when `state.json` could not be read at start. The file is then
+    /// kept as it is, and nothing is saved over it until it is removed.
+    private var stateFileUnreadable = false
 
     /// Brings the hook records to `ingest`, from `start` on.
     @ObservationIgnored private(set) var journal: AgentHookJournalSource?
@@ -590,9 +613,17 @@ final class AgentBridge {
         // that has never launched and has no persisted session identity.
         for entry in allEntries {
             if let agent = agents[entry.id] {
-                let persistedProvider = AgentSessionStore.persistedProvider(
-                    for: entry.id,
-                    directory: statusDir)
+                let persistedProvider: AgentProviderID?
+                do {
+                    persistedProvider = try AgentSessionStore.persistedProvider(
+                        for: entry.id,
+                        directory: statusDir)
+                } catch {
+                    // An unreadable binding may name a session, so the agent
+                    // counts as bound and keeps its provider.
+                    diagnose(.error, "provider of \(entry.id) kept: \(error.localizedDescription)")
+                    persistedProvider = agent.provider
+                }
                 switch AgentRuntimeProviderPolicy.decision(
                     current: agent.provider,
                     requested: entry.provider,
@@ -657,10 +688,10 @@ final class AgentBridge {
         activate(id: id, host: host, project: project, discardingSession: false)
     }
 
-    /// Starts a new session for an agent whose saved session is missing:
-    /// the launch forgets the saved session before it reads it.
+    /// Starts a new session for an agent whose saved session is missing or
+    /// unreadable: the launch forgets the saved session before it reads it.
     func startFresh(id: UUID, host: any AgentSurfaceHost, project: AgentProject) {
-        guard agents[id]?.missingSessionID != nil else { return }
+        guard agents[id]?.canOnlyStartFresh == true else { return }
         activate(id: id, host: host, project: project, discardingSession: true)
     }
 
@@ -727,6 +758,7 @@ final class AgentBridge {
             session: nil,
             pendingFork: nil)
         let io = self.io
+        let diagnose = self.diagnose
         io.async { [weak self] in
             let outcome = launchCoordinator.prepare(
                 launchRequest,
@@ -734,9 +766,7 @@ final class AgentBridge {
             io.onMainActor { [weak self] in
                 guard let self, let host = self.surfaceHost else {
                     if case .success(let launch) = outcome {
-                        io.global {
-                            try? FileManager.default.removeItem(at: launch.scriptURL)
-                        }
+                        io.global { Self.removeLaunchScript(at: launch.scriptURL, diagnose) }
                     }
                     return
                 }
@@ -793,7 +823,13 @@ final class AgentBridge {
             guard agent.launchGeneration == generation,
                   agent.provider == provider
             else { return }
-            failLaunch(agent, generation: generation, message: issue.localizedDescription)
+            var sessionUnreadable = false
+            if case .unreadableSession = issue { sessionUnreadable = true }
+            failLaunch(
+                agent,
+                generation: generation,
+                message: issue.localizedDescription,
+                sessionUnreadable: sessionUnreadable)
 
         case .success(let launch):
             guard agent.launchGeneration == launch.generation,
@@ -836,8 +872,15 @@ final class AgentBridge {
         }
     }
 
-    private func failLaunch(_ agent: AgentInstance, generation: UUID, message: String) {
-        apply(.launchFailed(generation: generation, message: message), to: agent)
+    private func failLaunch(
+        _ agent: AgentInstance,
+        generation: UUID,
+        message: String,
+        sessionUnreadable: Bool = false
+    ) {
+        apply(
+            .launchFailed(generation: generation, message: message, sessionUnreadable: sessionUnreadable),
+            to: agent)
         launchTimers[agent.id]?.invalidate()
         launchTimers.removeValue(forKey: agent.id)
         updateAggregate()
@@ -849,13 +892,25 @@ final class AgentBridge {
         guard let source = agents[sourceId] else { return nil }
 
         // Read source session — abort if none
-        guard providers.capabilities(source.provider).fork.isSupported,
-              let sourceSession = AgentSessionStore.session(
-                  for: sourceId,
-                  provider: source.provider,
-                  directory: statusDir)
-        else {
-            diagnose(.error, "fork: no session for source \(sourceId)")
+        guard providers.capabilities(source.provider).fork.isSupported else {
+            diagnose(.error, "fork: \(source.provider.displayName) cannot fork")
+            return nil
+        }
+        let sourceSession: AgentSessionBinding
+        do {
+            guard let session = try AgentSessionStore.session(
+                for: sourceId,
+                provider: source.provider,
+                directory: statusDir)
+            else {
+                diagnose(.error, "fork: no session for source \(sourceId)")
+                return nil
+            }
+            sourceSession = session
+        } catch {
+            reportStorageError(
+                AgentSessionStore.sessionURL(sourceId, statusDir),
+                "\(source.name) could not be forked: \(error.localizedDescription)")
             return nil
         }
 
@@ -883,9 +938,13 @@ final class AgentBridge {
         let pending = AgentPendingFork(
             provider: source.provider,
             sourceSessionID: sourceSession.sessionID)
-        guard AgentSessionStore.write(pending, for: entry.id, directory: statusDir) else {
+        do {
+            try AgentSessionStore.write(pending, for: entry.id, directory: statusDir)
+        } catch {
             deleteAgent(id: entry.id, config: config)
-            diagnose(.error, "fork: failed to persist source session for \(entry.id)")
+            reportStorageError(
+                AgentSessionStore.forkURL(entry.id, statusDir),
+                "\(source.name) could not be forked: \(error.localizedDescription)")
             return nil
         }
 
@@ -940,9 +999,12 @@ final class AgentBridge {
         // Clean status files
         let cleanup = providers.cleanup
         let statusDir = statusDir
-        io.async {
-            AgentSessionStore.removeAll(for: id, directory: statusDir)
-            cleanup(agentProvider, id)
+        store(
+            statusDir.appendingPathComponent(id.uuidString),
+            "The files of removed agent \(id) could not all be deleted"
+        ) {
+            try AgentSessionStore.removeAll(for: id, directory: statusDir)
+            try cleanup(agentProvider, id)
         }
     }
 
@@ -1032,10 +1094,15 @@ final class AgentBridge {
             let provider = agent.provider
             integrationIssues[provider] = nil
             let root = root
-            io.async {
-                AgentSessionStore.clearPendingFork(for: id, directory: root.statusDir)
-                if provider == .codex {
-                    CodexProvider.clearHookReviewRequired(root: root)
+            store(
+                AgentSessionStore.forkURL(id, root.statusDir),
+                "The fork marker of \(agent.name) could not be removed, so its next launch forks again"
+            ) {
+                try AgentSessionStore.clearPendingFork(for: id, directory: root.statusDir)
+            }
+            if provider == .codex {
+                store(root.codexHookReviewMarker, "The Codex hook review notice could not be cleared") {
+                    try CodexProvider.clearHookReviewRequired(root: root)
                 }
             }
             refreshProviderHealth(provider)
@@ -1110,7 +1177,6 @@ final class AgentBridge {
         // After `/clear` that is the new session, not the one launched.
         if case .sessionStarted(let sessionID, _, _) = domainEvent,
            let sessionID,
-           !sessionID.isEmpty,
            let generation = agent.launchGeneration {
             let binding = AgentSessionBinding(
                 provider: provider,
@@ -1118,11 +1184,11 @@ final class AgentBridge {
                 launchGeneration: generation)
             let agentID = agent.id
             let statusDir = statusDir
-            let diagnose = diagnose
-            io.async {
-                if !AgentSessionStore.write(binding, for: agentID, directory: statusDir) {
-                    diagnose(.error, "could not save session \(sessionID) as the binding of \(agentID)")
-                }
+            store(
+                AgentSessionStore.sessionURL(agentID, statusDir),
+                "Session \(sessionID) of \(agent.name) could not be saved, so its next launch may not resume it"
+            ) {
+                try AgentSessionStore.write(binding, for: agentID, directory: statusDir)
             }
         }
 
@@ -1255,9 +1321,20 @@ final class AgentBridge {
         lastProgramStatus.removeValue(forKey: id)
         invalidateTimers(for: id)
         removeLaunchScript(for: id)
-        let cleanup = providers.cleanup
-        io.async { cleanup(provider, id) }
+        removeProviderFiles(of: id, provider: provider)
         host.removeSurface(id: id)
+    }
+
+    /// The provider's files for one launch of the agent, such as Claude's
+    /// settings overlay.
+    private func removeProviderFiles(of id: UUID, provider: AgentProviderID) {
+        let cleanup = providers.cleanup
+        store(
+            root.runtimeDir.appendingPathComponent(id.uuidString),
+            "The session settings of agent \(id) could not be removed"
+        ) {
+            try cleanup(provider, id)
+        }
     }
 
     private func invalidateTimers(for id: UUID) {
@@ -1271,8 +1348,7 @@ final class AgentBridge {
         invalidateTimers(for: id)
         removeLaunchScript(for: id)
         if let provider = agents[id]?.provider {
-            let cleanup = providers.cleanup
-            io.async { cleanup(provider, id) }
+            removeProviderFiles(of: id, provider: provider)
         }
 
         if let agent = agents[id] {
@@ -1334,29 +1410,75 @@ final class AgentBridge {
 
     // MARK: - Persistence
 
+    /// The unread marks the last run saved; none when there is no file. A
+    /// file that cannot be read is reported and kept as evidence: the run
+    /// starts with no unread marks and saves none over it.
     private func loadPersistedState() -> PersistedState {
-        guard let data = try? Data(contentsOf: root.stateFile),
-              let state = try? JSONDecoder().decode(PersistedState.self, from: data)
-        else { return PersistedState() }
-        return state
+        let stateFile = root.stateFile
+        do {
+            return try JSONDecoder().decode(PersistedState.self, from: Data(contentsOf: stateFile))
+        } catch CocoaError.fileReadNoSuchFile {
+            return PersistedState()
+        } catch {
+            stateFileUnreadable = true
+            reportStorageError(
+                stateFile,
+                "Unread marks could not be restored from \(stateFile.path) (\(AgentConfig.describeLoadFailure(error))). The file is kept as it is, and no unread marks are saved until it is removed.")
+            return PersistedState()
+        }
     }
 
     func persistState(synchronously: Bool = false) {
+        let stateFile = root.stateFile
+        if stateFileUnreadable {
+            guard !FileManager.default.fileExists(atPath: stateFile.path) else { return }
+            stateFileUnreadable = false
+        }
         var state = PersistedState()
         state.unreadCompletions = Dictionary(uniqueKeysWithValues: agents.values.compactMap {
             guard let completion = $0.unreadCompletion else { return nil }
             return ($0.id, completion)
         })
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        let stateFile = root.stateFile
-        let write: @Sendable () -> Void = {
-            _ = AgentConfig.atomicWrite(data, to: stateFile)
+        let saved = state
+        store(stateFile, "Unread marks could not be saved", synchronously: synchronously) {
+            try AgentConfig.atomicWrite(JSONEncoder().encode(saved), to: stateFile)
+        }
+    }
+
+    /// Runs `work` on the IO queue and records how it went for `file`: a
+    /// failure is reported and kept in `storageErrors`, which a later success
+    /// for the same file clears.
+    private func store(
+        _ file: URL,
+        _ failure: String,
+        synchronously: Bool = false,
+        _ work: @escaping @Sendable () throws -> Void
+    ) {
+        let io = self.io
+        let diagnose = self.diagnose
+        let run: @Sendable () -> Void = {
+            var message: String?
+            do {
+                try work()
+            } catch {
+                message = "\(failure): \(error.localizedDescription)"
+                diagnose(.error, message ?? failure)
+            }
+            io.onMainActor { [weak self, message] in
+                guard let self, self.storageErrors[file] != message else { return }
+                self.storageErrors[file] = message
+            }
         }
         if synchronously {
-            io.sync(write)
+            io.sync(run)
         } else {
-            io.async(write)
+            io.async(run)
         }
+    }
+
+    private func reportStorageError(_ file: URL, _ message: String) {
+        diagnose(.error, message)
+        storageErrors[file] = message
     }
 
     // MARK: - Cleanup
@@ -1369,9 +1491,10 @@ final class AgentBridge {
     private func removeAllLaunchScripts(synchronously: Bool = false) {
         let urls = Array(launchScripts.values)
         launchScripts.removeAll()
+        let diagnose = diagnose
         let remove: @Sendable () -> Void = {
             for url in urls {
-                try? FileManager.default.removeItem(at: url)
+                Self.removeLaunchScript(at: url, diagnose)
             }
         }
         if synchronously {
@@ -1382,8 +1505,17 @@ final class AgentBridge {
     }
 
     private func removeFileOffMain(_ url: URL) {
-        io.async {
-            try? FileManager.default.removeItem(at: url)
+        let diagnose = diagnose
+        io.async { Self.removeLaunchScript(at: url, diagnose) }
+    }
+
+    /// A launch script that cannot be removed is reported; the next start
+    /// empties the launch folder anyway.
+    nonisolated private static func removeLaunchScript(at url: URL, _ diagnose: AgentDiagnosticsSink) {
+        do {
+            try FileManager.default.removeItemIfPresent(at: url)
+        } catch {
+            diagnose(.error, "launch script \(url.path) could not be removed: \(error.localizedDescription)")
         }
     }
 }

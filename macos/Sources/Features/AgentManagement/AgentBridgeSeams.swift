@@ -180,7 +180,7 @@ struct AgentProviderTable: Sendable {
     /// Probes installation and sign-in with the given PATH.
     var probe: @Sendable (AgentProviderID, String) -> AgentProviderHealth
     /// Removes the provider's files for the agent with this ID.
-    var cleanup: @Sendable (AgentProviderID, UUID) -> Void
+    var cleanup: @Sendable (AgentProviderID, UUID) throws -> Void
 }
 
 extension AgentProviderTable {
@@ -192,7 +192,7 @@ extension AgentProviderTable {
             prepareLaunch: { registry.adapter(for: $0.provider).prepareLaunch($0) },
             normalize: { registry.adapter(for: $0).normalize($1) },
             probe: { registry.adapter(for: $0).probe(environmentPath: $1) },
-            cleanup: { registry.adapter(for: $0).cleanup(agentID: $1) })
+            cleanup: { try registry.adapter(for: $0).cleanup(agentID: $1) })
     }
 }
 

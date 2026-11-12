@@ -1,4 +1,7 @@
 import Foundation
+import os
+
+private let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "AgentMetadata")
 
 /// Builds a per-agent Claude settings overlay that carries the agent's hooks
 /// and captures the official status-line JSON without replacing a user's
@@ -84,7 +87,7 @@ enum AgentMetadataRuntime {
                 at: directory,
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
-            try? FileManager.default.setAttributes(
+            try FileManager.default.setAttributes(
                 [.posixPermissions: 0o700],
                 ofItemAtPath: directory.path)
 
@@ -98,9 +101,7 @@ enum AgentMetadataRuntime {
                 let upstreamURL = directory.appendingPathComponent("upstream-statusline.command")
                 var upstream = effective.statusLine?["command"] as? String ?? ""
                 if upstream.contains(proxyURL.path) { upstream = "" }
-                guard AgentConfig.atomicWrite(Data(upstream.utf8), to: upstreamURL) else {
-                    throw CocoaError(.fileWriteUnknown)
-                }
+                try AgentConfig.atomicWrite(Data(upstream.utf8), to: upstreamURL)
                 try FileManager.default.setAttributes(
                     [.posixPermissions: 0o600],
                     ofItemAtPath: upstreamURL.path)
@@ -118,9 +119,7 @@ enum AgentMetadataRuntime {
                 withJSONObject: overlay,
                 options: [.prettyPrinted, .sortedKeys])
             let settingsURL = directory.appendingPathComponent("settings.json")
-            guard AgentConfig.atomicWrite(data, to: settingsURL) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
+            try AgentConfig.atomicWrite(data, to: settingsURL)
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600],
                 ofItemAtPath: settingsURL.path)
@@ -132,8 +131,8 @@ enum AgentMetadataRuntime {
         }
     }
 
-    static func remove(agentID: UUID, root: AgentDataRoot) {
-        try? FileManager.default.removeItem(
+    static func remove(agentID: UUID, root: AgentDataRoot) throws {
+        try FileManager.default.removeItemIfPresent(
             at: root.runtimeDir.appendingPathComponent(agentID.uuidString))
     }
 
@@ -183,9 +182,24 @@ enum AgentMetadataRuntime {
         return result
     }
 
+    /// The settings object in `url`, or nil when there is no such file. A
+    /// file that cannot be read or parsed is logged with its path and left
+    /// out: one broken settings file of the user's must not keep the agent's
+    /// own hooks from being installed.
     private static func readObject(_ url: URL) -> [String: Any]? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        do {
+            let object = try JSONSerialization.jsonObject(with: Data(contentsOf: url))
+            guard let settings = object as? [String: Any] else {
+                logger.error("ignored \(url.path, privacy: .public): not a JSON object")
+                return nil
+            }
+            return settings
+        } catch CocoaError.fileReadNoSuchFile {
+            return nil
+        } catch {
+            logger.error("ignored \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     static func installProxy(root: AgentDataRoot) throws {
@@ -193,11 +207,8 @@ enum AgentMetadataRuntime {
             at: root.hooksDir,
             withIntermediateDirectories: true)
         let proxyURL = Self.proxyURL(root: root)
-        let existing = (try? String(contentsOf: proxyURL, encoding: .utf8)) ?? ""
-        if existing != proxyScript {
-            guard AgentConfig.atomicWrite(Data(proxyScript.utf8), to: proxyURL) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
+        if try AgentHookRuntime.text(of: proxyURL) != proxyScript {
+            try AgentConfig.atomicWrite(Data(proxyScript.utf8), to: proxyURL)
         }
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],

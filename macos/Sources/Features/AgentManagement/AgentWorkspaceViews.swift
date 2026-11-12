@@ -501,12 +501,15 @@ struct AgentNavigationView: View {
 
                 Spacer()
 
-                if let error = config.errorMessage {
+                let issues = storageIssues
+                if !issues.isEmpty {
+                    let error = issues.map(\.message).joined(separator: "\n")
                     Button("Reveal Configuration Issue", systemImage: "exclamationmark.triangle.fill") {
-                        let target = FileManager.default.fileExists(atPath: config.root.agentsFile.path)
-                            ? config.root.agentsFile
-                            : config.root.url
-                        NSWorkspace.shared.activateFileViewerSelecting([target])
+                        NSWorkspace.shared.activateFileViewerSelecting(issues.map {
+                            FileManager.default.fileExists(atPath: $0.file.path)
+                                ? $0.file
+                                : $0.file.deletingLastPathComponent()
+                        })
                     }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.plain)
@@ -552,6 +555,19 @@ struct AgentNavigationView: View {
             Button(action.confirmLabel, role: action.role) { delete(action) }
             Button("Cancel", role: .cancel) { deletion = nil }
         } message: { Text($0.message) }
+    }
+
+    /// What could not be read or saved, each with its file: the
+    /// configuration's own error first, then the bridge's.
+    private var storageIssues: [(file: URL, message: String)] {
+        var issues: [(file: URL, message: String)] = []
+        if let error = config.errorMessage {
+            issues.append((config.root.agentsFile, error))
+        }
+        issues += bridge.storageErrors
+            .sorted { $0.key.path < $1.key.path }
+            .map { ($0.key, $0.value) }
+        return issues
     }
 
     private var selectedProject: AgentProject? {
@@ -1234,9 +1250,11 @@ private struct NewAgentSheet: View {
         self.taskName = taskName
         self.failureMessage = failureMessage
         self.commit = commit
+        let loaded = AgentPreferencesStore.load(from: bridge.root.preferencesFile)
         _draft = State(initialValue: AgentCreationDraft(
             provider: Self.restoredProvider,
-            preferences: AgentPreferencesStore.load(from: bridge.root.preferencesFile)))
+            preferences: loaded.preferences))
+        _error = State(initialValue: loaded.error)
     }
 
     private static var restoredProvider: AgentProviderID {
@@ -1258,10 +1276,9 @@ private struct NewAgentSheet: View {
         Binding(
             get: { draft.provider },
             set: { provider in
-                draft.transition(
-                    to: provider,
-                    preferences: AgentPreferencesStore.load(from: bridge.root.preferencesFile))
-                error = nil
+                let loaded = AgentPreferencesStore.load(from: bridge.root.preferencesFile)
+                draft.transition(to: provider, preferences: loaded.preferences)
+                error = loaded.error
             })
     }
 

@@ -245,10 +245,10 @@ struct AgentBridgeLifecycleTests {
         defer { h.remove() }
         try h.useRealClaudeLaunch()
         let id = try h.addAgent("Agent")
-        #expect(AgentSessionStore.write(
+        try AgentSessionStore.write(
             AgentSessionBinding(provider: .claudeCode, sessionID: "gone-session", launchGeneration: nil),
             for: id,
-            directory: h.root.statusDir))
+            directory: h.root.statusDir)
         try Data("gone-session\n".utf8).write(to: h.statusFile(id, "session"))
         h.start()
         try h.activate(id)
@@ -292,10 +292,10 @@ struct AgentBridgeLifecycleTests {
         defer { h.remove() }
         try h.useRealClaudeLaunch()
         let id = try h.addAgent("Agent")
-        #expect(AgentSessionStore.write(
+        try AgentSessionStore.write(
             AgentSessionBinding(provider: .claudeCode, sessionID: "saved-session", launchGeneration: nil),
             for: id,
-            directory: h.root.statusDir))
+            directory: h.root.statusDir)
         h.start()
         try h.activate(id)
 

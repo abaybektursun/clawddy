@@ -43,12 +43,12 @@ struct AgentEventJournalTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try (acknowledged + suffix).write(to: journal)
 
-        #expect(AgentEventJournal.compact(
+        #expect(try AgentEventJournal.compact(
             url: journal,
             lockURL: lock,
             acknowledgedOffset: acknowledged.count))
         #expect(try Data(contentsOf: journal) == suffix)
-        #expect(!AgentEventJournal.compact(
+        #expect(try !AgentEventJournal.compact(
             url: journal,
             lockURL: lock,
             acknowledgedOffset: suffix.count + 1))

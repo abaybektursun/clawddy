@@ -2,6 +2,8 @@ import Foundation
 
 struct AgentEventJournalBatch: Equatable {
     let records: [Data]
+    /// The byte at which each record starts.
+    let recordOffsets: [Int]
     let endOffset: Int
 }
 
@@ -11,6 +13,7 @@ enum AgentEventJournal {
     static func read(_ data: Data, from requestedOffset: Int) -> AgentEventJournalBatch {
         let startOffset = requestedOffset <= data.count ? requestedOffset : 0
         var records: [Data] = []
+        var recordOffsets: [Int] = []
         var lineStart = startOffset
         var endOffset = startOffset
 
@@ -18,25 +21,28 @@ enum AgentEventJournal {
             for index in lineStart..<data.count where data[index] == 0x0A {
                 if index > lineStart {
                     records.append(data.subdata(in: lineStart..<index))
+                    recordOffsets.append(lineStart)
                 }
                 lineStart = index + 1
                 endOffset = lineStart
             }
         }
 
-        return AgentEventJournalBatch(records: records, endOffset: endOffset)
+        return AgentEventJournalBatch(records: records, recordOffsets: recordOffsets, endOffset: endOffset)
     }
 
+    /// Cuts off the first `acknowledgedOffset` bytes under the hooks' lock.
+    /// Returns false when that has to wait: the lock is busy or the file is
+    /// shorter than the offset. Throws when the cut cannot be attempted.
     static func compact(
         url: URL,
         lockURL: URL,
         acknowledgedOffset: Int,
         timeout: TimeInterval = 1
-    ) -> Bool {
+    ) throws -> Bool {
         guard acknowledgedOffset >= 0 else { return false }
         let temporary = url.deletingLastPathComponent()
             .appendingPathComponent("\(url.lastPathComponent).compact.\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: temporary) }
 
         let script = """
             size=$(/usr/bin/stat -f %z "$1") || exit 66
@@ -55,12 +61,11 @@ enum AgentEventJournal {
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
+        try process.run()
+        process.waitUntilExit()
+        // The script moves the temporary file into place; one that a failed
+        // run left goes.
+        try FileManager.default.removeItemIfPresent(at: temporary)
+        return process.terminationStatus == 0
     }
 }

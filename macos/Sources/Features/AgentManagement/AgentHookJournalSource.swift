@@ -157,11 +157,16 @@ final class AgentHookJournalSource {
             if case .success(let snapshot) = read.snapshot { statusLine(id, snapshot) }
         }
         for (id, batch) in batches {
-            for record in batch.records {
-                // Dropped without a word until P3.9 makes it loud
-                // (`knownWrong_undecodableRecordDroppedSilently`).
-                guard let event = try? JSONDecoder().decode(AgentRawProviderEvent.self, from: record)
-                else { continue }
+            for (record, offset) in zip(batch.records, batch.recordOffsets) {
+                let event: AgentRawProviderEvent
+                do {
+                    event = try JSONDecoder().decode(AgentRawProviderEvent.self, from: record)
+                } catch {
+                    diagnose(
+                        .error,
+                        "undecodable record in \(Self.journalURL(id, in: statusDir).path) at byte \(offset): \(AgentConfig.describeLoadFailure(error))")
+                    continue
+                }
                 observe(AgentStatusObservation(
                     agentID: id,
                     generation: event.launchGeneration,
@@ -210,12 +215,17 @@ final class AgentHookJournalSource {
         let io = self.io
         let diagnose = self.diagnose
         io.async { [weak self] in
-            let compacted = AgentEventJournal.compact(
-                url: url,
-                lockURL: lockURL,
-                acknowledgedOffset: acknowledgedOffset)
-            if !compacted {
-                diagnose(.debug, "journal compaction deferred for \(id)")
+            var compacted = false
+            do {
+                compacted = try AgentEventJournal.compact(
+                    url: url,
+                    lockURL: lockURL,
+                    acknowledgedOffset: acknowledgedOffset)
+                if !compacted {
+                    diagnose(.debug, "journal compaction deferred for \(id)")
+                }
+            } catch {
+                diagnose(.error, "journal compaction failed for \(id): \(error.localizedDescription)")
             }
             io.onMainQueue { [weak self] in
                 guard let self else { return }
@@ -307,7 +317,10 @@ final class AgentHookJournalSource {
         let data = try handle.readToEnd() ?? Data()
         try handle.close()
         let batch = AgentEventJournal.read(data, from: 0)
-        return AgentEventJournalBatch(records: batch.records, endOffset: start + batch.endOffset)
+        return AgentEventJournalBatch(
+            records: batch.records,
+            recordOffsets: batch.recordOffsets.map { start + $0 },
+            endOffset: start + batch.endOffset)
     }
 
     /// The status-line file, stamped with its modification time; nil when
