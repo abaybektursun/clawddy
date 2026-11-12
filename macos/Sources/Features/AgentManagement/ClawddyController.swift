@@ -796,7 +796,7 @@ final class ClawddyController: NSObject {
         // reports the presented surface, so the first start and restarts are
         // focused and acknowledged without a second activation.
         explicitlyViewedAgentID = id
-        bridge.activateAgent(id: id, app: app, detailVC: detailVC, project: project)
+        bridge.activateAgent(id: id, app: app, host: detailVC, project: project)
         updateViewingState()
         if let agent = bridge.agents[id] {
             workspaceWindow?.title = "\(project.name) — \(agent.name)"

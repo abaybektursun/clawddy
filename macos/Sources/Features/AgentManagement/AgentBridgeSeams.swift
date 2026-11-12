@@ -1,4 +1,5 @@
 import Foundation
+import GhosttyKit
 @preconcurrency import UserNotifications
 import os
 
@@ -201,4 +202,46 @@ enum AgentDiagnostics {
     static let unifiedLog: AgentDiagnosticsSink = { level, message in
         logger.log(level: level, "\(message, privacy: .public)")
     }
+}
+
+// MARK: - Surface host
+
+/// A presented agent terminal. It posts `Ghostty.Notification.ghosttyCloseSurface`
+/// with itself as the object when it closes, and knows whether its process
+/// has exited.
+@MainActor
+protocol AgentSurface: AnyObject {
+    var processExited: Bool { get }
+}
+
+extension Ghostty.SurfaceView: AgentSurface {}
+
+/// What presents agent terminals for the bridge. It is passed to each
+/// activation rather than held by the bridge; `AgentDetailViewController`
+/// is the production host.
+@MainActor
+protocol AgentSurfaceHost: AnyObject {
+    func hasSurface(id: UUID) -> Bool
+    func selectAgent(_ agent: AgentInstance, projectName: String)
+    @discardableResult
+    func showOrSwitch(
+        projectName: String,
+        agent: AgentInstance,
+        focusTerminal: Bool,
+        select: Bool,
+        createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+    ) -> Bool
+    /// Presents the agent's terminal and returns whether it was newly created.
+    @discardableResult
+    func presentPreparedSurface(
+        projectName: String,
+        agent: AgentInstance,
+        createConfig: () -> (ghostty_app_t, Ghostty.SurfaceConfiguration)?
+    ) -> Bool
+    func agentSurface(for id: UUID) -> (any AgentSurface)?
+    func removeSurface(id: UUID)
+}
+
+extension AgentDetailViewController: AgentSurfaceHost {
+    func agentSurface(for id: UUID) -> (any AgentSurface)? { surfaceView(for: id) }
 }

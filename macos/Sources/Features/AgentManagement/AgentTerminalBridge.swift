@@ -306,10 +306,10 @@ private struct AgentAppHandle: @unchecked Sendable {
     var value: ghostty_app_t
 }
 
-private final class AgentDetailReference: @unchecked Sendable {
-    weak var value: AgentDetailViewController?
+private final class AgentSurfaceHostReference: @unchecked Sendable {
+    weak var value: (any AgentSurfaceHost)?
 
-    init(_ value: AgentDetailViewController) {
+    init(_ value: any AgentSurfaceHost) {
         self.value = value
     }
 }
@@ -476,7 +476,7 @@ final class AgentBridge {
     /// within this window, the state is stale (e.g., user cancelled).
     private static let compactingTimeout: TimeInterval = 30
 
-    private var surfaceViews: [UUID: Ghostty.SurfaceView] = [:]
+    private var surfaceViews: [UUID: any AgentSurface] = [:]
     private var surfaceObservers: [UUID: NSObjectProtocol] = [:]
     private var launchTimers: [UUID: any AgentTimer] = [:]
 
@@ -734,18 +734,20 @@ final class AgentBridge {
     /// Starts or reveals an agent. This never declares the agent viewed:
     /// viewing requires a presented live surface and a key workspace window,
     /// which only the workspace owner can reconcile.
-    func activateAgent(id: UUID, app: ghostty_app_t, detailVC: AgentDetailViewController,
+    func activateAgent(id: UUID, app: ghostty_app_t, host: any AgentSurfaceHost,
                        project: AgentProject) {
         guard let agent = agents[id] else { return }
 
-        if detailVC.hasSurface(id: id), agent.processState == .exited {
-            discardSurfaceForRestart(id: id, detailVC: detailVC, provider: agent.provider)
+        if host.hasSurface(id: id), agent.processState == .exited {
+            discardSurfaceForRestart(id: id, host: host, provider: agent.provider)
         }
 
-        if detailVC.hasSurface(id: id) {
-            _ = detailVC.showOrSwitch(
+        if host.hasSurface(id: id) {
+            _ = host.showOrSwitch(
                 projectName: project.name,
                 agent: agent,
+                focusTerminal: true,
+                select: true,
                 createConfig: { nil })
             return
         }
@@ -753,7 +755,7 @@ final class AgentBridge {
         // A second activation while background preparation is in flight only
         // reveals the existing launch state; it never creates a competing run.
         if agent.surfaceState == .opening, agent.processState == .launching {
-            detailVC.selectAgent(agent, projectName: project.name)
+            host.selectAgent(agent, projectName: project.name)
             return
         }
 
@@ -768,7 +770,7 @@ final class AgentBridge {
         }
         agent.launchTime = scheduler.now
         agent.lastHookTime = nil
-        detailVC.selectAgent(agent, projectName: project.name)
+        host.selectAgent(agent, projectName: project.name)
         scheduleLaunchTimeout(agentID: id, generation: generation)
 
         let provider = agent.provider
@@ -778,7 +780,7 @@ final class AgentBridge {
         let workingDirectory = project.workingDirectory
         let projectName = project.name
         let appHandle = AgentAppHandle(value: app)
-        let detailReference = AgentDetailReference(detailVC)
+        let hostReference = AgentSurfaceHostReference(host)
         let launchCoordinator = AgentLaunchCoordinator(
             providers: providers,
             root: root)
@@ -796,7 +798,7 @@ final class AgentBridge {
         io.async { [weak self] in
             let outcome = launchCoordinator.prepare(launchRequest)
             io.onMainActor { [weak self] in
-                guard let self, let detailVC = detailReference.value else {
+                guard let self, let host = hostReference.value else {
                     if case .success(let launch) = outcome {
                         DispatchQueue.global(qos: .utility).async {
                             try? FileManager.default.removeItem(at: launch.scriptURL)
@@ -810,7 +812,7 @@ final class AgentBridge {
                     projectName: projectName,
                     workingDirectory: workingDirectory,
                     app: appHandle.value,
-                    detailVC: detailVC)
+                    host: host)
             }
         }
     }
@@ -835,7 +837,7 @@ final class AgentBridge {
         projectName: String,
         workingDirectory: String?,
         app: ghostty_app_t,
-        detailVC: AgentDetailViewController
+        host: any AgentSurfaceHost
     ) {
         guard let agent = agents[agentID] else {
             if case .success(let launch) = outcome {
@@ -879,7 +881,7 @@ final class AgentBridge {
             } ?? launch.metadataAvailability
             removeLaunchScript(for: agentID)
             launchScripts[agentID] = launch.scriptURL
-            let isNew = detailVC.presentPreparedSurface(
+            let isNew = host.presentPreparedSurface(
                 projectName: projectName,
                 agent: agent
             ) {
@@ -889,7 +891,7 @@ final class AgentBridge {
                 surfaceConfig.environmentVariables = launch.environment
                 return (app, surfaceConfig)
             }
-            guard isNew, let surface = detailVC.surfaceView(for: agentID) else {
+            guard isNew, let surface = host.agentSurface(for: agentID) else {
                 removeFileOffMain(launch.scriptURL)
                 launchScripts.removeValue(forKey: agentID)
                 return
@@ -1502,11 +1504,11 @@ final class AgentBridge {
 
     // MARK: - Surface Management
 
-    func surfaceView(for id: UUID) -> Ghostty.SurfaceView? { surfaceViews[id] }
+    func surfaceView(for id: UUID) -> (any AgentSurface)? { surfaceViews[id] }
 
     private func discardSurfaceForRestart(
         id: UUID,
-        detailVC: AgentDetailViewController,
+        host: any AgentSurfaceHost,
         provider: AgentProviderID
     ) {
         surfaceViews.removeValue(forKey: id)
@@ -1520,7 +1522,7 @@ final class AgentBridge {
         removeLaunchScript(for: id)
         let cleanup = providers.cleanup
         io.async { cleanup(provider, id) }
-        detailVC.removeSurface(id: id)
+        host.removeSurface(id: id)
         updateMetricsSnapshot()
     }
 
