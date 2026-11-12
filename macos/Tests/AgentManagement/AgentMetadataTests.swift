@@ -76,11 +76,11 @@ struct AgentMetadataTests {
 
     @MainActor
     @Test func metadataFreshnessTracksAuthoritativeLifecycle() {
-        let agent = AgentInstance(entry: AgentEntry(name: "Metadata"))
-        #expect(agent.metadataIsHistorical)
+        #expect(AgentInstance(entry: AgentEntry(name: "Metadata")).metadataIsHistorical)
 
-        agent.surfaceState = .open
-        agent.processState = .running
+        let agent = AgentInstance(
+            entry: AgentEntry(name: "Metadata"),
+            runtime: AgentRuntimeSnapshot(surfaceState: .open, processState: .running))
         agent.metadataAvailability = .available
         #expect(!agent.metadataIsHistorical)
 

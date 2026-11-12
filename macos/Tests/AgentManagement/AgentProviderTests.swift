@@ -428,29 +428,30 @@ struct AgentProviderTests {
     @MainActor
     @Test func unreadCompletionSurvivesProviderExitInPresentationState() {
         let entry = AgentEntry(name: "Codex", provider: .codex)
-        let agent = AgentInstance(entry: entry)
-        agent.surfaceState = .open
-        agent.processState = .exited
-        agent.activityState = .unknown
-        agent.unreadCompletion = AgentCompletionID(
-            provider: .codex,
-            sessionID: "session",
-            turnID: "turn",
-            launchGeneration: UUID(),
-            eventID: "complete")
+        let agent = AgentInstance(entry: entry, runtime: AgentRuntimeSnapshot(
+            surfaceState: .open,
+            processState: .exited,
+            activityState: .unknown,
+            unreadCompletion: AgentCompletionID(
+                provider: .codex,
+                sessionID: "session",
+                turnID: "turn",
+                launchGeneration: UUID(),
+                eventID: "complete")))
 
         #expect(agent.displayState == .finished)
     }
 
     @MainActor
     @Test func persistedUnreadCompletionIsVisibleWithoutARestoredSurface() {
-        let agent = AgentInstance(entry: AgentEntry(name: "Codex", provider: .codex))
-        agent.unreadCompletion = AgentCompletionID(
-            provider: .codex,
-            sessionID: "session",
-            turnID: "turn",
-            launchGeneration: UUID(),
-            eventID: "complete")
+        let agent = AgentInstance(
+            entry: AgentEntry(name: "Codex", provider: .codex),
+            runtime: AgentRuntimeSnapshot(unreadCompletion: AgentCompletionID(
+                provider: .codex,
+                sessionID: "session",
+                turnID: "turn",
+                launchGeneration: UUID(),
+                eventID: "complete")))
         #expect(agent.displayState == .finished)
     }
 

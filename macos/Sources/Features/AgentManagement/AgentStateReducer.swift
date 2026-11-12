@@ -86,6 +86,8 @@ enum AgentRuntimeEvent: Equatable, Sendable {
     case telemetryDelayed(generation: UUID)
     case surfaceDied(generation: UUID?)
     case completionViewed
+    /// The provider's sign-in state, from a health probe.
+    case providerAuthentication(AgentProviderAuthState)
 }
 
 enum AgentRuntimeEffect: Equatable, Sendable {
@@ -284,6 +286,17 @@ enum AgentStateReducer {
 
         case .completionViewed:
             clearUnread(&state, effects: &effects)
+
+        case .providerAuthentication(let authentication):
+            // Only an agent that has never started and has nothing unread
+            // shows its provider's sign-in state.
+            guard state.surfaceState == .inactive,
+                  state.processState == .notStarted,
+                  state.unreadCompletion == nil
+            else { break }
+            state.interactionState = AgentAuthenticationPresentation.reconciledInteraction(
+                current: state.interactionState,
+                authentication: authentication)
         }
 
         return (state, effects)

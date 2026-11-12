@@ -137,10 +137,8 @@ final class ClawddyController: NSObject {
             self?.bridge.environmentPath = path
         }
 
-        // Start the bridge (reconstructs state from disk)
-        bridge.start(config: config)
-
-        // Wire callbacks
+        // Wire callbacks. They and the status item exist before the bridge
+        // starts, because `start` publishes the aggregate state.
         bridge.onAggregateStateChanged = { [weak self] state in
             self?.updateStatusIcon(state)
             self?.onAggregateStateChanged?()
@@ -172,6 +170,9 @@ final class ClawddyController: NSObject {
         }
         item.autosaveName = "ClawddyAgentStatusItem"
         statusItem = item
+
+        // Start the bridge (reconstructs state from disk)
+        bridge.start(config: config)
 
         setupMenu()
 

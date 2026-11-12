@@ -169,22 +169,6 @@ struct AgentBridgeKnownWrongTests {
         #expect(!h.exists(h.statusFile(other, "session.json")))
     }
 
-    /// Right: the bridge publishes its aggregate state at start (P3.1).
-    @Test func knownWrong_aggregateNotPublishedAtStartup() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent")
-        h.start()
-        try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
-
-        try h.restart()
-
-        #expect(h.bridge.aggregateState == .attention)
-        #expect(h.aggregateChanges.isEmpty)
-    }
-
     /// Right: a field the hook payload did not carry is absent, so the turn ID is nil (P3.9).
     @Test func knownWrong_emptyTurnIDKeptAsEmptyString() throws {
         let h = try AgentBridgeHarness()

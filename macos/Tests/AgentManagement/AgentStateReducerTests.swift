@@ -1,8 +1,65 @@
 import Foundation
+import Observation
 import Testing
 @testable import Ghostty
 
 struct AgentStateReducerTests {
+    /// One reducer application is one observable mutation of the agent, so a
+    /// view never sees some fields of an event applied and others not. An
+    /// application that changes nothing is no mutation.
+    @MainActor
+    @Test func applyIsOneObservableMutation() {
+        let agent = AgentInstance(entry: AgentEntry(name: "Agent"))
+        let mutations = MutationCounter {
+            _ = agent.displayState
+            _ = (agent.surfaceState, agent.processState, agent.activityState, agent.interactionState)
+            _ = (agent.telemetryHealth, agent.unreadCompletion, agent.lastAppliedCompletion)
+            _ = (agent.failureMessage, agent.runtimeErrorMessage, agent.launchGeneration)
+            _ = (agent.sessionID, agent.turnState)
+        }
+        let generation = UUID()
+        let now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+
+        // Surface, process, telemetry and generation change.
+        agent.apply(.launchRequested(generation: generation), at: now)
+        #expect(mutations.count == 1)
+
+        // Process, activity, telemetry and session change.
+        agent.apply(providerEvent(
+            generation,
+            id: "start",
+            event: .sessionStarted(sessionID: "session-1", model: nil, permissionMode: nil)), at: now)
+        #expect(mutations.count == 2)
+        #expect(agent.processState == .running && agent.sessionID == "session-1")
+        #expect(agent.lastAuthoritativeChange == now)
+
+        // An event of another launch changes nothing.
+        agent.apply(.surfaceOpened(generation: UUID()), at: now)
+        #expect(mutations.count == 2)
+    }
+
+    /// Only an agent that has never started and has nothing unread shows its
+    /// provider's sign-in state.
+    @Test func providerAuthenticationReachesOnlyNeverStartedAgents() {
+        let signedOut = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(),
+            event: .providerAuthentication(.signedOut)).state
+        #expect(signedOut.interactionState == .authentication)
+        let signedIn = AgentStateReducer.reduce(signedOut, event: .providerAuthentication(.signedIn))
+        #expect(signedIn.state.interactionState == .none)
+        #expect(signedIn.effects.isEmpty)
+
+        let running = runningState(UUID())
+        #expect(AgentStateReducer.reduce(running, event: .providerAuthentication(.signedOut)).state == running)
+        let unread = AgentRuntimeSnapshot(unreadCompletion: AgentCompletionID(
+            provider: .claudeCode,
+            sessionID: "session",
+            turnID: nil,
+            launchGeneration: UUID(),
+            eventID: "stop"))
+        #expect(AgentStateReducer.reduce(unread, event: .providerAuthentication(.signedOut)).state == unread)
+    }
+
     @Test func launchSeparatesSurfaceFromProviderProcess() {
         let generation = UUID()
         var state = AgentStateReducer.reduce(
@@ -606,5 +663,31 @@ struct AgentStateReducerTests {
             eventID: id,
             event: event,
             isViewed: viewed)
+    }
+}
+
+/// Counts every observable mutation of what `read` reads. Observation
+/// tracking reports only the first change, so it is armed again after each
+/// one, and a second mutation within the same call is counted too.
+@MainActor
+private final class MutationCounter {
+    private(set) var count = 0
+    private let read: @MainActor () -> Void
+
+    init(_ read: @escaping @MainActor () -> Void) {
+        self.read = read
+        arm()
+    }
+
+    private func arm() {
+        withObservationTracking {
+            read()
+        } onChange: {
+            // Called on the thread that mutates: the agent is main-actor.
+            MainActor.assumeIsolated {
+                self.count += 1
+                self.arm()
+            }
+        }
     }
 }

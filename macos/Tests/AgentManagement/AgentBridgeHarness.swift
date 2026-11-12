@@ -332,8 +332,8 @@ final class AgentBridgeHarness {
         }
     }
 
-    /// Wires the bridge as `ClawddyController` does, except that the
-    /// callbacks are set before `start`.
+    /// Wires the bridge as `ClawddyController` does: every callback is set
+    /// before `start`, which publishes the aggregate state.
     private func wire() {
         bridge.environmentPath = binFolder.path
         bridge.onAggregateStateChanged = { [weak self] in self?.aggregateChanges.append($0) }

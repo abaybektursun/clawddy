@@ -35,8 +35,27 @@ struct AgentBridgeLifecycleTests {
         let command = try #require(h.host.surfaces[id]?.configuration.command)
         #expect(command.hasPrefix(h.root.launchDir.path + "/"))
         #expect(try h.launchScripts() == [URL(fileURLWithPath: command).lastPathComponent])
-        // Starting a launch publishes no aggregate state.
-        #expect(h.aggregateChanges.isEmpty)
+        // Start publishes the idle aggregate state; starting a launch
+        // publishes none.
+        #expect(h.aggregateChanges == [.idle])
+    }
+
+    /// Flipped from `knownWrong_aggregateNotPublishedAtStartup` (P3.1): a
+    /// relaunch with an unread completion publishes attention at start,
+    /// before any event arrives.
+    @Test func aggregatePublishedAtStartup() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.launch(id)
+        try h.hook(id, "UserPromptSubmit")
+        try h.hook(id, "Stop")
+
+        try h.restart()
+
+        #expect(h.bridge.aggregateState == .attention)
+        #expect(h.aggregateChanges == [.attention])
     }
 
     @Test func secondActivationDuringPreparationStartsNothing() throws {
@@ -124,8 +143,9 @@ struct AgentBridgeLifecycleTests {
         #expect(agent.processState == .exited)
         #expect(h.host.calls == [.select(id)])
         #expect(try h.launchScripts().isEmpty)
-        // The failure raises the aggregate state but posts no notification.
-        #expect(h.aggregateChanges == [.attention])
+        // The failure raises the aggregate state from the idle one published
+        // at start, but posts no notification.
+        #expect(h.aggregateChanges == [.idle, .attention])
         #expect(h.notifier.posted.isEmpty)
 
         h.scheduler.advance(by: 11)
@@ -152,7 +172,7 @@ struct AgentBridgeLifecycleTests {
         #expect(try h.launchScripts().isEmpty)
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
         #expect(h.notifier.posted.first?.content.interruptionLevel == .active)
-        #expect(h.aggregateChanges == [.attention])
+        #expect(h.aggregateChanges == [.idle, .attention])
     }
 
     @Test func forkLaunchUsesPendingForkAndClearsItOnSessionStart() throws {

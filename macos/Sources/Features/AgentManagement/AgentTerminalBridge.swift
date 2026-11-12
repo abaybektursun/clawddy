@@ -126,18 +126,9 @@ final class AgentInstance: Identifiable {
     var name: String
     let provider: AgentProviderID
     var launchProfile: AgentLaunchProfile
-    var surfaceState: AgentSurfaceState = .inactive
-    var processState: AgentProcessState = .notStarted
-    var activityState: AgentActivityState = .unknown
-    var interactionState: AgentInteractionState = .none
-    var telemetryHealth: AgentTelemetryHealth = .notStarted
-    var unreadCompletion: AgentCompletionID?
-    var lastAppliedCompletion: AgentCompletionID?
-    var failureMessage: String?
-    var runtimeErrorMessage: String?
-    var launchGeneration: UUID?
-    var sessionID: String?
-    var turnState: AgentTurnState = .inactive
+    /// The agent's runtime state. Only `apply` assigns it, once per event and
+    /// from the reducer's result, so an observer never sees part of an event.
+    private(set) var runtime: AgentRuntimeSnapshot
     var metadata: AgentSessionMetadata?
     var metadataAvailability: AgentMetadataAvailability = .notStarted
     @ObservationIgnored var lastHookTime: Date?
@@ -146,6 +137,19 @@ final class AgentInstance: Identifiable {
     /// changes list order or steals focus as runtime state evolves.
     @ObservationIgnored var lastAuthoritativeChange: Date?
     @ObservationIgnored var providerEventLedger = AgentProviderEventLedger()
+
+    var surfaceState: AgentSurfaceState { runtime.surfaceState }
+    var processState: AgentProcessState { runtime.processState }
+    var activityState: AgentActivityState { runtime.activityState }
+    var interactionState: AgentInteractionState { runtime.interactionState }
+    var telemetryHealth: AgentTelemetryHealth { runtime.telemetryHealth }
+    var unreadCompletion: AgentCompletionID? { runtime.unreadCompletion }
+    var lastAppliedCompletion: AgentCompletionID? { runtime.lastAppliedCompletion }
+    var failureMessage: String? { runtime.failureMessage }
+    var runtimeErrorMessage: String? { runtime.runtimeErrorMessage }
+    var launchGeneration: UUID? { runtime.launchGeneration }
+    var sessionID: String? { runtime.sessionID }
+    var turnState: AgentTurnState { runtime.turnState }
 
     var displayState: DisplayState {
         if failureMessage != nil { return .failed }
@@ -179,11 +183,14 @@ final class AgentInstance: Identifiable {
         }
     }
 
-    init(entry: AgentEntry) {
+    /// `runtime` is the state the agent starts from: its persisted
+    /// completions, or its provider's sign-in state.
+    init(entry: AgentEntry, runtime: AgentRuntimeSnapshot = AgentRuntimeSnapshot()) {
         id = entry.id
         name = entry.name
         provider = entry.provider
         launchProfile = entry.launchProfile
+        self.runtime = runtime
     }
 
     var isUnread: Bool { unreadCompletion != nil }
@@ -191,36 +198,18 @@ final class AgentInstance: Identifiable {
         surfaceState == .opening && processState == .launching
     }
 
-    var runtimeSnapshot: AgentRuntimeSnapshot {
-        get {
-            AgentRuntimeSnapshot(
-                surfaceState: surfaceState,
-                processState: processState,
-                activityState: activityState,
-                interactionState: interactionState,
-                telemetryHealth: telemetryHealth,
-                unreadCompletion: unreadCompletion,
-                lastAppliedCompletion: lastAppliedCompletion,
-                failureMessage: failureMessage,
-                runtimeErrorMessage: runtimeErrorMessage,
-                launchGeneration: launchGeneration,
-                sessionID: sessionID,
-                turnState: turnState)
+    /// The one way the runtime state changes: one reducer application is at
+    /// most one observable mutation, and none when it changes nothing.
+    @discardableResult
+    func apply(_ event: AgentRuntimeEvent, at now: Date) -> [AgentRuntimeEffect] {
+        let result = AgentStateReducer.reduce(runtime, event: event)
+        guard result.state != runtime else { return result.effects }
+        let oldDisplayState = displayState
+        runtime = result.state
+        if displayState != oldDisplayState {
+            lastAuthoritativeChange = now
         }
-        set {
-            surfaceState = newValue.surfaceState
-            processState = newValue.processState
-            activityState = newValue.activityState
-            interactionState = newValue.interactionState
-            telemetryHealth = newValue.telemetryHealth
-            unreadCompletion = newValue.unreadCompletion
-            lastAppliedCompletion = newValue.lastAppliedCompletion
-            failureMessage = newValue.failureMessage
-            runtimeErrorMessage = newValue.runtimeErrorMessage
-            launchGeneration = newValue.launchGeneration
-            sessionID = newValue.sessionID
-            turnState = newValue.turnState
-        }
+        return result.effects
     }
 }
 
@@ -496,11 +485,10 @@ final class AgentBridge {
 
         // Reconstruct agents from config
         for entry in config.allAgentEntries {
-            let agent = AgentInstance(entry: entry)
-            agent.unreadCompletion = persisted.unreadCompletions[entry.id]
-            agent.lastAppliedCompletion = persisted.lastAppliedCompletions[entry.id]
-                ?? agent.unreadCompletion
-            agents[entry.id] = agent
+            let unread = persisted.unreadCompletions[entry.id]
+            agents[entry.id] = AgentInstance(entry: entry, runtime: AgentRuntimeSnapshot(
+                unreadCompletion: unread,
+                lastAppliedCompletion: persisted.lastAppliedCompletions[entry.id] ?? unread))
         }
 
         refreshProviderHealth()
@@ -515,6 +503,10 @@ final class AgentBridge {
 
         // Consume any events that landed after the last persisted offset.
         requestStatusPoll(after: 0)
+
+        // The restored state, unread completions included, reaches the
+        // observers, which the owner attaches before calling `start`.
+        updateAggregate()
 
         diagnose(.info, "started — \(agents.count) agents")
     }
@@ -580,19 +572,20 @@ final class AgentBridge {
         authentication: AgentProviderAuthState
     ) {
         var changed = false
-        for agent in agents.values where agent.provider == provider
-            && agent.surfaceState == .inactive
-            && agent.processState == .notStarted
-            && agent.unreadCompletion == nil {
-            let reconciled = AgentAuthenticationPresentation.reconciledInteraction(
-                current: agent.interactionState,
-                authentication: authentication)
-            if reconciled != agent.interactionState {
-                agent.interactionState = reconciled
-                changed = true
-            }
+        for agent in agents.values where agent.provider == provider {
+            let old = agent.runtime
+            apply(.providerAuthentication(authentication), to: agent)
+            changed = changed || agent.runtime != old
         }
         if changed { updateAggregate() }
+    }
+
+    /// The runtime of an agent that has never launched: it shows its
+    /// provider's sign-in state.
+    private func neverLaunchedRuntime(_ provider: AgentProviderID) -> AgentRuntimeSnapshot {
+        AgentRuntimeSnapshot(
+            interactionState: providerHealth[provider]?.authentication == .signedOut
+                ? .authentication : .none)
     }
 
     // MARK: - Reconciliation (call after config.load())
@@ -603,11 +596,7 @@ final class AgentBridge {
 
         // Add instances for new entries
         for entry in allEntries where agents[entry.id] == nil {
-            let agent = AgentInstance(entry: entry)
-            if providerHealth[entry.provider]?.authentication == .signedOut {
-                agent.interactionState = .authentication
-            }
-            agents[entry.id] = agent
+            agents[entry.id] = AgentInstance(entry: entry, runtime: neverLaunchedRuntime(entry.provider))
         }
 
         // Remove instances for deleted entries
@@ -635,17 +624,14 @@ final class AgentBridge {
                 case .unchanged:
                     break
                 case .replaceInactiveRuntime:
-                    let replacement = AgentInstance(entry: entry)
-                    if providerHealth[entry.provider]?.authentication == .signedOut {
-                        replacement.interactionState = .authentication
-                    }
+                    var runtime = neverLaunchedRuntime(entry.provider)
                     if agent.unreadCompletion?.provider == entry.provider {
-                        replacement.unreadCompletion = agent.unreadCompletion
+                        runtime.unreadCompletion = agent.unreadCompletion
                     }
                     if agent.lastAppliedCompletion?.provider == entry.provider {
-                        replacement.lastAppliedCompletion = agent.lastAppliedCompletion
+                        runtime.lastAppliedCompletion = agent.lastAppliedCompletion
                     }
-                    agents[entry.id] = replacement
+                    agents[entry.id] = AgentInstance(entry: entry, runtime: runtime)
                     continue
                 case .preserveRuntimeAndRestoreConfig:
                     diagnose(
@@ -680,11 +666,7 @@ final class AgentBridge {
             provider: provider,
             launchProfile: launchProfile)
         else { return nil }
-        let instance = AgentInstance(entry: entry)
-        if providerHealth[provider]?.authentication == .signedOut {
-            instance.interactionState = .authentication
-        }
-        agents[entry.id] = instance
+        agents[entry.id] = AgentInstance(entry: entry, runtime: neverLaunchedRuntime(provider))
         return entry
     }
 
@@ -1164,7 +1146,7 @@ final class AgentBridge {
                 let domainEvents = providers.normalize(eventProvider, rawEvent)
                 guard !domainEvents.isEmpty else { continue }
 
-                let oldSnapshot = agent.runtimeSnapshot
+                let oldSnapshot = agent.runtime
                 var effects: [AgentRuntimeEffect] = []
                 var appliedNewProviderFact = false
                 for (domainIndex, domainEvent) in domainEvents.enumerated() {
@@ -1190,7 +1172,7 @@ final class AgentBridge {
                         provider: eventProvider,
                         to: agent)
                 }
-                if oldSnapshot != agent.runtimeSnapshot {
+                if oldSnapshot != agent.runtime {
                     anyChanged = true
                 }
 
@@ -1361,14 +1343,7 @@ final class AgentBridge {
         _ event: AgentRuntimeEvent,
         to agent: AgentInstance
     ) -> [AgentRuntimeEffect] {
-        let old = agent.runtimeSnapshot
-        let oldDisplayState = agent.displayState
-        let result = AgentStateReducer.reduce(old, event: event)
-        agent.runtimeSnapshot = result.state
-        if agent.displayState != oldDisplayState {
-            agent.lastAuthoritativeChange = scheduler.now
-        }
-        return result.effects
+        agent.apply(event, at: scheduler.now)
     }
 
     private func updateCompactingTimer(for agent: AgentInstance) {
