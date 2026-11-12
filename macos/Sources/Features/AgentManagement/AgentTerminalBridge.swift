@@ -141,7 +141,6 @@ final class AgentInstance: Identifiable {
     var metadata: AgentSessionMetadata?
     var metadataAvailability: AgentMetadataAvailability = .notStarted
     @ObservationIgnored var lastHookTime: Date?
-    @ObservationIgnored var launchTime: Date?
     /// Monotonic presentation evidence used only when the user deliberately
     /// asks the workspace to choose among equally urgent agents. It never
     /// changes list order or steals focus as runtime state evolves.
@@ -541,11 +540,6 @@ final class AgentBridge {
             self?.heartbeat()
         }
 
-        // Opt-in diagnostics are available in the exact Release binary without
-        // imposing queue traffic on ordinary production runs.
-        BridgeMetrics.shared.start()
-        updateMetricsSnapshot()
-
         // Consume any events that landed after the last persisted offset.
         requestStatusPoll(after: 0)
 
@@ -568,7 +562,6 @@ final class AgentBridge {
         surfaceObservers.removeAll()
         removeAllLaunchScripts(synchronously: true)
         persistState(synchronously: true)
-        BridgeMetrics.shared.stop()
     }
 
     private var effectiveEnvironmentPath: String {
@@ -642,14 +635,12 @@ final class AgentBridge {
                 agent.interactionState = .authentication
             }
             agents[entry.id] = agent
-            BridgeMetrics.shared.recordMutAgentsDict()
         }
 
         // Remove instances for deleted entries
         for id in agents.keys where !configIds.contains(id) {
             destroySurface(id: id)
             agents.removeValue(forKey: id)
-            BridgeMetrics.shared.recordMutAgentsDict()
             pendingRenames.removeValue(forKey: id)
             eventOffsets.removeValue(forKey: id)
             metadataFileData.removeValue(forKey: id)
@@ -682,7 +673,6 @@ final class AgentBridge {
                         replacement.lastAppliedCompletion = agent.lastAppliedCompletion
                     }
                     agents[entry.id] = replacement
-                    BridgeMetrics.shared.recordMutAgentsDict()
                     continue
                 case .preserveRuntimeAndRestoreConfig:
                     diagnose(
@@ -692,13 +682,11 @@ final class AgentBridge {
                 }
                 if agent.name != entry.name {
                     agent.name = entry.name
-                    BridgeMetrics.shared.recordMutAgentName()
                 }
                 agent.launchProfile = entry.launchProfile
             }
         }
         updateAggregate()
-        updateMetricsSnapshot()
         persistState()
     }
 
@@ -724,8 +712,6 @@ final class AgentBridge {
             instance.interactionState = .authentication
         }
         agents[entry.id] = instance
-        BridgeMetrics.shared.recordMutAgentsDict()
-        updateMetricsSnapshot()
         return entry
     }
 
@@ -768,7 +754,6 @@ final class AgentBridge {
                     interaction: .authentication),
                 to: agent)
         }
-        agent.launchTime = scheduler.now
         agent.lastHookTime = nil
         host.selectAgent(agent, projectName: project.name)
         scheduleLaunchTimeout(agentID: id, generation: generation)
@@ -898,14 +883,11 @@ final class AgentBridge {
             }
             surfaceViews[agentID] = surface
             apply(.surfaceOpened(generation: launch.generation), to: agent)
-            BridgeMetrics.shared.recordSurfaceCreated()
-            updateMetricsSnapshot()
             let observer = NotificationCenter.default.addObserver(
                 forName: Ghostty.Notification.ghosttyCloseSurface,
                 object: surface,
                 queue: .main
             ) { [weak self] _ in
-                BridgeMetrics.shared.recordProcessExitNotif()
                 Task { @MainActor [weak self] in
                     self?.handleSurfaceDeath(id: agentID)
                 }
@@ -976,7 +958,6 @@ final class AgentBridge {
               agent.name != safeName
         else { return }
         agent.name = safeName
-        BridgeMetrics.shared.recordMutAgentName()
 
         guard providers.capabilities(agent.provider).sessionRename.isSupported else {
             pendingRenames.removeValue(forKey: id)
@@ -1014,7 +995,6 @@ final class AgentBridge {
         guard config.removeAgent(id: id) else { return false }
         removeAgentRuntime(id: id)
         updateAggregate()
-        updateMetricsSnapshot()
         persistState()
         return true
     }
@@ -1022,16 +1002,13 @@ final class AgentBridge {
     func removeAgentRuntimes(ids: [UUID]) {
         ids.forEach { removeAgentRuntime(id: $0) }
         updateAggregate()
-        updateMetricsSnapshot()
         persistState()
     }
 
     private func removeAgentRuntime(id: UUID) {
         let agentProvider = agents[id]?.provider ?? .claudeCode
-        BridgeMetrics.shared.recordSurfaceDestroyedDelete()
         destroySurface(id: id)
         agents.removeValue(forKey: id)
-        BridgeMetrics.shared.recordMutAgentsDict()
         pendingRenames.removeValue(forKey: id)
         eventOffsets.removeValue(forKey: id)
         metadataFileData.removeValue(forKey: id)
@@ -1049,7 +1026,6 @@ final class AgentBridge {
 
     private func heartbeat() {
         guard !isTerminating else { return }
-        BridgeMetrics.shared.recordHeartbeat()
 
         // Directory notifications accelerate updates but do not own
         // correctness. This heals dropped/coalesced FSEvents without
@@ -1089,7 +1065,6 @@ final class AgentBridge {
         guard !isTerminating else { return }
         guard !pollPending, !pollInFlight else {
             pollAgainNeeded = true
-            BridgeMetrics.shared.recordPollThrottled()
             return
         }
         pollPending = true
@@ -1097,7 +1072,6 @@ final class AgentBridge {
             guard let self, !self.isTerminating else { return }
             self.pollPending = false
             self.pollInFlight = true
-            BridgeMetrics.shared.recordPollFired()
             self.pollStatusFiles()
         }
     }
@@ -1173,7 +1147,6 @@ final class AgentBridge {
             pollInFlight = false
             return
         }
-        let startTime = CFAbsoluteTimeGetCurrent()
         var anyChanged = false
         var shouldPersist = false
         var compactionCandidates: [(UUID, Int)] = []
@@ -1320,7 +1293,6 @@ final class AgentBridge {
             if batch.endOffset >= Self.journalCompactionThreshold {
                 compactionCandidates.append((id, batch.endOffset))
             }
-            BridgeMetrics.shared.recordMutLastEventContent()
             shouldPersist = true
         }
 
@@ -1333,9 +1305,6 @@ final class AgentBridge {
         for (id, offset) in compactionCandidates {
             scheduleJournalCompaction(id: id, acknowledgedOffset: offset)
         }
-
-        let durationMs = (CFAbsoluteTimeGetCurrent() - startTime) * 1000
-        BridgeMetrics.shared.recordApplyRawEvents(durationMs: durationMs)
         finishStatusPoll()
     }
 
@@ -1440,16 +1409,6 @@ final class AgentBridge {
         if agent.displayState != oldDisplayState {
             agent.lastAuthoritativeChange = scheduler.now
         }
-        if old.processState != result.state.processState {
-            BridgeMetrics.shared.recordMutProcessState()
-        }
-        if old.activityState != result.state.activityState
-            || old.interactionState != result.state.interactionState {
-            BridgeMetrics.shared.recordMutActivityState()
-        }
-        if old.unreadCompletion != result.state.unreadCompletion {
-            BridgeMetrics.shared.recordMutIsUnread()
-        }
         return result.effects
     }
 
@@ -1490,21 +1449,11 @@ final class AgentBridge {
         let current = aggregateState
         if lastAggregateState != current {
             lastAggregateState = current
-            BridgeMetrics.shared.recordMutLastAggregateState()
-            BridgeMetrics.shared.recordAggregateChange()
             onAggregateStateChanged?(current)
         }
     }
 
-    private func updateMetricsSnapshot() {
-        BridgeMetrics.shared.updateSnapshot(
-            agentCount: agents.count,
-            surfaceCount: surfaceViews.count)
-    }
-
     // MARK: - Surface Management
-
-    func surfaceView(for id: UUID) -> (any AgentSurface)? { surfaceViews[id] }
 
     private func discardSurfaceForRestart(
         id: UUID,
@@ -1523,12 +1472,10 @@ final class AgentBridge {
         let cleanup = providers.cleanup
         io.async { cleanup(provider, id) }
         host.removeSurface(id: id)
-        updateMetricsSnapshot()
     }
 
     private func destroySurface(id: UUID) {
         surfaceViews.removeValue(forKey: id)
-        updateMetricsSnapshot()
         launchTimers[id]?.invalidate()
         launchTimers.removeValue(forKey: id)
         compactingTimers[id]?.invalidate()
@@ -1555,7 +1502,6 @@ final class AgentBridge {
 
     private func handleSurfaceDeath(id: UUID) {
         diagnose(.info, "surface death: \(id)")
-        BridgeMetrics.shared.recordSurfaceDestroyedExit()
         destroySurface(id: id)
     }
 
@@ -1652,7 +1598,6 @@ final class AgentBridge {
             fileDescriptor: fd, eventMask: .write, queue: .main
         )
         source.setEventHandler { [weak self] in
-            BridgeMetrics.shared.recordWatcherFire()
             self?.requestStatusPoll()
         }
         source.setCancelHandler { close(fd) }

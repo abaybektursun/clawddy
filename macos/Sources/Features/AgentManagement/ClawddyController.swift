@@ -12,8 +12,7 @@ private final class ControllerReference: @unchecked Sendable {
 
 /// Owns everything Clawddy adds to the app: agent config, bridge, workspace
 /// model, the workspace window and detail controller, the search panel, the
-/// Agent menu, the status item, and the visual-audit scenarios. `AppDelegate`
-/// keeps only lifecycle hooks, so upstream's AppDelegate stays upstream.
+/// Agent menu and the status item. `AppDelegate` keeps only lifecycle hooks, so upstream's AppDelegate stays upstream.
 @MainActor
 final class ClawddyController: NSObject {
     private static let logger = Logger(subsystem: "com.mitchellh.ghostty", category: "Clawddy")
@@ -76,9 +75,7 @@ final class ClawddyController: NSObject {
                 root: root,
                 codexHooksFile: AgentConfig.codexConfigDir.appendingPathComponent("hooks.json"),
                 isProduction: isProduction)))
-        workspaceModel = AgentWorkspaceModel(
-            defaults: isTestHost || AgentVisualAuditPolicy.isEnabled(
-                environment: environment) ? nil : .standard)
+        workspaceModel = AgentWorkspaceModel(defaults: isTestHost ? nil : .standard)
         super.init()
     }
 
@@ -164,11 +161,6 @@ final class ClawddyController: NSObject {
         }
         workspaceModel.reconcile(with: config)
 
-        // Background visual audits own neither global UI nor global input.
-        guard !AgentVisualAuditPolicy.isEnabled(
-            environment: ProcessInfo.processInfo.environment)
-        else { return }
-
         // Status bar item
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
@@ -219,35 +211,6 @@ final class ClawddyController: NSObject {
         }
         if let ref = eventHandlerRef {
             RemoveEventHandler(ref)
-        }
-    }
-
-    /// Non-activating scenarios for background visual verification. Each
-    /// stages state, then orders the window behind the user's active app.
-    func performVisualAudit(_ scenario: AgentVisualAuditScenario) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            switch scenario {
-            case .workspace:
-                self.showWorkspace(activate: false)?.orderBack(nil)
-            case .newAgent, .newAgentConfigured:
-                if let project = self.config.projects.first,
-                   let task = project.tasks.first {
-                    _ = self.workspaceModel.apply(.reveal(
-                        scope: .task(projectID: project.id, taskID: task.id),
-                        agentID: task.agents.first?.id))
-                }
-                self.showWorkspace(activate: false)?.orderBack(nil)
-            case .lifecycleStates:
-                self.configureLifecycleVisualAudit()
-                let firstID = self.config.allAgentEntries.first?.id
-                _ = self.workspaceModel.apply(.reveal(
-                    scope: .all,
-                    agentID: firstID))
-                self.showWorkspace(activate: false)?.orderBack(nil)
-            case .settings:
-                self.settingsController.show(activate: false)
-            }
         }
     }
 
@@ -456,8 +419,6 @@ final class ClawddyController: NSObject {
                 config: config,
                 bridge: bridge,
                 model: workspaceModel,
-                visualAuditScenario: AgentVisualAuditPolicy.scenario(
-                    environment: ProcessInfo.processInfo.environment),
                 onSelectAgent: { [weak self] id, project, intent in
                     self?.selectAgent(id: id, project: project, intent: intent)
                 },
@@ -530,81 +491,6 @@ final class ClawddyController: NSObject {
             workspaceWindow?.makeKeyAndOrderFront(nil)
         }
         return workspaceWindow
-    }
-
-    /// Deterministic, in-memory lifecycle gallery for nonactivating visual QA.
-    /// It never runs providers or writes runtime state and is reachable only
-    /// through the explicit visual-audit process boundary.
-    private func configureLifecycleVisualAudit() {
-        for (index, entry) in config.allAgentEntries.prefix(11).enumerated() {
-            guard let agent = bridge.agents[entry.id] else { continue }
-            switch index {
-            case 0:
-                agent.metadataAvailability = .available
-                var metadata = AgentSessionMetadata(
-                    provider: agent.provider,
-                    modelID: "fable-5",
-                    effortLevel: "xhigh",
-                    sessionID: "visual-audit",
-                    observedAt: Date().addingTimeInterval(-300))
-                metadata.modelDisplayName = "Fable 5"
-                metadata.contextUsedPercentage = 42
-                agent.metadata = metadata
-            case 1:
-                agent.surfaceState = .opening
-                agent.processState = .launching
-            case 2:
-                agent.surfaceState = .open
-                agent.processState = .running
-                agent.activityState = .reasoning
-                agent.telemetryHealth = .live
-            case 3:
-                agent.surfaceState = .open
-                agent.processState = .running
-                agent.activityState = .executing
-                agent.telemetryHealth = .live
-            case 4:
-                agent.surfaceState = .open
-                agent.processState = .running
-                agent.activityState = .idle
-                agent.interactionState = .permission
-                agent.telemetryHealth = .live
-            case 5:
-                agent.surfaceState = .open
-                agent.processState = .running
-                agent.activityState = .idle
-                agent.unreadCompletion = AgentCompletionID(
-                    provider: agent.provider,
-                    sessionID: "visual-audit",
-                    turnID: "turn",
-                    launchGeneration: UUID(),
-                    eventID: "completed")
-            case 6:
-                agent.surfaceState = .open
-                agent.processState = .running
-                agent.activityState = .compacting
-                agent.telemetryHealth = .live
-            case 7:
-                agent.surfaceState = .failed
-                agent.processState = .exited
-                agent.failureMessage = "The provider process could not be started."
-            case 8:
-                agent.surfaceState = .open
-                agent.processState = .running
-                agent.activityState = .idle
-                agent.telemetryHealth = .delayed
-            case 9:
-                agent.surfaceState = .closed
-                agent.processState = .exited
-            case 10:
-                agent.surfaceState = .open
-                agent.processState = .running
-                agent.activityState = .idle
-                agent.telemetryHealth = .live
-            default:
-                break
-            }
-        }
     }
 
     // MARK: - Selection

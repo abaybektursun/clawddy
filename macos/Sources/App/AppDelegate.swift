@@ -238,16 +238,10 @@ class AppDelegate: NSObject,
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 
-        let visualAuditScenario = AgentVisualAuditPolicy.scenario(
-            environment: ProcessInfo.processInfo.environment)
-        let visualAuditMode = visualAuditScenario != nil
-
-        // An isolated visual-audit process must remain inert outside its own
-        // window so it cannot prompt, update, or compete with the user's app.
         // Only the production bundle updates itself: the update feed is stock
         // Ghostty's, and a dev or test build must never replace itself.
         let isProductionBundle = AgentDataRoot.isProductionBundle(Bundle.main.bundleIdentifier)
-        if !visualAuditMode && isProductionBundle {
+        if isProductionBundle {
             updateController.startUpdater()
         }
         menuCheckForUpdates?.isHidden = !isProductionBundle
@@ -355,10 +349,6 @@ class AppDelegate: NSObject,
         // Clawddy agent management
         clawddy.onAggregateStateChanged = { [weak self] in self?.syncDockBadge() }
         clawddy.setup()
-
-        if let visualAuditScenario {
-            clawddy.performVisualAudit(visualAuditScenario)
-        }
 
         switch Ghostty.launchSource {
         case .app:
@@ -838,7 +828,6 @@ class AppDelegate: NSObject,
 
     @MainActor
     private func setDockBadge() {
-        BridgeMetrics.shared.recordDockBadgeUpdate()
         let bellCount = NSApp.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .reduce(0) { $0 + ($1.bell ? 1 : 0) }

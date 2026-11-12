@@ -55,7 +55,6 @@ macos/Sources/Features/AgentManagement/
   AgentCommandPaletteView.swift    — Agent entries for the shared command palette
   AgentSearchPanel.swift           — Floating command-palette panel
   AgentWorkspaceController.swift   — Split-view workspace and window creation
-  BridgeMetrics.swift              — Agent-bridge diagnostics
 ```
 
 Read [Clawddy Agent Architecture](docs/CLAWDDY_ARCHITECTURE.md) for component

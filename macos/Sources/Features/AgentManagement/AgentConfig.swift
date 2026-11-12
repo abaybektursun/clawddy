@@ -718,18 +718,13 @@ class AgentConfig {
             fileDescriptor: fd, eventMask: .write, queue: .main
         )
         source.setEventHandler { [weak self] in
-            BridgeMetrics.shared.recordConfigWatcherFire()
             guard let self else { return }
             // Content-based dedup: only reload if agents.json actually changed.
             // Compare raw bytes (definitive — no hash collisions).
             // This also suppresses our own writes (save() updates lastConfigData
             // before the kqueue event arrives).
             guard let data = try? Data(contentsOf: self.root.agentsFile) else { return }
-            guard data != self.lastConfigData else {
-                BridgeMetrics.shared.recordConfigReloadDeduped()
-                return
-            }
-            BridgeMetrics.shared.recordConfigReload()
+            guard data != self.lastConfigData else { return }
             self.load()
         }
         source.setCancelHandler { close(fd) }
@@ -758,10 +753,4 @@ class AgentConfig {
             return false
         }
     }
-}
-
-// Module-level convenience
-@discardableResult
-func atomicWrite(_ data: Data, to url: URL) -> Bool {
-    AgentConfig.atomicWrite(data, to: url)
 }

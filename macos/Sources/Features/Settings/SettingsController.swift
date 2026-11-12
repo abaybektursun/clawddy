@@ -20,14 +20,10 @@ final class SettingsController: NSWindowController {
         nil
     }
 
-    func show(activate: Bool = true) {
+    func show() {
         guard let window else { return }
-        if activate {
-            showWindow(nil)
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        } else {
-            window.orderBack(nil)
-        }
+        showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 }

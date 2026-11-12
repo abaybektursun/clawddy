@@ -17,37 +17,6 @@ struct AgentWorkspacePolicyTests {
         #expect(independent.scope == .all)
     }
 
-    @Test func visualAuditModeRequiresAnExplicitTruthyEnvironmentValue() {
-        #expect(!AgentVisualAuditPolicy.isEnabled(environment: [:]))
-        #expect(!AgentVisualAuditPolicy.isEnabled(environment: [
-            AgentVisualAuditPolicy.environmentKey: "0",
-        ]))
-        #expect(AgentVisualAuditPolicy.isEnabled(environment: [
-            AgentVisualAuditPolicy.environmentKey: " TRUE ",
-        ]))
-    }
-
-    @Test func visualAuditScenarioAcceptsOnlyKnownExplicitValues() {
-        #expect(AgentVisualAuditPolicy.scenario(environment: [
-            AgentVisualAuditPolicy.environmentKey: "yes",
-        ]) == .workspace)
-        #expect(AgentVisualAuditPolicy.scenario(environment: [
-            AgentVisualAuditPolicy.environmentKey: " NEW-AGENT ",
-        ]) == .newAgent)
-        #expect(AgentVisualAuditPolicy.scenario(environment: [
-            AgentVisualAuditPolicy.environmentKey: "new-agent-configured",
-        ]) == .newAgentConfigured)
-        #expect(AgentVisualAuditPolicy.scenario(environment: [
-            AgentVisualAuditPolicy.environmentKey: "lifecycle-states",
-        ]) == .lifecycleStates)
-        #expect(AgentVisualAuditPolicy.scenario(environment: [
-            AgentVisualAuditPolicy.environmentKey: "settings",
-        ]) == .settings)
-        #expect(AgentVisualAuditPolicy.scenario(environment: [
-            AgentVisualAuditPolicy.environmentKey: "unknown",
-        ]) == nil)
-    }
-
     @Test func creationDraftTransitionsProviderSpecificStateAtomically() {
         let preferences = AgentPreferences(
             claudeCodeDefaultStartMode: .unrestricted,

@@ -825,7 +825,6 @@ struct AgentListView: View {
     var config: AgentConfig
     var bridge: AgentBridge
     var model: AgentWorkspaceModel
-    var visualAuditScenario: AgentVisualAuditScenario?
     let onSelectAgent: (UUID, AgentProject, AgentSelectionIntent) -> Void
     let onReconcileSelection: ([UUID], UUID?) -> Void
     let onActivateAgent: (UUID, AgentProject) -> Void
@@ -852,8 +851,7 @@ struct AgentListView: View {
     }
 
     private var visibleAgents: [AgentListItem] {
-        let ranks = AgentOrdering.ranks(in: config.allAgentEntries.map(\.id))
-        return config.projects.flatMap { project in
+        config.projects.flatMap { project in
             project.tasks.flatMap { task in
                 task.agents.compactMap { entry in
                     guard let instance = bridge.agents[entry.id],
@@ -876,7 +874,7 @@ struct AgentListView: View {
                         instance: instance)
                 }
             }
-        }.sorted { AgentOrdering.precedes($0.id, $1.id, ranks: ranks) }
+        }
     }
 
     private var emptyPresentation: AgentListEmptyPresentation {
@@ -996,12 +994,6 @@ struct AgentListView: View {
         .onChange(of: visibleAgents.map(\.id), initial: true) { _, visibleIDs in
             onReconcileSelection(visibleIDs, mostImportantVisibleAgentID())
         }
-        .onAppear {
-            if visualAuditScenario == .newAgent
-                || visualAuditScenario == .newAgentConfigured {
-                showingNewAgent = true
-            }
-        }
         .sheet(item: $renameTarget) { target in
             WorkspaceNameSheet(
                 title: "Rename Agent",
@@ -1019,7 +1011,6 @@ struct AgentListView: View {
             NewAgentSheet(
                 bridge: bridge,
                 taskName: selectedTask?.1.name ?? "this task",
-                visualAuditScenario: visualAuditScenario,
                 failureMessage: { config.persistenceErrorMessage },
                 commit: { name, provider, launchProfile in
                     guard let (project, task) = selectedTask,
@@ -1224,7 +1215,6 @@ private struct NewAgentSheet: View {
 
     var bridge: AgentBridge
     let taskName: String
-    let visualAuditScenario: AgentVisualAuditScenario?
     let failureMessage: () -> String?
     let commit: (String, AgentProviderID, AgentLaunchProfile) -> Bool
 
@@ -1237,13 +1227,11 @@ private struct NewAgentSheet: View {
     init(
         bridge: AgentBridge,
         taskName: String,
-        visualAuditScenario: AgentVisualAuditScenario?,
         failureMessage: @escaping () -> String?,
         commit: @escaping (String, AgentProviderID, AgentLaunchProfile) -> Bool
     ) {
         self.bridge = bridge
         self.taskName = taskName
-        self.visualAuditScenario = visualAuditScenario
         self.failureMessage = failureMessage
         self.commit = commit
         _draft = State(initialValue: AgentCreationDraft(
@@ -1374,15 +1362,6 @@ private struct NewAgentSheet: View {
         .padding(22)
         .frame(width: 480)
         .onAppear {
-            if visualAuditScenario == .newAgentConfigured {
-                draft.name = "Release review"
-                draft.transition(
-                    to: .codex,
-                    preferences: AgentPreferencesStore.load(from: bridge.root.preferencesFile))
-                draft.modelID = "gpt-5.6"
-                draft.reasoningEffort = "high"
-                showsRunSettings = true
-            }
             nameFocused = true
             bridge.refreshProviderHealth()
         }

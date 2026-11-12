@@ -2,35 +2,6 @@ import Foundation
 import CoreTransferable
 import UniformTypeIdentifiers
 
-/// Explicit process boundary for non-disruptive visual verification. Audit
-/// instances use isolated agent data and remain behind the user's active app;
-/// ordinary launches never enter this mode implicitly.
-enum AgentVisualAuditScenario: String, Equatable, Sendable {
-    case workspace
-    case newAgent = "new-agent"
-    case newAgentConfigured = "new-agent-configured"
-    case lifecycleStates = "lifecycle-states"
-    case settings
-}
-
-enum AgentVisualAuditPolicy {
-    static let environmentKey = "GHOSTTY_AGENT_VISUAL_AUDIT"
-
-    static func scenario(environment: [String: String]) -> AgentVisualAuditScenario? {
-        guard let rawValue = environment[environmentKey]?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-              !rawValue.isEmpty
-        else { return nil }
-        if ["1", "true", "yes"].contains(rawValue) { return .workspace }
-        return AgentVisualAuditScenario(rawValue: rawValue)
-    }
-
-    static func isEnabled(environment: [String: String]) -> Bool {
-        scenario(environment: environment) != nil
-    }
-}
-
 enum AgentSelectionIntent: Equatable, Sendable {
     /// Keeps detail presentation synchronized with authoritative selection.
     case reveal

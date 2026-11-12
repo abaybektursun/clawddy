@@ -60,7 +60,6 @@ or process model.
 | `AgentCommandPaletteView.swift`   | Converts agents into stable, semantically searchable shared-palette commands                                      |
 | `AgentSearchPanel.swift`          | Floating AppKit panel, compatibility material, positioning, and reduced-motion behavior                           |
 | `NativeTextField.swift`           | AppKit field-editor boundary for native editing, paste, undo, IME, and keyboard commands                          |
-| `BridgeMetrics.swift`             | Opt-in snapshot counters and main-thread stall diagnostics for the production binary                              |
 | `AppDelegate.swift`               | Composition root, menus, status item, global shortcut, workspace ownership, routing, and Dock badge               |
 
 The composition is deliberately one-way:
@@ -569,8 +568,7 @@ Startup order:
 4. Recreate inactive, provider-specific runtime instances.
 5. Start config and status directory watchers and consume unseen complete events.
 6. Probe provider installation/auth health away from the main actor.
-7. Start journal/process reconciliation; diagnostics start only when
-   `GHOSTTY_AGENT_METRICS=1` is present in the production process environment.
+7. Start journal/process reconciliation.
 
 Provider hook installation remains a first-launch action, not a startup action.
 The one startup write to a provider file is the production app removing older

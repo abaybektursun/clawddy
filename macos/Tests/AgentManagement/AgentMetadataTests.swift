@@ -47,7 +47,6 @@ struct AgentMetadataTests {
         #expect(metadata.contextUsedTokens == 128_500)
         #expect(metadata.contextFraction == 0.6425)
         #expect(metadata.contextPercentText == "64%")
-        #expect(metadata.currentOutputTokens == 9_000)
         #expect(metadata.totalCostUSD == 3.75)
         #expect(metadata.observedAt == observedAt)
     }

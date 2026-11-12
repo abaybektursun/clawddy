@@ -11,21 +11,14 @@ struct AgentSessionMetadata: Codable, Equatable, Sendable {
     var effortLevel: String?
     var contextWindowSize: Int?
     var contextUsedPercentage: Double?
-    var contextRemainingPercentage: Double?
     var currentInputTokens: Int?
-    var currentOutputTokens: Int?
     var cacheCreationInputTokens: Int?
     var cacheReadInputTokens: Int?
     var totalInputTokens: Int?
     var totalOutputTokens: Int?
     var totalCostUSD: Double?
     var durationMilliseconds: Int?
-    var apiDurationMilliseconds: Int?
-    var linesAdded: Int?
-    var linesRemoved: Int?
     var sessionID: String?
-    var sessionName: String?
-    var transcriptPath: String?
     var runtimeVersion: String?
     var permissionMode: String?
     var thinkingEnabled: Bool?
@@ -99,20 +92,13 @@ struct AgentSessionMetadata: Codable, Equatable, Sendable {
         snapshot.modelDisplayName = payload.model?.displayName
         snapshot.contextWindowSize = payload.contextWindow?.contextWindowSize
         snapshot.contextUsedPercentage = payload.contextWindow?.usedPercentage
-        snapshot.contextRemainingPercentage = payload.contextWindow?.remainingPercentage
         snapshot.currentInputTokens = payload.contextWindow?.currentUsage?.inputTokens
-        snapshot.currentOutputTokens = payload.contextWindow?.currentUsage?.outputTokens
         snapshot.cacheCreationInputTokens = payload.contextWindow?.currentUsage?.cacheCreationInputTokens
         snapshot.cacheReadInputTokens = payload.contextWindow?.currentUsage?.cacheReadInputTokens
         snapshot.totalInputTokens = payload.contextWindow?.totalInputTokens
         snapshot.totalOutputTokens = payload.contextWindow?.totalOutputTokens
         snapshot.totalCostUSD = payload.cost?.totalCostUSD
         snapshot.durationMilliseconds = payload.cost?.totalDurationMS
-        snapshot.apiDurationMilliseconds = payload.cost?.totalAPIDurationMS
-        snapshot.linesAdded = payload.cost?.totalLinesAdded
-        snapshot.linesRemoved = payload.cost?.totalLinesRemoved
-        snapshot.sessionName = payload.sessionName
-        snapshot.transcriptPath = payload.transcriptPath
         snapshot.thinkingEnabled = payload.thinking?.enabled
         return snapshot
     }
@@ -158,13 +144,11 @@ private struct StatusLinePayload: Decodable {
 
     struct Usage: Decodable {
         var inputTokens: Int?
-        var outputTokens: Int?
         var cacheCreationInputTokens: Int?
         var cacheReadInputTokens: Int?
 
         enum CodingKeys: String, CodingKey {
             case inputTokens = "input_tokens"
-            case outputTokens = "output_tokens"
             case cacheCreationInputTokens = "cache_creation_input_tokens"
             case cacheReadInputTokens = "cache_read_input_tokens"
         }
@@ -173,7 +157,6 @@ private struct StatusLinePayload: Decodable {
     struct ContextWindow: Decodable {
         var contextWindowSize: Int?
         var usedPercentage: Double?
-        var remainingPercentage: Double?
         var currentUsage: Usage?
         var totalInputTokens: Int?
         var totalOutputTokens: Int?
@@ -181,7 +164,6 @@ private struct StatusLinePayload: Decodable {
         enum CodingKeys: String, CodingKey {
             case contextWindowSize = "context_window_size"
             case usedPercentage = "used_percentage"
-            case remainingPercentage = "remaining_percentage"
             case currentUsage = "current_usage"
             case totalInputTokens = "total_input_tokens"
             case totalOutputTokens = "total_output_tokens"
@@ -191,16 +173,10 @@ private struct StatusLinePayload: Decodable {
     struct Cost: Decodable {
         var totalCostUSD: Double?
         var totalDurationMS: Int?
-        var totalAPIDurationMS: Int?
-        var totalLinesAdded: Int?
-        var totalLinesRemoved: Int?
 
         enum CodingKeys: String, CodingKey {
             case totalCostUSD = "total_cost_usd"
             case totalDurationMS = "total_duration_ms"
-            case totalAPIDurationMS = "total_api_duration_ms"
-            case totalLinesAdded = "total_lines_added"
-            case totalLinesRemoved = "total_lines_removed"
         }
     }
 
@@ -211,8 +187,6 @@ private struct StatusLinePayload: Decodable {
     var contextWindow: ContextWindow?
     var cost: Cost?
     var sessionID: String?
-    var sessionName: String?
-    var transcriptPath: String?
     var version: String?
     var thinking: Thinking?
 
@@ -220,7 +194,5 @@ private struct StatusLinePayload: Decodable {
         case model, effort, cost, version, thinking
         case contextWindow = "context_window"
         case sessionID = "session_id"
-        case sessionName = "session_name"
-        case transcriptPath = "transcript_path"
     }
 }
