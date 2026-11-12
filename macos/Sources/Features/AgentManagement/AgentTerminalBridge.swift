@@ -285,7 +285,7 @@ private struct AgentMetadataFileUpdate: Sendable {
     let snapshot: AgentSessionMetadata?
 }
 
-private struct AgentPreparedSurfaceLaunch: Sendable {
+struct AgentPreparedSurfaceLaunch: Sendable {
     var provider: AgentProviderID
     var generation: UUID
     var scriptURL: URL
@@ -294,7 +294,7 @@ private struct AgentPreparedSurfaceLaunch: Sendable {
     var integrationIssue: String?
 }
 
-private enum AgentSurfaceLaunchOutcome: Sendable {
+enum AgentSurfaceLaunchOutcome: Sendable {
     case success(AgentPreparedSurfaceLaunch)
     case failure(
         AgentProviderIssue,
@@ -315,7 +315,7 @@ private final class AgentDetailReference: @unchecked Sendable {
     }
 }
 
-private struct AgentLaunchCoordinator: Sendable {
+struct AgentLaunchCoordinator: Sendable {
     let providerRegistry: AgentProviderRegistry
     let root: AgentDataRoot
 
@@ -350,14 +350,12 @@ private struct AgentLaunchCoordinator: Sendable {
         case .failure(let issue): integrationIssue = issue.localizedDescription
         }
 
+        // Agent identity is whatever the provider asked for: none for Claude,
+        // whose hooks carry it as arguments; the CLAWDDY_* names for Codex.
         var environment = AgentTerminalEnvironmentPolicy.explicitEnvironment(
             from: prepared.environment)
         environment["HOME"] = AgentConfig.accountHomeDirectory.path
         environment["PATH"] = request.environmentPath
-        environment["GHOSTTY_AGENT_STATUS_DIR"] = root.statusDir.path
-        environment["GHOSTTY_AGENT_ID"] = agentID.uuidString
-        environment["GHOSTTY_AGENT_PROVIDER"] = provider.rawValue
-        environment["GHOSTTY_AGENT_LAUNCH_GENERATION"] = generation.uuidString
         let command = AgentTerminalEnvironmentPolicy.interactiveCommand(
             executableURL: prepared.executableURL,
             arguments: prepared.arguments)
@@ -477,9 +475,12 @@ final class AgentBridge {
 
     private var statusDir: URL { root.statusDir }
 
-    init(root: AgentDataRoot) {
+    init(root: AgentDataRoot, isProduction: Bool) {
         self.root = root
-        providerRegistry = AgentProviderRegistry(root: root)
+        providerRegistry = AgentProviderRegistry(
+            root: root,
+            codexHooksFile: AgentConfig.codexConfigDir.appendingPathComponent("hooks.json"),
+            isProduction: isProduction)
     }
 
     // MARK: - Lifecycle

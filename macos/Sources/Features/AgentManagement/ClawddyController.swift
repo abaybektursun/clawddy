@@ -23,6 +23,9 @@ final class ClawddyController: NSObject {
     /// item, hot key, probes or preferences, and its data root is a fresh
     /// temporary folder.
     private let isTestHost: Bool
+    /// True only for the production bundle, the one identity that may take
+    /// machine-wide resources and write the providers' global files.
+    private let isProduction: Bool
     /// Open for the life of the process; holds the data root's lock.
     private let rootLock: FileHandle
     let config: AgentConfig
@@ -47,6 +50,8 @@ final class ClawddyController: NSObject {
         let environment = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser
         isTestHost = AgentDataRoot.isRunningTests(environment: environment)
+        let isProduction = AgentDataRoot.isProductionBundle(Bundle.main.bundleIdentifier)
+        self.isProduction = isProduction
         let root = AgentDataRoot.resolve(
             directoryName: Bundle.main.object(
                 forInfoDictionaryKey: AgentDataRoot.infoKey) as? String,
@@ -63,7 +68,7 @@ final class ClawddyController: NSObject {
 
         self.ghostty = ghostty
         config = AgentConfig(root: root)
-        bridge = AgentBridge(root: root)
+        bridge = AgentBridge(root: root, isProduction: isProduction)
         workspaceModel = AgentWorkspaceModel(
             defaults: isTestHost || AgentVisualAuditPolicy.isEnabled(
                 environment: environment) ? nil : .standard)
@@ -98,6 +103,8 @@ final class ClawddyController: NSObject {
 
     func setup() {
         guard !isTestHost else { return }
+
+        removeOldClaudeGlobalHooks()
 
         bridge.environmentPath = AgentEnvironmentResolver.fallbackPath
         AgentEnvironmentResolver.resolve { [weak self] path in
@@ -149,8 +156,28 @@ final class ClawddyController: NSObject {
 
         // Option-Space belongs to whichever app registers it first, so only
         // the production app claims it.
-        if AgentDataRoot.isProductionBundle(Bundle.main.bundleIdentifier) {
+        if isProduction {
             registerSearchHotKey()
+        }
+    }
+
+    /// Claude hooks now travel in each agent's settings overlay. Entries that
+    /// older builds registered globally would record every event a second
+    /// time, so they go before the first launch. A failure leaves them in
+    /// place, where the hook script ignores them because they carry no
+    /// identity, so it is logged rather than stopping the app.
+    private func removeOldClaudeGlobalHooks() {
+        let settingsFile = AgentConfig.claudeConfigDir.appendingPathComponent("settings.json")
+        do {
+            if try ClaudeCodeProvider.removeGlobalHooks(
+                settingsFile: settingsFile,
+                root: config.root,
+                isProduction: isProduction) {
+                Self.logger.info("removed old Clawddy hooks from \(settingsFile.path, privacy: .public)")
+            }
+        } catch {
+            Self.logger.error(
+                "could not remove old Clawddy hooks from \(settingsFile.path, privacy: .public): \(error, privacy: .public)")
         }
     }
 

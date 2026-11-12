@@ -5,19 +5,57 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
     let capabilities: AgentProviderCapabilities = .claudeCode
     let root: AgentDataRoot
 
-    private static let hookedEvents = [
+    static let hookedEvents = [
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
         "PostToolUseFailure", "PermissionRequest", "Stop", "StopFailure",
         "PreCompact", "PostCompact", "SubagentStart", "SubagentStop", "SessionEnd",
     ]
 
+    /// Claude's hooks travel only in each agent's settings overlay, so the
+    /// only file this writes is the hook script in the data root.
     func prepareIntegration() -> Result<AgentIntegrationPreparation, AgentProviderIssue> {
         do {
             try AgentHookRuntime.install(root: root)
-            try installHooks()
             return .success(.ready)
         } catch {
             return .failure(.integrationFailed(id, error.localizedDescription))
+        }
+    }
+
+    /// The `hooks` object of one launch's settings overlay: every hooked
+    /// event runs the hook script with this agent's identity as arguments.
+    func overlayHooks(agentID: UUID, generation: UUID) -> [String: Any] {
+        let group: [String: Any] = [
+            "hooks": [[
+                "type": "command",
+                "command": AgentHookRuntime.command(
+                    root: root,
+                    provider: id,
+                    agentID: agentID,
+                    generation: generation),
+                "timeout": 5,
+            ]],
+        ]
+        return Dictionary(uniqueKeysWithValues: Self.hookedEvents.map { ($0, [group]) })
+    }
+
+    /// Older Clawddy builds registered the hook script globally in Claude's
+    /// `settings.json`. Removes the entries that run `root`'s script and
+    /// nothing else, writing only when one was found. Only the production
+    /// identity, which owns that script path, ever writes the file. Returns
+    /// whether it was written.
+    static func removeGlobalHooks(
+        settingsFile: URL,
+        root: AgentDataRoot,
+        isProduction: Bool
+    ) throws -> Bool {
+        guard isProduction else { return false }
+        return try AgentHookRuntime.updateJSONFile(
+            at: settingsFile,
+            backupURL: settingsFile.appendingPathExtension("clawddy-backup")
+        ) { settings in
+            guard let hooks = settings["hooks"] as? [String: Any] else { return }
+            settings["hooks"] = AgentHookRuntime.removingHandlers(runningScriptOf: root, from: hooks)
         }
     }
 
@@ -28,7 +66,8 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
         let metadata = AgentMetadataRuntime.prepare(
             agentID: request.agentID,
             workingDirectory: request.workingDirectory,
-            root: root)
+            root: root,
+            hooks: overlayHooks(agentID: request.agentID, generation: request.launchGeneration))
         var arguments: [String] = []
 
         if let session = request.session, session.provider == id {
@@ -56,9 +95,8 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
         if let configURL = AgentConfig.claudeConfigEnvironmentOverride {
             environment["CLAUDE_CONFIG_DIR"] = configURL.path
         }
-        let availability: AgentMetadataAvailability = metadata.settingsURL == nil
-            ? .unavailable(metadata.unavailableReason ?? "Session metadata is unavailable.")
-            : .waiting
+        let availability: AgentMetadataAvailability = metadata.unavailableReason
+            .map { .unavailable($0) } ?? .waiting
         return .success(AgentPreparedLaunch(
             executableURL: executable,
             arguments: arguments,
@@ -147,28 +185,6 @@ struct ClaudeCodeProvider: AgentProviderAdapter {
 
     func cleanup(agentID: UUID) {
         AgentMetadataRuntime.remove(agentID: agentID, root: root)
-    }
-
-    private func installHooks() throws {
-        let url = AgentConfig.claudeConfigDir.appendingPathComponent("settings.json")
-        let backup = url.deletingLastPathComponent()
-            .appendingPathComponent("settings.json.clawddy-backup")
-        _ = try AgentHookRuntime.updateJSONFile(at: url, backupURL: backup) { settings in
-            var hooks = AgentHookRuntime.removingIntegrationHandlers(
-                from: settings["hooks"] as? [String: Any] ?? [:])
-            for event in Self.hookedEvents {
-                var groups = hooks[event] as? [[String: Any]] ?? []
-                groups.append([
-                    "hooks": [[
-                        "type": "command",
-                        "command": AgentHookRuntime.command(root: root),
-                        "timeout": 5,
-                    ]],
-                ])
-                hooks[event] = groups
-            }
-            settings["hooks"] = hooks
-        }
     }
 
     private struct AuthenticationStatus: Decodable {

@@ -4,16 +4,27 @@ struct CodexProvider: AgentProviderAdapter {
     let id: AgentProviderID = .codex
     let capabilities: AgentProviderCapabilities = .codex
     let root: AgentDataRoot
+    /// Codex's global `hooks.json`, the only place Codex hooks can live
+    /// without a trust review on every launch.
+    let hooksFile: URL
+    /// Only the production identity writes `hooksFile`. Any change to that
+    /// file makes Codex ask for a hook review in every session on the machine.
+    let isProduction: Bool
 
-    private static let hookedEvents = [
+    static let hookedEvents = [
         "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
         "PermissionRequest", "Stop", "PreCompact", "PostCompact",
         "SubagentStart", "SubagentStop",
     ]
     private static let hookReviewNotice =
         "Review and trust Clawddy’s activity hook in Codex with /hooks. The terminal remains fully usable while status tracking is paused."
+    private static let nonProductionNotice =
+        "Only the production Clawddy installs Codex’s activity hook, so this build does not track Codex status."
 
     func prepareIntegration() -> Result<AgentIntegrationPreparation, AgentProviderIssue> {
+        guard isProduction else {
+            return .success(AgentIntegrationPreparation(notice: Self.nonProductionNotice))
+        }
         do {
             try AgentHookRuntime.install(root: root)
             let changed = try installHooks()
@@ -57,7 +68,14 @@ struct CodexProvider: AgentProviderAdapter {
             arguments = globalArguments
         }
 
-        var environment: [String: String] = [:]
+        // The global hook entry carries only the status folder, so Codex's
+        // agent identity travels in the terminal's environment.
+        var environment: [String: String] = [
+            "CLAWDDY_AGENT_ID": request.agentID.uuidString,
+            "CLAWDDY_AGENT_PROVIDER": id.rawValue,
+            "CLAWDDY_AGENT_GENERATION": request.launchGeneration.uuidString,
+            "CLAWDDY_STATUS_DIR": root.statusDir.path,
+        ]
         if let configURL = AgentConfig.codexConfigEnvironmentOverride {
             environment["CODEX_HOME"] = configURL.path
         }
@@ -166,12 +184,16 @@ struct CodexProvider: AgentProviderAdapter {
         FileManager.default.fileExists(atPath: root.codexHookReviewMarker.path)
     }
 
+    /// Replaces the entries that run this root's hook script with one per
+    /// hooked event, leaving every other entry alone. Writes only when that
+    /// changes the file's content.
     private func installHooks() throws -> Bool {
-        let url = AgentConfig.codexConfigDir.appendingPathComponent("hooks.json")
-        let backup = url.deletingLastPathComponent()
-            .appendingPathComponent("hooks.json.clawddy-backup")
-        return try AgentHookRuntime.updateJSONFile(at: url, backupURL: backup) { file in
-            var hooks = AgentHookRuntime.removingIntegrationHandlers(
+        try AgentHookRuntime.updateJSONFile(
+            at: hooksFile,
+            backupURL: hooksFile.appendingPathExtension("clawddy-backup")
+        ) { file in
+            var hooks = AgentHookRuntime.removingHandlers(
+                runningScriptOf: root,
                 from: file["hooks"] as? [String: Any] ?? [:])
             for event in Self.hookedEvents {
                 var groups = hooks[event] as? [[String: Any]] ?? []

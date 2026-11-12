@@ -6,6 +6,12 @@ struct AgentProviderTests {
     /// Never created: event normalization reads no files.
     private let unusedRoot = AgentDataRoot(
         url: URL(fileURLWithPath: "/nonexistent/clawddy-provider-tests", isDirectory: true))
+    private var unusedCodex: CodexProvider {
+        CodexProvider(
+            root: unusedRoot,
+            hooksFile: unusedRoot.url.appendingPathComponent("hooks.json"),
+            isProduction: false)
+    }
 
     @Test func reasoningEffortOptionsAreProviderData() {
         for provider in AgentProviderID.allCases {
@@ -306,10 +312,15 @@ struct AgentProviderTests {
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: executable.path)
-        let provider = CodexProvider(root: AgentDataRoot(url: directory))
+        let root = AgentDataRoot(url: directory)
+        let provider = CodexProvider(
+            root: root,
+            hooksFile: directory.appendingPathComponent("hooks.json"),
+            isProduction: false)
+        let agentID = UUID()
         let generation = UUID()
         let base = AgentLaunchRequest(
-            agentID: UUID(),
+            agentID: agentID,
             name: "Agent",
             provider: .codex,
             launchProfile: AgentLaunchProfile(
@@ -325,6 +336,12 @@ struct AgentProviderTests {
         #expect(fresh.arguments == [
             "--dangerously-bypass-approvals-and-sandbox",
             "--model", "gpt-5.4", "--config", "model_reasoning_effort=\"xhigh\"",
+        ])
+        #expect(fresh.environment.filter { $0.key.hasPrefix("CLAWDDY_") } == [
+            "CLAWDDY_AGENT_ID": agentID.uuidString,
+            "CLAWDDY_AGENT_PROVIDER": "codex",
+            "CLAWDDY_AGENT_GENERATION": generation.uuidString,
+            "CLAWDDY_STATUS_DIR": root.statusDir.path,
         ])
 
         var resumedRequest = base
@@ -350,18 +367,18 @@ struct AgentProviderTests {
 
     @Test func adaptersNormalizeProviderSpecificHooksToSharedEvents() throws {
         let event = try rawEvent(name: "PermissionRequest")
-        #expect(CodexProvider(root: unusedRoot).normalize(event) == [.turnInteractionChanged(.permission)])
+        #expect(unusedCodex.normalize(event) == [.turnInteractionChanged(.permission)])
         #expect(ClaudeCodeProvider(root: unusedRoot).normalize(event) == [.turnInteractionChanged(.permission)])
 
         let codexFailure = try rawEvent(name: "PostToolUseFailure")
-        #expect(CodexProvider(root: unusedRoot).normalize(codexFailure).isEmpty)
+        #expect(unusedCodex.normalize(codexFailure).isEmpty)
         #expect(ClaudeCodeProvider(root: unusedRoot).normalize(codexFailure) == [
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])
 
         let childCompleted = try rawEvent(name: "SubagentStop")
-        #expect(CodexProvider(root: unusedRoot).normalize(childCompleted) == [
+        #expect(unusedCodex.normalize(childCompleted) == [
             .turnInteractionChanged(.none),
             .turnActivityChanged(.reasoning),
         ])

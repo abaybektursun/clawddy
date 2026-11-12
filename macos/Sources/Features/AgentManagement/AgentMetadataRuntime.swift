@@ -1,7 +1,8 @@
 import Foundation
 
-/// Builds a per-agent Claude settings overlay that captures the official
-/// status-line JSON without replacing a user's existing status line.
+/// Builds a per-agent Claude settings overlay that carries the agent's hooks
+/// and captures the official status-line JSON without replacing a user's
+/// existing status line.
 enum AgentMetadataRuntime {
     struct Preparation: Equatable {
         var settingsURL: URL?
@@ -60,26 +61,24 @@ enum AgentMetadataRuntime {
         exit 0
         """
 
+    /// Writes the agent's settings overlay: `hooks` always, and the status-line
+    /// proxy unless managed settings own the status line. No overlay is
+    /// written when settings disable all hooks, which also disables the
+    /// status line.
     static func prepare(
         agentID: UUID,
         workingDirectory: String?,
-        root: AgentDataRoot
+        root: AgentDataRoot,
+        hooks: [String: Any]
     ) -> Preparation {
         do {
             let effective = effectiveSettings(workingDirectory: workingDirectory)
-            if effective.managedStatusLine {
-                return Preparation(
-                    settingsURL: nil,
-                    unavailableReason: "Managed Claude settings control the status line.")
-            }
             if effective.disableAllHooks {
                 return Preparation(
                     settingsURL: nil,
                     unavailableReason: "Claude hooks are disabled by settings.")
             }
 
-            try installProxy(root: root)
-            let proxyURL = Self.proxyURL(root: root)
             let directory = root.runtimeDir.appendingPathComponent(agentID.uuidString)
             try FileManager.default.createDirectory(
                 at: directory,
@@ -89,24 +88,32 @@ enum AgentMetadataRuntime {
                 [.posixPermissions: 0o700],
                 ofItemAtPath: directory.path)
 
-            let upstreamURL = directory.appendingPathComponent("upstream-statusline.command")
-            var upstream = effective.statusLine?["command"] as? String ?? ""
-            if upstream.contains(proxyURL.path) { upstream = "" }
-            guard AgentConfig.atomicWrite(Data(upstream.utf8), to: upstreamURL) else {
-                throw CocoaError(.fileWriteUnknown)
+            var overlay: [String: Any] = ["hooks": hooks]
+            var unavailableReason: String?
+            if effective.managedStatusLine {
+                unavailableReason = "Managed Claude settings control the status line."
+            } else {
+                try installProxy(root: root)
+                let proxyURL = Self.proxyURL(root: root)
+                let upstreamURL = directory.appendingPathComponent("upstream-statusline.command")
+                var upstream = effective.statusLine?["command"] as? String ?? ""
+                if upstream.contains(proxyURL.path) { upstream = "" }
+                guard AgentConfig.atomicWrite(Data(upstream.utf8), to: upstreamURL) else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: upstreamURL.path)
+
+                var statusLine = effective.statusLine ?? [:]
+                statusLine["type"] = "command"
+                statusLine["command"] = statusLineCommand(
+                    root: root,
+                    agentID: agentID,
+                    upstreamURL: upstreamURL)
+                overlay["statusLine"] = statusLine
             }
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: upstreamURL.path)
 
-            var statusLine = effective.statusLine ?? [:]
-            statusLine["type"] = "command"
-            statusLine["command"] = statusLineCommand(
-                root: root,
-                agentID: agentID,
-                upstreamURL: upstreamURL)
-
-            let overlay: [String: Any] = ["statusLine": statusLine]
             let data = try JSONSerialization.data(
                 withJSONObject: overlay,
                 options: [.prettyPrinted, .sortedKeys])
@@ -117,11 +124,11 @@ enum AgentMetadataRuntime {
             try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600],
                 ofItemAtPath: settingsURL.path)
-            return Preparation(settingsURL: settingsURL, unavailableReason: nil)
+            return Preparation(settingsURL: settingsURL, unavailableReason: unavailableReason)
         } catch {
             return Preparation(
                 settingsURL: nil,
-                unavailableReason: "Session metadata could not be configured.")
+                unavailableReason: "Session settings could not be written: \(error.localizedDescription)")
         }
     }
 

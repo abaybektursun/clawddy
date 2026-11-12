@@ -39,7 +39,7 @@ or process model.
 | `AgentConfig.swift`               | Versioned JSON model, atomic persistence, schema migration, and provider-identity recovery                        |
 | `AgentPreferences.swift`          | Versioned provider start-mode defaults, isolated persistence, and canonical launch policy                         |
 | `AgentProvider.swift`             | Provider protocol, capability matrix, health/auth state, launch records, and provider event vocabulary           |
-| `ClaudeCodeProvider.swift`        | Claude Code command construction, hook installation, auth probe, and event normalization                         |
+| `ClaudeCodeProvider.swift`        | Claude Code command construction, per-agent overlay hooks, old global hook removal, auth probe, and normalization |
 | `CodexProvider.swift`             | Codex command construction, hook installation, auth probe, and event normalization                               |
 | `AgentHookRuntime.swift`          | Provider-tagged POSIX hook, safe shell quoting, and provider-exit journaling                                      |
 | `AgentSessionStore.swift`         | Validated provider-tagged session and fork persistence plus legacy Claude migration                              |
@@ -283,13 +283,29 @@ agent is first launched:
 ~/.config/ghostty-agents/hooks/clawddy-provider-hook.sh
 ```
 
-Claude Code registers it in `<CLAUDE_CONFIG_DIR>/settings.json`; Codex registers
-it in `<CODEX_HOME>/hooks.json`. The registered command is the script path
-followed by the root's status folder. The script records only into the folder
-named by that argument; without it, it exits non-zero and writes nothing. Each adapter removes only older Clawddy-owned
-handlers, preserves unrelated groups and settings, writes mode `0600`, and keeps
-one backup of the original user file. Integration is not performed at app
-startup, so merely opening Clawddy never changes a provider configuration.
+The script's arguments are `STATUS_DIR PROVIDER AGENT_ID GENERATION`, and it
+records only into `STATUS_DIR`. Without a complete identity it drains its input,
+records nothing and exits 0.
+
+- **Claude Code.** Each launch's settings overlay (see Session Metadata Pipeline)
+  hooks `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+  `PostToolUseFailure`, `PermissionRequest`, `Stop`, `StopFailure`,
+  `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop` and `SessionEnd`
+  with all four arguments. No agent variable is exported, so a `claude` started
+  from an agent's tools, which does not receive the overlay, cannot report as
+  that agent. Nothing is written to `<CLAUDE_CONFIG_DIR>/settings.json`; at
+  startup the production app removes the global entries that older builds put
+  there, matched by the exact path of its own script, and writes the file only
+  when it removed one.
+- **Codex.** One global entry per event in `<CODEX_HOME>/hooks.json` passes only
+  `STATUS_DIR`; the identity comes from `CLAWDDY_AGENT_ID`,
+  `CLAWDDY_AGENT_PROVIDER`, `CLAWDDY_AGENT_GENERATION` and `CLAWDDY_STATUS_DIR`
+  in the agent's terminal, and is used only when `CLAWDDY_STATUS_DIR` equals
+  `STATUS_DIR`. Only the production bundle writes that file, at an agent launch,
+  and only when its content would change. It replaces only entries that run its
+  own script path, preserves unrelated groups and settings, writes mode `0600`,
+  and keeps one backup of the file it first replaced. Other bundles never write
+  it and do not track Codex status.
 
 Codex hashes non-managed command hooks and will skip a new or changed definition
 until the user reviews it with `/hooks`. Clawddy does not bypass that trust flow.
@@ -300,8 +316,8 @@ The hook depends only on macOS system tools. For each invocation it:
 
 1. Reads the official hook payload from standard input into a private temporary file.
 2. Uses `plutil` to extract only session, event, turn, model, and permission identifiers.
-3. Adds a stable event ID plus the provider and launch generation supplied by
-   the launcher.
+3. Adds a stable event ID plus the provider and launch generation from its
+   arguments (Claude) or the `CLAWDDY_*` variables (Codex).
 4. Atomically updates the provider-tagged session binding and appends one JSONL
    record while holding the macOS `lockf` lock for that agent. The append waits
    for the short kernel-managed critical section instead of timing out and
@@ -357,8 +373,9 @@ scrape terminal output or read transcript contents.
 
 Before starting or resuming an agent, `AgentMetadataRuntime` creates a private,
 per-agent settings overlay and passes it with Claude's `--settings` option. The
-overlay changes only `statusLine`; lifecycle hooks and all unrelated user,
-project, and local settings continue to come from their normal scopes. The
+overlay adds the agent's hooks and sets `statusLine`; the user's own hooks and
+all unrelated user, project, and local settings continue to come from their
+normal scopes, and Claude merges the overlay's hooks with them. The
 runtime resolves the existing effective status-line object, preserves unknown
 presentation fields, and forwards the exact input to the user's original
 command. Only that command's output reaches Claude, so an existing status line
@@ -375,9 +392,10 @@ it exits non-zero and writes nothing:
 Configuration and status directories are mode `0700`; generated settings,
 upstream-command files, and snapshots are mode `0600`. A publication failure is
 non-fatal and must not prevent the original status-line command from running.
-Managed settings or `disableAllHooks` can prevent the overlay from operating;
-the UI reports that as metadata unavailable without treating the agent launch as
-a failure.
+When managed settings own the status line, the overlay carries only the hooks.
+`disableAllHooks` turns off both, and no overlay is written. The UI reports
+either case as metadata unavailable without treating the agent launch as a
+failure.
 
 The bridge reads only a changed snapshot on its serial I/O queue and decodes an
 allowlist into one provider-neutral `AgentSessionMetadata` value on the main
@@ -555,6 +573,8 @@ Startup order:
    `GHOSTTY_AGENT_METRICS=1` is present in the production process environment.
 
 Provider hook installation remains a first-launch action, not a startup action.
+The one startup write to a provider file is the production app removing older
+builds' global Claude entries, and only when there is one to remove.
 
 Shutdown cancels timers and watchers, removes surface observers, and flushes
 persisted state. Launch scripts live in `<root>/runtime/launch/`; the next start

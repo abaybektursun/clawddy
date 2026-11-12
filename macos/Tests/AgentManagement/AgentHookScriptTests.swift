@@ -112,10 +112,13 @@ struct AgentHookScriptTests {
             .appendingPathComponent(".config/ghostty-agents/status").path))
     }
 
-    /// The real installed script, run without its argument, exits non-zero
-    /// and writes nothing, although agent identity and a status folder are in
-    /// its environment. The command line the installers write carries the
-    /// folder and records into it.
+    /// The real installed script, run without its status folder argument,
+    /// writes nothing, although a Codex agent's identity is in its
+    /// environment. It exits 0, not 1: older builds left argument-less global
+    /// entries in Claude's settings, and those must not report a hook error in
+    /// every Claude session on the machine. Codex's global command line, the
+    /// script and the status folder, records only when the identity's
+    /// `CLAWDDY_STATUS_DIR` names that same folder.
     @Test func hookScriptRequiresStatusDirArgument() throws {
         let fm = FileManager.default
         let sandbox = fm.temporaryDirectory
@@ -130,31 +133,41 @@ struct AgentHookScriptTests {
         try Data(#"{"session_id":"session-1","hook_event_name":"SessionStart"}"#.utf8).write(to: payload)
         let agentID = UUID()
 
-        func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
+        func run(_ executable: String, _ arguments: [String], statusVariable: URL) throws -> Int32 {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
             process.environment = [
-                "GHOSTTY_AGENT_ID": agentID.uuidString,
-                "GHOSTTY_AGENT_PROVIDER": AgentProviderID.claudeCode.rawValue,
-                "GHOSTTY_AGENT_LAUNCH_GENERATION": UUID().uuidString,
-                "GHOSTTY_AGENT_STATUS_DIR": environmentStatus.path,
+                "CLAWDDY_AGENT_ID": agentID.uuidString,
+                "CLAWDDY_AGENT_PROVIDER": AgentProviderID.codex.rawValue,
+                "CLAWDDY_AGENT_GENERATION": UUID().uuidString,
+                "CLAWDDY_STATUS_DIR": statusVariable.path,
                 "HOME": home.path,
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "TMPDIR": home.path,
             ]
             process.standardInput = try FileHandle(forReadingFrom: payload)
-            process.standardError = FileHandle.nullDevice
             try process.run()
             process.waitUntilExit()
             return process.terminationStatus
         }
 
         let before = try filesUnder(sandbox)
-        #expect(try run(AgentHookRuntime.scriptURL(root: root).path, []) != 0)
+        #expect(try run(
+            AgentHookRuntime.scriptURL(root: root).path, [],
+            statusVariable: environmentStatus) == 0)
+        #expect(try run(
+            AgentHookRuntime.scriptURL(root: root).path, [],
+            statusVariable: root.statusDir) == 0)
+        // Another instance's agent: its variable names another folder.
+        #expect(try run(
+            "/bin/sh", ["-c", AgentHookRuntime.command(root: root)],
+            statusVariable: environmentStatus) == 0)
         #expect(try filesUnder(sandbox) == before)
 
-        #expect(try run("/bin/sh", ["-c", AgentHookRuntime.command(root: root)]) == 0)
+        #expect(try run(
+            "/bin/sh", ["-c", AgentHookRuntime.command(root: root)],
+            statusVariable: root.statusDir) == 0)
         #expect(fm.fileExists(atPath: root.statusDir
             .appendingPathComponent("\(agentID.uuidString).events").path))
         #expect(!fm.fileExists(atPath: environmentStatus.path))
@@ -194,31 +207,6 @@ struct AgentHookScriptTests {
         #expect(event.exitStatus == 7)
     }
 
-    @Test func reinstallRemovesOnlyClawddyHandlersAndPreservesUserHooks() throws {
-        let userHandler: [String: Any] = [
-            "type": "command",
-            "command": "/Users/example/bin/my-hook",
-        ]
-        let integrationHandler: [String: Any] = [
-            "type": "command",
-            "command": "/Users/example/.config/ghostty-agents/hooks/old-hook.sh",
-        ]
-        let source: [String: Any] = [
-            "Stop": [
-                ["matcher": "*", "hooks": [userHandler, integrationHandler]],
-                ["hooks": [integrationHandler]],
-            ],
-        ]
-
-        let filtered = AgentHookRuntime.removingIntegrationHandlers(from: source)
-        let groups = try #require(filtered["Stop"] as? [[String: Any]])
-        #expect(groups.count == 1)
-        #expect(groups[0]["matcher"] as? String == "*")
-        let handlers = try #require(groups[0]["hooks"] as? [[String: Any]])
-        #expect(handlers.count == 1)
-        #expect(handlers[0]["command"] as? String == "/Users/example/bin/my-hook")
-    }
-
     @Test func shellQuoteHandlesSpacesAndSingleQuotes() {
         #expect(AgentHookRuntime.shellQuote("/Users/A B/it's/hook")
             == "'/Users/A B/it'\\''s/hook'")
@@ -232,26 +220,30 @@ struct AgentHookScriptTests {
         let url = directory.appendingPathComponent("settings.json")
         let backup = directory.appendingPathComponent("settings.json.backup")
         try Data("{\"original\":true}".utf8).write(to: url)
-        var replaced = false
+        var calls = 0
 
+        // The first call is the unlocked check for a change; the external
+        // editor replaces the file during the second, under the lock.
         let changed = try AgentHookRuntime.updateJSONFile(
             at: url,
             backupURL: backup
         ) { root in
-            if !replaced {
-                replaced = true
+            calls += 1
+            if calls == 2 {
                 try Data("{\"external\":true}".utf8).write(to: url)
             }
             root["clawddy"] = true
         }
 
         #expect(changed)
+        #expect(calls == 3)
         let result = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Bool])
         #expect(result == ["external": true, "clawddy": true])
-        let original = try #require(
+        // The backup holds the bytes the write replaced.
+        let replaced = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: backup)) as? [String: Bool])
-        #expect(original == ["original": true])
+        #expect(replaced == ["external": true])
     }
 }
 
@@ -284,11 +276,8 @@ private final class HookFixture {
     ) -> Process {
         let process = Process()
         process.executableURL = script
-        process.arguments = [status.path]
+        process.arguments = [status.path, provider.rawValue, agentID.uuidString, generation.uuidString]
         process.environment = [
-            "GHOSTTY_AGENT_ID": agentID.uuidString,
-            "GHOSTTY_AGENT_PROVIDER": provider.rawValue,
-            "GHOSTTY_AGENT_LAUNCH_GENERATION": generation.uuidString,
             "HOME": (home ?? root).path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "TMPDIR": root.path,

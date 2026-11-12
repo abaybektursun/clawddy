@@ -392,9 +392,9 @@ struct AgentProviderRegistry: Sendable {
     private let claude: ClaudeCodeProvider
     private let codex: CodexProvider
 
-    init(root: AgentDataRoot) {
+    init(root: AgentDataRoot, codexHooksFile: URL, isProduction: Bool) {
         claude = ClaudeCodeProvider(root: root)
-        codex = CodexProvider(root: root)
+        codex = CodexProvider(root: root, hooksFile: codexHooksFile, isProduction: isProduction)
     }
 
     func adapter(for provider: AgentProviderID) -> any AgentProviderAdapter {
