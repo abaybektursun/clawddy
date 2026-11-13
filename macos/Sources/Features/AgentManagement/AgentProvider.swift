@@ -412,6 +412,182 @@ extension AgentProviderTable {
     }
 }
 
+// MARK: - Launch preparation
+
+struct AgentPreparedSurfaceLaunch: Sendable {
+    var provider: AgentProviderID
+    var generation: UUID
+    var scriptURL: URL
+    var environment: [String: String]
+    var metadataAvailability: AgentMetadataAvailability
+    var integrationIssue: String?
+    /// See `AgentPreparedLaunch.resumedSessionID`.
+    var resumedSessionID: String?
+}
+
+enum AgentSurfaceLaunchOutcome: Sendable {
+    case success(AgentPreparedSurfaceLaunch)
+    case failure(
+        AgentProviderIssue,
+        provider: AgentProviderID,
+        generation: UUID,
+        integrationIssue: String?)
+}
+
+struct AgentLaunchCoordinator: Sendable {
+    /// The id of the program-status record on which the launch script
+    /// reports the provider's exit.
+    static let exitReportID = "clawddy"
+
+    let providers: AgentProviderTable
+    let root: AgentDataRoot
+
+    /// `discardingSession` first forgets the agent's saved session, so the
+    /// launch starts a new one.
+    func prepare(
+        _ initialRequest: AgentLaunchRequest,
+        discardingSession: Bool = false
+    ) -> AgentSurfaceLaunchOutcome {
+        var request = initialRequest
+        let agentID = request.agentID
+        let name = request.name
+        let provider = request.provider
+        let generation = request.launchGeneration
+        if discardingSession {
+            do {
+                try AgentSessionStore.discardSession(for: agentID, directory: root.statusDir)
+            } catch {
+                return .failure(
+                    .launchPreparationFailed(
+                        provider,
+                        "The saved session could not be forgotten: \(error.localizedDescription)"),
+                    provider: provider,
+                    generation: generation,
+                    integrationIssue: nil)
+            }
+        }
+        do {
+            request.session = try AgentSessionStore.session(
+                for: agentID,
+                provider: provider,
+                directory: root.statusDir)
+            request.pendingFork = try AgentSessionStore.pendingFork(
+                for: agentID,
+                provider: provider,
+                directory: root.statusDir)
+        } catch {
+            // Starting a new session instead would leave the saved
+            // conversation behind without a word.
+            return .failure(
+                .unreadableSession(provider, error.localizedDescription),
+                provider: provider,
+                generation: generation,
+                integrationIssue: nil)
+        }
+        let entry = providers[provider]
+        let prepared: AgentPreparedLaunch
+        switch entry.prepareLaunch(request) {
+        case .success(let launch): prepared = launch
+        case .failure(let issue):
+            return .failure(
+                issue,
+                provider: provider,
+                generation: generation,
+                integrationIssue: nil)
+        }
+        // A session ID the launch chose is the agent's binding before the
+        // process starts; the bridge rewrites the binding from each
+        // `SessionStart` of the launch.
+        if let session = prepared.newSession {
+            do {
+                try AgentSessionStore.write(session, for: agentID, directory: root.statusDir)
+            } catch {
+                return .failure(
+                    .launchPreparationFailed(
+                        provider,
+                        "The new session's ID could not be saved: \(error.localizedDescription)"),
+                    provider: provider,
+                    generation: generation,
+                    integrationIssue: nil)
+            }
+        }
+        let integrationIssue: String?
+        switch entry.prepareIntegration() {
+        case .success(let preparation): integrationIssue = preparation.notice
+        case .failure(let issue): integrationIssue = issue.localizedDescription
+        }
+
+        // Agent identity is whatever the provider asked for: none for Claude,
+        // whose hooks carry it as arguments; the CLAWDDY_* names for Codex.
+        var environment = AgentTerminalEnvironmentPolicy.explicitEnvironment(
+            from: prepared.environment)
+        environment["HOME"] = AgentConfig.accountHomeDirectory.path
+        environment["PATH"] = request.environmentPath
+        let command = AgentTerminalEnvironmentPolicy.interactiveCommand(
+            executableURL: prepared.executableURL,
+            arguments: prepared.arguments)
+        let exports = environment.sorted(by: { $0.key < $1.key }).map {
+            "export \($0.key)=\(AgentHookRuntime.shellQuote($0.value))"
+        }.joined(separator: "\n")
+        let recordExit = entry.recordsExit
+            ? AgentHookRuntime.exitEventCommand(
+                provider: provider,
+                agentID: agentID,
+                generation: generation,
+                statusDirectory: root.statusDir)
+            : ""
+        // The login shell that keeps the terminal is no agent: it gets none
+        // of the identity the launch gave the terminal, so neither it nor a
+        // provider started in it by hand can report as the agent.
+        let identity = environment.keys
+            .filter(AgentTerminalEnvironmentPolicy.inheritedAgentIdentityVariables.contains)
+            .sorted()
+        let unsetIdentity = identity.isEmpty ? "" : "unset \(identity.joined(separator: " "))"
+        // After the provider returns: the exit report, an OSC 7501 report on
+        // the record `exitReportID` whose `msg` is the exit status in
+        // decimal, base64 as the protocol requires.
+        let script = """
+            #!/bin/zsh -l
+            \(AgentTerminalEnvironmentPolicy.shellPrelude)
+            \(exports)
+            printf '\\033]2;%s\\007' \(AgentHookRuntime.shellQuote(name))
+            clear
+            \(command)
+            command_status=$?
+            \(recordExit)
+            printf '\\033]7501;state=clear:id=\(Self.exitReportID):msg=%s\\007' "$(printf %s "$command_status" | /usr/bin/base64)"
+            \(unsetIdentity)
+            printf '\\n\\033[33mAgent exited (status %s). Continuing in your login shell.\\033[0m\\n' "$command_status"
+            exec "${SHELL:-/bin/zsh}" -l
+            """
+        let scriptURL = root.newLaunchScriptURL(agentID: agentID)
+        do {
+            try AgentConfig.atomicWrite(Data(script.utf8), to: scriptURL)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: scriptURL.path)
+        } catch {
+            // A script left behind goes with the launch folder at the next
+            // start.
+            return .failure(
+                .launchPreparationFailed(
+                    provider,
+                    "The launch script could not be created: \(error.localizedDescription)"),
+                provider: provider,
+                generation: generation,
+                integrationIssue: integrationIssue)
+        }
+        return .success(AgentPreparedSurfaceLaunch(
+            provider: provider,
+            generation: generation,
+            scriptURL: scriptURL,
+            environment: environment,
+            metadataAvailability: prepared.metadataAvailability,
+            integrationIssue: integrationIssue,
+            resumedSessionID: prepared.resumedSessionID))
+    }
+}
+
 enum AgentRuntimeProviderPolicy {
     enum Decision: Equatable {
         case unchanged
