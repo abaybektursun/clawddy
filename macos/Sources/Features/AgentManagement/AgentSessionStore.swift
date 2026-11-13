@@ -169,16 +169,26 @@ enum AgentSessionStore {
     }
 
     /// The untagged binding's text, trimmed, or nil when there is none.
+    ///
+    /// Every use is logged as an error. The production app runs `cleanupV5`
+    /// at its first start, before it reads anything, and that converts every
+    /// untagged binding; the dev seed writes none. So in either app a use
+    /// comes after the cleanup report exists, and the fallback can be deleted
+    /// only while the log shows none.
     private static func legacySession(_ agentID: UUID, _ directory: URL) throws -> String? {
         let url = directory.appendingPathComponent("\(agentID.uuidString).session")
+        let text: String
         do {
-            return try String(contentsOf: url, encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            text = try String(contentsOf: url, encoding: .utf8)
         } catch CocoaError.fileReadNoSuchFile {
             return nil
         } catch {
             throw UnreadableFile(url: url, reason: error.localizedDescription)
         }
+        AgentDiagnostics.unifiedLog(
+            .error,
+            "used the legacy binding \(url.path), which cleanupV5 converts: the .session fallback is still needed")
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func write(_ value: some Encodable, to url: URL) throws {

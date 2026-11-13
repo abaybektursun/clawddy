@@ -613,6 +613,111 @@ struct AgentMigrationTests {
         #expect(permissions?.intValue == 0o700)
     }
 
+    /// Review S3: the production app's first start on data an older app
+    /// wrote runs `cleanupV5` in place: it backs the root up, applies what
+    /// the plan says and leaves its report in the root. The next start runs
+    /// nothing and changes nothing.
+    @Test func productionFirstStartCleansUpOnce() throws {
+        let sandbox = MigrationSandbox()
+        defer { sandbox.remove() }
+        let root = sandbox.root
+        let fixture = MigrationFixture.messy()
+        try fixture.write(to: root)
+        let planned = try planAgentMigration(fixture.snapshot(), mode: .cleanupV5)
+        let first = sandbox.backup("first-start")
+
+        let report = try runCleanupV5OnFirstStart(
+            root: root,
+            bundleIdentifier: AgentDataRoot.productionBundleIdentifier,
+            backupDir: first,
+            defaults: nil)
+
+        #expect(report == planned.report)
+        #expect(report?.sessionConversions == MigrationFixture.legacyOnlyIDs.count)
+        let cleaned = try tree(root.url)
+        #expect(cleaned["migration-cleanupV5.json"] != nil)
+        #expect(MigrationFixture.legacyOnlyIDs.allSatisfy {
+            cleaned["status/\($0.uuidString).session.json"] != nil && cleaned["status/\($0.uuidString).session"] == nil
+        })
+        #expect(try tree(first)["migration-cleanupV5.json"] != nil)
+
+        let second = sandbox.backup("second-start")
+        #expect(try runCleanupV5OnFirstStart(
+            root: root,
+            bundleIdentifier: AgentDataRoot.productionBundleIdentifier,
+            backupDir: second,
+            defaults: nil) == nil)
+        #expect(try tree(root.url) == cleaned)
+        #expect(!FileManager.default.fileExists(atPath: second.path))
+    }
+
+    /// Review S3: data the cleanup does not expect stops it before anything
+    /// is written. Every file of the root keeps its bytes and its time, the
+    /// only new item being the empty lock file every start takes; no backup
+    /// is made; and with no report the next start decides to try again, so
+    /// the app never starts on data it has not converted.
+    @Test func productionFirstStartAbortChangesNothing() throws {
+        let sandbox = MigrationSandbox()
+        defer { sandbox.remove() }
+        let root = sandbox.root
+        var fixture = MigrationFixture.messy()
+        fixture.status["\(MigrationFixture.claudeIDs[30].uuidString).fork.json"]
+            = #"{"provider":"codex","sourceSessionID":"session"}"#
+        try fixture.write(to: root)
+        let before = try tree(root.url)
+        func fileDates() throws -> [String: Date] {
+            try modificationDates(root.url).filter { before[$0.key] != nil }
+        }
+        let datesBefore = try fileDates()
+        let backup = sandbox.backup("aborted")
+
+        #expect(throws: AgentMigrationAbort.self) {
+            try runCleanupV5OnFirstStart(
+                root: root,
+                bundleIdentifier: AgentDataRoot.productionBundleIdentifier,
+                backupDir: backup,
+                defaults: nil)
+        }
+
+        var after = try tree(root.url)
+        #expect(after.removeValue(forKey: "clawddy.lock") == Data())
+        #expect(after == before)
+        #expect(try fileDates() == datesBefore)
+        #expect(!FileManager.default.fileExists(atPath: backup.path))
+        #expect(AgentDataRoot.cleansUpV5(
+            bundleIdentifier: AgentDataRoot.productionBundleIdentifier,
+            configExists: true,
+            reportExists: FileManager.default.fileExists(atPath: root.migrationReportFile(mode: .cleanupV5).path)))
+    }
+
+    /// Review S3: the dev and test identities never run the cleanup, and
+    /// neither does a production start on a root with no `agents.json`:
+    /// nothing is read, written or backed up.
+    @Test func cleanupNeverRunsForDevTestsOrAnEmptyRoot() throws {
+        let sandbox = MigrationSandbox()
+        defer { sandbox.remove() }
+        let root = sandbox.root
+        try MigrationFixture.messy().write(to: root)
+        let before = try tree(root.url)
+        for bundle in [AgentDataRoot.devBundleIdentifier, Bundle.main.bundleIdentifier] {
+            #expect(try runCleanupV5OnFirstStart(
+                root: root,
+                bundleIdentifier: bundle,
+                backupDir: sandbox.backup("never"),
+                defaults: nil) == nil)
+        }
+        #expect(try tree(root.url) == before)
+
+        let fresh = AgentDataRoot(url: sandbox.url.appendingPathComponent("fresh", isDirectory: true))
+        #expect(try runCleanupV5OnFirstStart(
+            root: fresh,
+            bundleIdentifier: AgentDataRoot.productionBundleIdentifier,
+            backupDir: sandbox.backup("never"),
+            defaults: nil) == nil)
+        #expect(!FileManager.default.fileExists(atPath: fresh.url.path))
+        #expect(!FileManager.default.fileExists(atPath: sandbox.backup("never").path))
+    }
+
     /// M21, opt-in: `TEST_RUNNER_CLAWDDY_M21_COPY=<folder> macos/build.nu
     /// --action test`, where `<folder>/root` is a copy of a live data root
     /// without `cron/`. Each mode runs on its own fresh copy of it, and each

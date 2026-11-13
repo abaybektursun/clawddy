@@ -247,17 +247,25 @@ is complete either way.
    `macos/Sources/Features/AgentManagement` is read line by line.
 4. **Switch-over**, with the live app quit: fresh backup as P0.2 plus a copy of
    `~/Applications/Clawddy.app`; rerun the rehearsal on a copy of the live root and
-   note its counts; run `cleanupV5` on the live root and compare (zero aborts, same
-   counts); archive `~/.config/clawddy-dev` into the backup folder; install and
-   start the production build. Its first Claude launch removes the old global
-   Claude hook entries by exact path; its first Codex launch rewrites the Codex
-   entry once, and Codex asks for one hook review.
+   note its counts (this still comes first); archive `~/.config/clawddy-dev` into
+   the backup folder; only now build the production app
+   (`macos/build.nu --identity production`), install and start it. At its first
+   start, before it reads anything, it runs `cleanupV5` on the live root once:
+   it backs the root up to `~/.config/ghostty-agents-backups/<yyyyMMdd-HHmmss>-cleanupV5/`
+   and leaves `migration-cleanupV5.json` in the root; compare that report with
+   the rehearsal's (zero aborts, same counts). On an abort it shows the reason
+   and quits without having changed the data. Its first Claude launch removes
+   the old global Claude hook entries by exact path; its first Codex launch
+   rewrites the Codex entry once, and Codex asks for one hook review.
 5. **Rollback.** Quit the new app, put the backed-up `Clawddy.app` back, start it.
    The old app reads the cleaned data and reinstalls its own hook entries at its
    first agent launch (checked against the code). Sessions started under the new
    app after `/clear` are bound by the new binding files, which the old app also
    reads.
-6. The `.session` fallback, the last legacy path, is deleted in the next commit.
+6. The `.session` fallback, the last legacy path, is deleted in the next commit,
+   once the live root holds `migration-cleanupV5.json` and the unified log
+   (subsystem `com.mitchellh.ghostty`, category `AgentBridge`) has no "used the
+   legacy binding" error since the switch-over.
 
 ## 11. Phase B: the product
 

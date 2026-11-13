@@ -61,6 +61,9 @@ final class ClawddyController: NSObject {
             homeDirectory: home) {
             fatalError(mismatch)
         }
+        // Before anything reads the data, and before the lock, which the
+        // cleanup takes itself.
+        Self.cleanUpOlderDataOnFirstStart(root, homeDirectory: home)
         // Before the lock, which creates the root.
         Self.seedDevCopyOnFirstStart(root, homeDirectory: home)
         rootLock = Self.lockOrExit(root)
@@ -76,6 +79,44 @@ final class ClawddyController: NSObject {
                 isProduction: isProduction))
         workspaceModel = AgentWorkspaceModel(defaults: isTestHost ? nil : .standard)
         super.init()
+    }
+
+    /// The production app's first start on the data older apps wrote runs
+    /// `cleanupV5` on it once (`runCleanupV5OnFirstStart`), backed up first.
+    /// If it stops, the app says why and quits: running on data it has not
+    /// converted would leave the legacy bindings to a fallback that goes
+    /// next. Dev and test identities never run it.
+    private static func cleanUpOlderDataOnFirstStart(_ root: AgentDataRoot, homeDirectory: URL) {
+        let backupDir = AgentDataRoot.migrationBackupDir(
+            mode: .cleanupV5,
+            homeDirectory: homeDirectory,
+            date: Date())
+        do {
+            guard let report = try runCleanupV5OnFirstStart(
+                root: root,
+                bundleIdentifier: Bundle.main.bundleIdentifier,
+                backupDir: backupDir,
+                defaults: .standard)
+            else { return }
+            Self.logger.info(
+                "cleaned up \(root.url.path, privacy: .public): \(report.sessionConversions) legacy bindings converted, \(report.deletions.values.reduce(0, +)) files deleted, backup \(backupDir.path, privacy: .public)")
+        } catch {
+            Self.logger.error(
+                "could not clean up \(root.url.path, privacy: .public): \(error, privacy: .public)")
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "Clawddy could not update its data"
+            alert.informativeText = """
+                \(error.localizedDescription)
+
+                Clawddy will quit rather than run on data it has not updated. \
+                The update backs up \(root.url.path) to \(backupDir.path) before \
+                changing anything, and stops before that when the data is not \
+                what it expects.
+                """
+            alert.runModal()
+            exit(1)
+        }
     }
 
     /// The dev identity's first start copies the live Claude agents in, each

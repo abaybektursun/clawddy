@@ -78,6 +78,36 @@ struct AgentDataRoot: Equatable, Sendable {
         bundleIdentifier == devBundleIdentifier && !rootExists && productionConfigExists
     }
 
+    /// Whether this start first runs `cleanupV5` on its root
+    /// (`runCleanupV5OnFirstStart`), the switch-over's conversion of the
+    /// data older apps wrote. Only the production bundle does, only on a
+    /// root that holds an `agents.json`, and only until that run has left its
+    /// report in the root. Dev and test roots never hold older data.
+    static func cleansUpV5(
+        bundleIdentifier: String?,
+        configExists: Bool,
+        reportExists: Bool
+    ) -> Bool {
+        isProductionBundle(bundleIdentifier) && configExists && !reportExists
+    }
+
+    /// Where an in-place migration of the production root backs it up:
+    /// `~/.config/ghostty-agents-backups/<yyyyMMdd-HHmmss>-<mode>/`, outside
+    /// the root, so neither the app's watcher nor agent-cron sees it.
+    static func migrationBackupDir(
+        mode: AgentMigrationMode,
+        homeDirectory: URL,
+        date: Date
+    ) -> URL {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return homeDirectory
+            .appendingPathComponent(".config", isDirectory: true)
+            .appendingPathComponent("\(productionDirectoryName)-backups", isDirectory: true)
+            .appendingPathComponent("\(formatter.string(from: date))-\(mode.rawValue)", isDirectory: true)
+    }
+
     /// Why this bundle must not run on this root, or nil when the pairing is
     /// allowed. Only the production bundle may use the production root, and
     /// the production bundle may use no other.

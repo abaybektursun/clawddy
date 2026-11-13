@@ -118,6 +118,37 @@ struct AgentDataRootTests {
             productionConfigExists: true))
     }
 
+    /// Review S3: only the production bundle runs `cleanupV5` at start, only
+    /// on a root holding an `agents.json`, and only until its report is in
+    /// the root, so it runs once. Dev, test and debug bundles never do.
+    @Test func onlyProductionCleansUpAtStartAndOnlyOnce() {
+        let bundles: [String?] = [
+            "com.mitchellh.ghostty", "com.mitchellh.ghostty.clawddy-dev",
+            "com.mitchellh.ghostty.clawddy-tests", "com.mitchellh.ghostty.debug", nil,
+        ]
+        for bundle in bundles {
+            for configExists in [false, true] {
+                for reportExists in [false, true] {
+                    let cleans = AgentDataRoot.cleansUpV5(
+                        bundleIdentifier: bundle,
+                        configExists: configExists,
+                        reportExists: reportExists)
+                    let expected = bundle == "com.mitchellh.ghostty" && configExists && !reportExists
+                    #expect(cleans == expected, "\(bundle ?? "nil") config \(configExists) report \(reportExists)")
+                }
+            }
+        }
+        #expect(!AgentDataRoot.cleansUpV5(
+            bundleIdentifier: Bundle.main.bundleIdentifier,
+            configExists: true,
+            reportExists: false))
+        let date = Calendar.current.date(from: DateComponents(
+            year: 2026, month: 11, day: 12, hour: 8, minute: 15, second: 48))
+        #expect(date.map {
+            AgentDataRoot.migrationBackupDir(mode: .cleanupV5, homeDirectory: home, date: $0).path
+        } == "/Users/example/.config/ghostty-agents-backups/20261112-081548-cleanupV5")
+    }
+
     @Test @MainActor func onlyProductionBundleTakesHotKeyAndUpdater() throws {
         #expect(AgentDataRoot.isProductionBundle("com.mitchellh.ghostty"))
         #expect(!AgentDataRoot.isProductionBundle("com.mitchellh.ghostty.clawddy-dev"))

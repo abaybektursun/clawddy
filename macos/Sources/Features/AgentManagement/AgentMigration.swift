@@ -818,6 +818,33 @@ func migrateAgentDataInPlace(
     }
 }
 
+/// The production app's first start on data an older app wrote: runs
+/// `cleanupV5` on `root` in place when `AgentDataRoot.cleansUpV5` says so,
+/// before anything else reads the data. The run backs the root up to
+/// `backupDir` first and leaves its report in the root, so it happens once.
+/// Data it does not expect throws before anything is written; the caller
+/// must then not start on the data. Returns the report, or nil when this
+/// start runs nothing.
+@discardableResult
+func runCleanupV5OnFirstStart(
+    root: AgentDataRoot,
+    bundleIdentifier: String?,
+    backupDir: URL,
+    defaults: UserDefaults?
+) throws -> AgentMigrationReport? {
+    let fm = FileManager.default
+    guard AgentDataRoot.cleansUpV5(
+        bundleIdentifier: bundleIdentifier,
+        configExists: fm.fileExists(atPath: root.agentsFile.path),
+        reportExists: fm.fileExists(atPath: root.migrationReportFile(mode: .cleanupV5).path))
+    else { return nil }
+    return try migrateAgentDataInPlace(
+        root: root,
+        mode: .cleanupV5,
+        backupDir: backupDir,
+        defaults: defaults)
+}
+
 /// The dev seed: writes a new root at `destination` holding `source`'s
 /// Claude agents, each with a fork marker in place of its binding, and their
 /// unread completions. `source` is only read. The new root is built beside
