@@ -7,6 +7,11 @@ notes in `$G0`.
 
 ## 0. Before launching Clawddy Dev
 
+Clawddy Dev is what `macos/build.nu` builds by default (output under
+`/Volumes/Xcode/GhosttyBuilds/ghostty/macos/dev/products/Release/`). The
+production app, `--identity production`, is built only at switch-over, with
+the live app quit; never build or launch it for G0.
+
 ```sh
 cd ~/projects/ghostty
 # The app under gates/G0 is a frozen copy of the P0.8 dev build, so later builds cannot replace it while it runs.

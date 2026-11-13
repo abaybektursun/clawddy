@@ -27,6 +27,9 @@ A file for [guiding coding agents](https://agents.md/).
   - If you're on macOS and don't need to build the macOS app, use
     `-Demit-macos-app=false` to skip building the app bundle and speed up
     compilation.
+- **Build (macOS app):** `macos/build.nu` builds Clawddy Dev, the identity that
+  runs beside the live app. The production app (`--identity production`) is
+  built only at switch-over, with the live app quit; see `macos/AGENTS.md`.
 - **Test (Zig):** `./build.nu test`
   - Prefer to run targeted tests with `-Dtest-filter` because the full
     test suite is slow to run.

@@ -80,6 +80,17 @@ files beneath `/Volumes/Xcode/GhosttyBuilds/ghostty/macos/`:
 macos/build.nu --scheme Ghostty --configuration Release --action build
 ```
 
+This builds the dev identity, Clawddy Dev: bundle ID
+`com.mitchellh.ghostty.clawddy-dev`, data folder `~/.config/clawddy-dev`,
+products under `<build root>/dev/`. It can run beside the live app. The
+project's own build settings are the dev identity as well, so a plain Xcode
+build never produces the production app. The production identity
+(`--identity production`: `com.mitchellh.ghostty`, `~/.config/ghostty-agents`,
+products under `<build root>/products/`) is built only at switch-over, with
+the live app quit. A production build running beside the live app removes the
+live app's Claude hooks, replaces its hook script and can resume its sessions a
+second time.
+
 Package resolution uses Xcode's noninteractive `netrc` authorization provider.
 This repository's package dependencies are public, and avoiding an unnecessary
 Keychain query prevents unattended builds from blocking indefinitely.
@@ -90,11 +101,13 @@ Run the macOS unit tests with:
 macos/build.nu --scheme Ghostty --configuration Release --action test
 ```
 
-Production builds and unit tests use separate external build graphs. Unit tests
-need an `@testable` app module and may inject XCTest support into their host;
-their products, objects, DerivedData, module cache, and temporary directory live
-under the wrapper's `tests/` subtree. The production Release graph remains
-optimized with `ENABLE_TESTABILITY=NO` and never serves as a test host. The
+The dev and production identities and the unit tests use separate external
+build graphs. Unit tests always build their own test identity, whatever
+`--identity` says. They need an `@testable` app module and may inject XCTest
+support into their host; their products, objects, DerivedData, module cache,
+and temporary directory live under the wrapper's `tests/` subtree. The runnable
+Release graphs remain optimized with `ENABLE_TESTABILITY=NO` and never serve as
+a test host. The
 wrapper also marks its dedicated `SYMROOT`, `OBJROOT`, and `DSTROOT` directories
 as Xcode-owned so `--action clean` can remove stale generated products safely.
 

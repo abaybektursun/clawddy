@@ -75,9 +75,14 @@ The built application itself has a macOS 14 deployment target.
 ### Build
 
 ```sh
-macos/build.nu --scheme Ghostty --configuration ReleaseLocal --action build
-open /Volumes/Xcode/GhosttyBuilds/ghostty/macos/products/ReleaseLocal/Ghostty.app
+macos/build.nu --scheme Ghostty --configuration Release --action build
+open /Volumes/Xcode/GhosttyBuilds/ghostty/macos/dev/products/Release/Ghostty.app
 ```
+
+This builds and opens Clawddy Dev, which keeps its data in
+`~/.config/clawddy-dev` and can run beside the live app. The production app
+(`--identity production`, data in `~/.config/ghostty-agents`) is built only at
+switch-over, with the live app quit.
 
 When shared Zig code outside `macos/` changes, run
 `./build.nu -Demit-macos-app=false` before the macOS build. See

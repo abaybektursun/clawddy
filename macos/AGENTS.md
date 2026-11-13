@@ -12,10 +12,21 @@
 - Use `macos/build.nu` to build the macOS app, do not use `zig build`
   (except to build the underlying library as mentioned above).
   - Build: `macos/build.nu [--scheme Ghostty] [--configuration Release] [--action build]`
-  - Output: `/Volumes/Xcode/GhosttyBuilds/ghostty/macos/products/<configuration>/Ghostty.app`
+    builds Clawddy Dev (bundle ID `com.mitchellh.ghostty.clawddy-dev`, data
+    folder `~/.config/clawddy-dev`), which can run beside the live app. The
+    project's own settings are the dev identity too, so a plain Xcode build
+    is never the production app.
+  - Output: `/Volumes/Xcode/GhosttyBuilds/ghostty/macos/dev/products/<configuration>/Ghostty.app`
+  - The production app (`--identity production`: bundle ID
+    `com.mitchellh.ghostty`, data folder `~/.config/ghostty-agents`, output
+    under `macos/products/`) is built only at switch-over, with the live app
+    quit. Never build or launch it beside the live app: it removes the live
+    app's Claude hooks, replaces its hook script and can resume its sessions
+    a second time.
   - All products, intermediates, packages, caches, and temporary files are
     external. The wrapper must fail rather than fall back when the SSD is absent.
-- Run unit tests directly with `macos/build.nu --action test`
+- Run unit tests directly with `macos/build.nu --action test`. A test run
+  always builds its own test identity, whatever `--identity` says.
 - For Clawddy validation in this workspace, build and run `Release` only. Never
   launch the Debug, ReleaseLocal, preview, or development-mode app.
 - Automation shells may set `NO_COLOR`. Remove that automation-only variable

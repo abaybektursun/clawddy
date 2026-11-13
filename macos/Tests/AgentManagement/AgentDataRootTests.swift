@@ -34,6 +34,41 @@ struct AgentDataRootTests {
             == "clawddy-tests")
     }
 
+    /// Review S2: the project's own identity settings, which a plain Xcode
+    /// build uses and `macos/build.nu` replaces only for `--identity
+    /// production` or a test run, name a non-production bundle and its own
+    /// data folder in every configuration, so no build makes the production
+    /// app by accident.
+    @Test func projectDefaultsAreNeverTheProductionIdentity() throws {
+        let project = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Ghostty.xcodeproj/project.pbxproj")
+        let lines = try String(contentsOf: project, encoding: .utf8)
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        func values(_ setting: String) -> [String] {
+            lines.filter { $0.hasPrefix("\(setting) = ") && $0.hasSuffix(";") }.map {
+                $0.dropFirst(setting.count + 3).dropLast()
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            }
+        }
+        let bundles = values("CLAWDDY_BUNDLE_IDENTIFIER")
+        let folders = values("CLAWDDY_DATA_DIRECTORY_NAME")
+        // Debug, Release and ReleaseLocal.
+        #expect(bundles.count == 3 && folders.count == 3)
+        for (bundle, folder) in zip(bundles, folders) {
+            #expect(!AgentDataRoot.isProductionBundle(bundle), "\(bundle)")
+            #expect(folder != AgentDataRoot.productionDirectoryName)
+            #expect(AgentDataRoot.identityMismatch(
+                bundleIdentifier: bundle,
+                root: AgentDataRoot.resolve(directoryName: folder, isRunningTests: false, homeDirectory: home),
+                homeDirectory: home) == nil)
+        }
+        #expect(bundles.filter { $0 == AgentDataRoot.devBundleIdentifier }.count == 2)
+    }
+
     @Test func productionBundleRefusesForeignRoot() {
         let production = AgentDataRoot(url: home.appendingPathComponent(".config/ghostty-agents"))
         let dev = AgentDataRoot(url: home.appendingPathComponent(".config/clawddy-dev"))

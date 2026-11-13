@@ -31,12 +31,12 @@ def main [
     --scheme: string = "Ghostty"       # Xcode scheme (Ghostty, DockTilePlugin)
     --configuration: string = "Release" # Build configuration (Debug, Release, ReleaseLocal)
     --action: string = "build"         # xcodebuild action (build, test, clean, etc.)
-    --identity: string = "production"  # App identity (production, dev); tests always use their own
+    --identity: string = "dev"         # App identity (dev, production); tests always use their own
     --build-root: string                # Override GHOSTTY_MACOS_BUILD_ROOT
     --show-paths                        # Print resolved storage paths without building
 ] {
     if $identity not-in ["production" "dev"] {
-        error make { msg: $"Unknown identity ($identity); expected production or dev" }
+        error make { msg: $"Unknown identity ($identity); expected dev or production" }
     }
     let project = ($env.FILE_PWD | path join "Ghostty.xcodeproj")
     let root = (external-root $build_root)
@@ -109,9 +109,11 @@ def main [
     }
 
     # The bundle ID separates preferences, notifications and permissions; the
-    # data folder name selects ~/.config/<name>. The production identity uses
-    # the project's own values. The app enables the global hot key and the
-    # updater only under the production bundle ID.
+    # data folder name selects ~/.config/<name>. The project's own values are
+    # the dev identity, so neither this wrapper nor a plain Xcode build makes
+    # the production app by accident: it takes `--identity production`, which
+    # is used only at switch-over, with the live app quit. The app enables the
+    # global hot key and the updater only under the production bundle ID.
     let identity_arguments = match $build_identity {
         "test" => [
             "CLAWDDY_BUNDLE_IDENTIFIER=com.mitchellh.ghostty.clawddy-tests"
@@ -122,7 +124,11 @@ def main [
             "CLAWDDY_DISPLAY_NAME=Clawddy Dev"
             "CLAWDDY_DATA_DIRECTORY_NAME=clawddy-dev"
         ]
-        _ => []
+        "production" => [
+            "CLAWDDY_BUNDLE_IDENTIFIER=com.mitchellh.ghostty"
+            "CLAWDDY_DISPLAY_NAME=Clawddy"
+            "CLAWDDY_DATA_DIRECTORY_NAME=ghostty-agents"
+        ]
     }
 
     # xcodebuild hands each TEST_RUNNER_<NAME> variable to the test process as
