@@ -219,6 +219,18 @@ def --wrapped main [
 
     prepare-xcframework $xcframework_link $xcframework_external $xcframework_history
 
+    # `-Demit-macos-app=false` builds the library the macOS app links. Zig's
+    # default is a debug build, which makes every app built afterwards slow
+    # and show the debug-build warning, so that library is optimized unless
+    # the caller chooses a mode.
+    let builds_app_library = ("-Demit-macos-app=false" in $arguments)
+    let chooses_mode = ($arguments | any {|a| $a starts-with "-Doptimize=" })
+    let zig_arguments = if $builds_app_library and not $chooses_mode {
+        $arguments | append "-Doptimize=ReleaseFast"
+    } else {
+        $arguments
+    }
+
     let build_failure = (try {
         (^env -i
             $"HOME=($env.HOME)"
@@ -230,7 +242,7 @@ def --wrapped main [
             $zig.path
             build
             --prefix $prefix
-            ...$arguments)
+            ...$zig_arguments)
         null
     } catch {|e| $e })
 

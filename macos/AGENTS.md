@@ -6,6 +6,8 @@
 - Use `swiftlint` for formatting and linting Swift code.
 - If code outside of `macos/` directory is modified, use
   `GHOSTTY_ZIG=/Volumes/Xcode/GhosttyBuilds/ghostty/tools/zig-0.17.0/zig ./build.nu -Demit-macos-app=false`
+  (the wrapper builds this library with `-Doptimize=ReleaseFast` unless another
+  mode is given; an app linked against a debug library is a debug build)
   before building the macOS app to update the underlying Ghostty library
   (Zig 0.17 is not the `zig` on `PATH`). That wrapper keeps
   `macos/GhosttyKit.xcframework` a symlink to external storage.
