@@ -100,6 +100,25 @@ struct AgentFailLoudTests {
         #expect(!agent.canOnlyStartFresh)
     }
 
+    /// A binding that cannot be read is shown at start, with the message its
+    /// launch would give, and the agent offers only Start Fresh.
+    @Test func corruptBindingIsShownAtStart() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        let file = h.statusFile(id, "session.json")
+        try Data(#"{"provider":"claudeCode","sessionID":"session-"#.utf8).write(to: file)
+
+        h.start()
+
+        let agent = try h.agent(id)
+        #expect(agent.displayState == .failed)
+        #expect(agent.canOnlyStartFresh)
+        #expect(agent.failureMessage?.hasPrefix(
+            "The saved Claude Code session could not be read, so the agent was not started. \(file.path) could not be read: ") == true)
+        #expect(h.providers.launchRequests.isEmpty)
+    }
+
     @Test func undecodableRecordIsLoggedWithItsOffset() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }

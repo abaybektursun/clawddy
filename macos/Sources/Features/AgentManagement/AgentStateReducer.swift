@@ -128,6 +128,9 @@ enum AgentRuntimeEffect: Equatable, Sendable {
     /// The session the launch created is on disk now: it is the agent's
     /// binding, and a fork it came from is done.
     case sessionSaved
+    /// The session the launch resumed does not exist; its binding records
+    /// that, so the agent offers only Start Fresh until it is discarded.
+    case sessionMissing
     case completed
     case waitingForUser
     case failed
@@ -345,7 +348,8 @@ enum AgentStateReducer {
                     state.resumingSessionID = nil
                     state.missingSessionID = missing
                     if state.failureMessage == nil { effects.append(.failed) }
-                    state.failureMessage = "\(provider.displayName) found no conversation with session ID \(missing), so the agent could not be resumed."
+                    state.failureMessage = missingSessionMessage(provider: provider, sessionID: missing)
+                    effects.append(.sessionMissing)
                 }
 
             case .providerExited:
@@ -386,10 +390,13 @@ enum AgentStateReducer {
             state.activityState = .unknown
             state.interactionState = .none
             state.turnState = .inactive
-            state.failureMessage = nil
             state.resumingSessionID = nil
-            state.missingSessionID = nil
-            state.sessionUnreadable = false
+            // A missing or unreadable saved session outlives the terminal:
+            // it describes the saved session, not the launch, and only Start
+            // Fresh replaces it.
+            if state.missingSessionID == nil && !state.sessionUnreadable {
+                state.failureMessage = nil
+            }
 
         case .completionViewed:
             clearUnread(&state, effects: &effects)
@@ -407,6 +414,11 @@ enum AgentStateReducer {
         }
 
         return (state, effects)
+    }
+
+    /// Why an agent whose saved session is missing can only start fresh.
+    static func missingSessionMessage(provider: AgentProviderID, sessionID: String) -> String {
+        "\(provider.displayName) found no conversation with session ID \(sessionID), so the agent could not be resumed."
     }
 
     /// What one report the program made about itself (the root record) means,

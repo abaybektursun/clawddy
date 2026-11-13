@@ -76,6 +76,24 @@ enum AgentSessionStore {
         try write(binding, to: sessionURL(agentID, directory))
     }
 
+    /// The saved session its provider found missing (`markMissing`), or nil
+    /// when the agent's binding names a session not known to be missing or
+    /// there is none. Reads only the binding; throws when it is unreadable.
+    static func missingSession(for agentID: UUID, directory: URL) throws -> String? {
+        guard let binding = try savedBinding(agentID, directory), binding.missing == true else { return nil }
+        return binding.sessionID
+    }
+
+    /// Records that the provider found no conversation with `sessionID`,
+    /// the session the agent's binding names. A binding that names another
+    /// session, or none, is left as it is: the next launch does not resume
+    /// the missing one.
+    static func markMissing(_ sessionID: String, for agentID: UUID, directory: URL) throws {
+        guard var binding = try savedBinding(agentID, directory), binding.sessionID == sessionID else { return }
+        binding.missing = true
+        try write(binding, for: agentID, directory: directory)
+    }
+
     /// Forgets the agent's saved session, so its next launch starts a new
     /// one: the binding, the untagged file older builds wrote, which
     /// `session` would otherwise read and resume, and a pending fork.

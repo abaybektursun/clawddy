@@ -466,6 +466,69 @@ struct AgentBridgeLifecycleTests {
         #expect(h.aggregateChanges == [.idle, .attention])
     }
 
+    /// Review M1 and M2: a missing saved session stays the agent's state
+    /// until Start Fresh. The binding records it, so closing the leftover
+    /// terminal keeps the failure and its offer, and so does a restart.
+    /// Activating the agent from the list, the palette or a notification
+    /// shows it, with its terminal while there is one, and never retries the
+    /// failing resume or notifies again; Start Fresh starts a new session.
+    @Test func missingSessionLastsUntilStartFresh() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        try h.useRealClaudeLaunch()
+        let id = try h.addAgent("Agent")
+        try AgentSessionStore.write(
+            AgentSessionBinding(provider: .claudeCode, sessionID: "gone-session", launchGeneration: nil),
+            for: id,
+            directory: h.root.statusDir)
+        h.start()
+        try h.activate(id)
+        try h.hook(id, "SessionEnd", session: "gone-session")
+        try h.providerExited(id, status: 1)
+        let message = "Claude Code found no conversation with session ID gone-session, so the agent could not be resumed."
+        func showsMissing(_ agent: AgentInstance) {
+            #expect(agent.displayState == .failed)
+            #expect(agent.missingSessionID == "gone-session")
+            #expect(agent.canOnlyStartFresh)
+            #expect(agent.failureMessage == message)
+        }
+        showsMissing(try h.agent(id))
+        #expect(try h.binding(id) == AgentSessionBinding(
+            provider: .claudeCode,
+            sessionID: "gone-session",
+            launchGeneration: nil,
+            missing: true))
+        let posted = h.notifier.posted.map(\.identifier)
+        #expect(posted == ["clawddy.\(id.uuidString).error"])
+
+        // The leftover terminal is shown, not replaced.
+        try h.activate(id)
+        #expect(h.host.calls.last == .show(id))
+        #expect(h.host.hasSurface(id: id))
+        #expect(h.providers.launchRequests.count == 1)
+
+        h.bridge.surfaceClosed(id: id, generation: try h.generation(id), processAlive: false)
+        #expect(!h.host.hasSurface(id: id))
+        showsMissing(try h.agent(id))
+        try h.activate(id)
+        #expect(h.host.calls.last == .select(id))
+        #expect(h.providers.launchRequests.count == 1)
+
+        try h.restart()
+        showsMissing(try h.agent(id))
+        try h.activate(id)
+        #expect(h.providers.launchRequests.count == 1)
+        #expect(h.notifier.posted.map(\.identifier) == posted)
+
+        let project = try #require(h.config.project(forAgent: id))
+        h.bridge.startFresh(id: id, host: h.host, project: project)
+        #expect(h.providers.launchRequests.count == 2)
+        #expect(h.providers.launchRequests.last?.session == nil)
+        #expect(!h.exists(h.statusFile(id, "session.json")))
+        #expect(!(try h.agent(id).canOnlyStartFresh))
+        #expect(try h.launchScript().contains("--session-id"))
+    }
+
     @Test func surfaceDeathIsExitedAndCleansUp() async throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }

@@ -222,6 +222,11 @@ struct AgentSessionBinding: Codable, Equatable, Sendable {
     var provider: AgentProviderID
     var sessionID: String
     var launchGeneration: UUID?
+    /// True once a resume found no conversation with `sessionID`. The agent
+    /// then offers only Start Fresh, which discards the binding, across
+    /// closes of its terminal and restarts. Absent otherwise; older apps
+    /// ignore it.
+    var missing: Bool?
 }
 
 struct AgentPendingFork: Codable, Equatable, Sendable {

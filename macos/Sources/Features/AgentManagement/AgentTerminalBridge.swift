@@ -207,12 +207,28 @@ final class AgentBridge {
         let persisted = loadPersistedState()
 
         // Reconstruct agents from config. No terminal outlives the app, so
-        // every agent starts not running; only an unread completion stays.
+        // every agent starts not running; only an unread completion stays,
+        // and a saved session found missing or unreadable, which only Start
+        // Fresh replaces.
         for entry in config.allAgentEntries {
             let unread = persisted.unreadCompletions[entry.id]
-            agents[entry.id] = AgentInstance(entry: entry, runtime: AgentRuntimeSnapshot(
+            var runtime = AgentRuntimeSnapshot(
                 unreadCompletion: unread,
-                lastAppliedCompletion: unread))
+                lastAppliedCompletion: unread)
+            do {
+                if let missing = try AgentSessionStore.missingSession(for: entry.id, directory: statusDir) {
+                    runtime.missingSessionID = missing
+                    runtime.failureMessage = AgentStateReducer.missingSessionMessage(
+                        provider: entry.provider,
+                        sessionID: missing)
+                }
+            } catch {
+                runtime.sessionUnreadable = true
+                runtime.failureMessage = AgentProviderIssue.unreadableSession(
+                    entry.provider,
+                    error.localizedDescription).localizedDescription
+            }
+            agents[entry.id] = AgentInstance(entry: entry, runtime: runtime)
         }
 
         refreshProviderHealth()
@@ -412,6 +428,24 @@ final class AgentBridge {
     ) {
         guard let agent = agents[id] else { return }
         surfaceHost = host
+
+        // A missing or unreadable saved session can only be replaced, which
+        // Start Fresh does. Any other activation, from the list, the palette
+        // or a notification, shows the agent, with its terminal if it has
+        // one, where the header offers Start Fresh; it launches nothing.
+        if agent.canOnlyStartFresh && !discardingSession {
+            if host.hasSurface(id: id) {
+                _ = host.showOrSwitch(
+                    projectName: project.name,
+                    agent: agent,
+                    focusTerminal: true,
+                    select: true,
+                    createConfig: { nil })
+            } else {
+                host.selectAgent(agent, projectName: project.name)
+            }
+            return
+        }
 
         if host.hasSurface(id: id), agent.processState == .exited {
             discardSurfaceForRestart(id: id, host: host, provider: agent.provider)
@@ -917,6 +951,15 @@ final class AgentBridge {
         if effects.contains(.sessionSaved), let sessionID = agent.sessionID {
             saveBinding(sessionID, of: agent)
             clearForkMarker(of: agent)
+        }
+        if effects.contains(.sessionMissing), let missing = agent.missingSessionID {
+            let statusDir = statusDir
+            store(
+                AgentSessionStore.sessionURL(id, statusDir),
+                "The missing session \(missing) of \(agent.name) could not be recorded, so after a restart its next start tries to resume it once more"
+            ) {
+                try AgentSessionStore.markMissing(missing, for: id, directory: statusDir)
+            }
         }
         if effects.contains(where: {
             if case .providerExited = $0 { return true }
