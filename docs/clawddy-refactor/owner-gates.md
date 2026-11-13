@@ -14,8 +14,8 @@ the live app quit; never build or launch it for G0.
 
 ```sh
 cd ~/projects/ghostty
-# The app under gates/G0 is a frozen copy of the P0.8 dev build, so later builds cannot replace it while it runs.
-APP=/Volumes/Xcode/GhosttyBuilds/ghostty/gates/G0/Ghostty.app
+# The app under gates/final is a frozen copy of the dev build of the finished engine, so later builds cannot replace it while it runs.
+APP=/Volumes/Xcode/GhosttyBuilds/ghostty/gates/final/Ghostty.app
 plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist"   # com.mitchellh.ghostty.clawddy-dev
 B=~/.config/ghostty-agents-backups/20261112-081548-baseline
 G0=/Volumes/Xcode/GhosttyBuilds/ghostty/logs/g0
@@ -46,13 +46,13 @@ kept in memory, not on disk, so start this before launching. Use the full
 path: in zsh, a bare `log` is a different, built-in command.
 
 ```sh
-/usr/bin/log stream --level info --style compact --predicate 'subsystem == "com.mitchellh.ghostty" AND category == "Clawddy" AND processImagePath CONTAINS "/gates/G0/"'
+/usr/bin/log stream --level info --style compact --predicate 'subsystem == "com.mitchellh.ghostty" AND category == "Clawddy" AND processImagePath CONTAINS "/gates/final/"'
 ```
 
 Launch Clawddy Dev:
 
 ```sh
-env -u NO_COLOR open -na /Volumes/Xcode/GhosttyBuilds/ghostty/gates/G0/Ghostty.app
+env -u NO_COLOR open -na /Volumes/Xcode/GhosttyBuilds/ghostty/gates/final/Ghostty.app
 ```
 
 The log shows, in this order:
@@ -103,7 +103,7 @@ This covers its `metadata.json`, `events` and bindings.
 
 ```sh
 cat ~/.config/clawddy-dev/status/$ID.session.json   # sessionID is the <new ID> from the ps line
-ls ~/.config/clawddy-dev/status/$ID.fork.json       # gone: removed at the agent's first turn (P0.8 build: once it was seen alive)
+ls ~/.config/clawddy-dev/status/$ID.fork.json       # gone: removed at the agent's first turn
 cat ~/.config/ghostty-agents/status/$ID.session.json 2>/dev/null || cat ~/.config/ghostty-agents/status/$ID.session
 ```
 
@@ -139,15 +139,12 @@ runs is expected; anything else is a failure.
   preflight check). Holding the dev root's lock, it writes the fork markers
   and `state.json` into `~/.config/clawddy-dev`, then `agents.json` last.
   Codex agents are not copied, and nothing is copied from `cron/`, the
-  journals, `runtime/` or `hooks/`. (The frozen P0.8 build under
-  `gates/G0` instead builds `~/.config/.clawddy-dev-seeding-<uuid>` and
-  renames it into place.)
+  journals, `runtime/` or `hooks/`.
 - If the seed fails, the app stops at once ("Clawddy Dev quit unexpectedly").
   The reason is in the newest `ghostty-*.ips` in
   `~/Library/Logs/DiagnosticReports/`, after "Could not seed". The dev root
   has no `agents.json` then, so the next launch seeds again over what was
-  written, and nothing is left beside it. (With the frozen P0.8 build, delete
-  a leftover `~/.config/.clawddy-dev-seeding-*` folder first.) The likeliest
+  written, and nothing is left beside it. The likeliest
   cause is the live app writing a file during the read; relaunching is enough.
 - A second Clawddy Dev started at the same time says that Clawddy is already
   running and quits; only the first one seeds.
@@ -182,3 +179,51 @@ root has no `agents.json`. Sessions the dev agents
 created stay in Claude's own store and do not affect the live agents. The dev
 app's window and selection preferences are in their own domain; to reset them
 too: `defaults delete com.mitchellh.ghostty.clawddy-dev`.
+
+# Gate G3 checklist (status reports reach the app)
+
+Same app, same session as G0. About 15 minutes. In a third terminal, watch the
+status reports the dev app receives:
+
+```sh
+/usr/bin/log stream --level debug --predicate 'subsystem == "com.mitchellh.ghostty.clawddy-dev" AND category == "ghostty" AND eventMessage BEGINSWITH "program_status"'
+```
+
+1. In Clawddy Dev open a plain terminal (File, New Window) and run
+   `printf '\e]7501;?\a'; sleep 1`. The terminal answers (a short burst of
+   characters may be echoed at the prompt). No log line is expected for the query.
+2. Run `printf '\e]7501;state=working\a'`: one log line `program_status state=working`.
+   Run `printf '\ec'`: one log line `program_status state=clear`.
+3. Create a dev agent in standard mode (so permission prompts appear), start it,
+   and ask for something that needs a permission, for example "create a file
+   named g3.txt containing hello". The log shows, in order: `idle`, `working`,
+   `blocked kind=permission`, `working` after you allow it, `done`. The agent's
+   header shows Working, Waiting for You, then Ready with a completion.
+4. Type `/exit`. The log shows `clear`, then one line with `id=clawddy`. The
+   header shows Exited at once.
+5. No line containing "unknown action" in the dev app's log.
+
+If step 1 or 2 fails, stop and report: the terminal core is not forwarding. If
+only step 3 or 4 fails, paste the log lines.
+
+# Acceptance checklist (gate GA, once, after the soak)
+
+Engine behaviour that unit tests cannot prove. Each line is one action and what
+must happen.
+
+- Cmd-W on a running agent asks before closing. With `confirm-close-surface = false` in the Ghostty config it does not ask.
+- Cmd-Q with running agents asks, and names how many are running; try with only agents running, and with one extra terminal window.
+- Esc during a turn: the agent returns to Ready within a second, with no completion and no notification.
+- A completion while you are viewing the agent leaves no unread mark. One that arrives after you switched to another agent, or with the app in the background, leaves one.
+- `kill` the provider process: the agent shows Exited at once.
+- `/clear`, then Restart: the post-clear session is resumed (the pre-clear conversation is not shown).
+- After `/exit`, type `claude` by hand in the leftover shell: the agent stays Exited. Restart then asks before closing that shell.
+- Rename a running agent: nothing is typed into its terminal. After the next start, `/status` in Claude shows the new name.
+- `/compact`: shows Optimizing Context, then Ready, with no completion and no notification.
+- A long tool call (for example `sleep 150` allowed to run in the foreground): the agent shows Working throughout, never Status Delayed.
+- Open a seeded agent, type nothing, `/exit`, start it again: it forks again from the live conversation and its history is there.
+- Quit Clawddy Dev, put the single character `{` into `~/.config/clawddy-dev/preferences.json`, start it: Settings and the New Agent sheet show the error, and the start mode offered is standard. Remove the file afterwards.
+- VoiceOver on: a completion, a permission prompt and a failure are each announced once.
+- A Codex agent in Clawddy Dev shows the notice that this build does not track Codex status, and its terminal works.
+
+Anything that differs is a bug that blocks switch-over; note what you did and what you saw.

@@ -1,6 +1,6 @@
 # Clawddy refactor plan
 
-Status: revision 2, 2026-11-11, approved and in execution since 2026-11-12. Phase 0, Phase 2 and P3.5a are committed; gates G0 and G3 await the owner.
+Status: revision 2, 2026-11-11, approved; executed 2026-11-12. Phases 0 to 3 are committed on `clawddy/refactor`, followed by an independent review whose findings are fixed. Nothing has run in the real app yet: gates G0, G3, GA (soak, checklist, switch-over) and G4 await the owner; the checklists are in `docs/clawddy-refactor/owner-gates.md`. Deviations from the text below: Claude keeps a fifth hook, `SessionEnd`; the bridge file is 1,364 lines, not under 1,000; `macos/build.nu` builds the dev identity by default and production only with `--identity production`; `cleanupV5` runs on the production build's first start.
 Revision 2 incorporates an adversarial review of revision 1 against the code; the
 review found four defects that would have disturbed the live app or lost sessions,
 and all of its findings are folded in below (section 14 lists what changed).
