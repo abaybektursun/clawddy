@@ -367,6 +367,64 @@ struct AgentProgramStatusTests {
         #expect(h.notifier.announced == ["Agent encountered an error"])
     }
 
+    /// Review M5: the `StopFailure` record of a failure the report already
+    /// raised changes nothing even when an `idle` (Esc on the failed turn)
+    /// or a settled next turn reaches the bridge in between: one failed turn
+    /// is one notification, and the running turn stays running.
+    @Test func lateStopFailureOfAReportedFailureChangesNothing() throws {
+        for (between, shown) in [(idle, DisplayState.idle), (working, .working)] {
+            let h = try AgentBridgeHarness()
+            defer { h.remove() }
+            let id = try h.addAgent("Agent")
+            h.start()
+            h.spawn()
+            try h.launch(id)
+            let agent = try h.agent(id)
+
+            try h.osc(id, at: 9.987, working)
+            try h.osc(id, at: 10.426, modelError)
+            #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
+            try h.osc(id, at: 10.45, between)
+            // The record, written at 10.441, reaches the bridge up to 0.3 s
+            // later: after a `working` at 10.45 has started the next turn.
+            try h.at(10.74)
+            #expect(agent.displayState == shown)
+            try h.hook(id, at: 10.741, "StopFailure")
+
+            #expect(agent.displayState == shown)
+            #expect(agent.runtimeErrorMessage == nil)
+            #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
+            #expect(h.notifier.announced == ["Agent encountered an error"])
+            // The next failure is reported again.
+            try h.osc(id, at: 20, working)
+            try h.osc(id, at: 20.4, modelError)
+            try h.hook(id, at: 20.42 + hookDelay, "StopFailure")
+            #expect(h.notifier.posted.map(\.identifier).count == 2)
+        }
+    }
+
+    /// Review M7: a `StopFailure` record that reaches the bridge after the
+    /// exit report fails nothing and notifies nothing: the provider has
+    /// gone, as for a late prompt.
+    @Test func stopFailureAfterTheExitReportChangesNothing() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.launch(id)
+        try h.startTurn(id)
+        try h.providerExited(id, status: 1)
+        let agent = try h.agent(id)
+        #expect(agent.displayState == .dead)
+
+        try h.hook(id, "StopFailure")
+
+        #expect(agent.displayState == .dead)
+        #expect(agent.runtimeErrorMessage == nil)
+        #expect(h.notifier.posted.isEmpty)
+        #expect(h.notifier.announced.isEmpty)
+    }
+
     /// Case 2 and amendment 2 (c2b): with no route to the API, `error` comes
     /// 106 ms after `working`, inside the turn-start delay. A failure is
     /// never a blip: the turn starts and fails at once, notified once.
@@ -822,11 +880,14 @@ struct AgentProgramStatusMappingTests {
     }
 
     /// `StopFailure` fails a turn once: after Claude's own `error` report it
-    /// changes nothing.
+    /// only takes the record off the ones due.
     @Test func stopFailureAfterTheErrorReportChangesNothing() throws {
         let failed = try reduce(.active(turnID: nil), .programStatus(programStatus("state=error:msg=bm8gcm91dGU=")))
         #expect(failed.effects == [.failed])
         #expect(failed.state.runtimeErrorMessage == "no route")
+        #expect(failed.state.stopFailuresDue == 1)
+        var recorded = failed.state
+        recorded.stopFailuresDue = 0
 
         let generation = try #require(failed.state.launchGeneration)
         let hook = AgentStateReducer.reduce(failed.state, event: .provider(
@@ -835,7 +896,7 @@ struct AgentProgramStatusMappingTests {
             eventID: "hook",
             event: .turnFailed(nil),
             isViewed: false))
-        #expect(hook.state == failed.state)
+        #expect(hook.state == recorded)
         #expect(hook.effects.isEmpty)
     }
 

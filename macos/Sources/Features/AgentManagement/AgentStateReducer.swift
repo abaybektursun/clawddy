@@ -90,6 +90,12 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// first turn starts (`sessionSaved`); until then a relaunch creates or
     /// forks it again instead of resuming a session that does not exist.
     var sessionUnsaved = false
+    /// Failures this launch's `error` reports raised whose `StopFailure`
+    /// record has not arrived. Claude reports one failed turn on both
+    /// channels, the record 15 to 27 ms after the report and the event file
+    /// up to 0.3 s later, when an `idle` or the next turn may already have
+    /// cleared the failure; the record must then not fail a turn again.
+    var stopFailuresDue = 0
 }
 
 enum AgentRuntimeEvent: Equatable, Sendable {
@@ -217,11 +223,11 @@ enum AgentStateReducer {
             }
 
             switch domainEvent {
-            case .sessionStarted, .turnCompleted, .turnFailed:
+            case .sessionStarted, .turnCompleted:
                 confirmProviderAlive(&state, effects: &effects)
-            case .turnStarted:
-                // A prompt the event file delivers after the exit report
-                // starts no turn: the provider has gone.
+            case .turnStarted, .turnFailed:
+                // A prompt or a failure the event file delivers after the
+                // exit report starts or fails no turn: the provider has gone.
                 guard state.processState != .exited else { return (current, []) }
                 confirmProviderAlive(&state, effects: &effects)
             case .programStatus(let report):
@@ -314,8 +320,15 @@ enum AgentStateReducer {
                     effects: &effects)
 
             case .turnFailed(let message):
-                // A failed turn fails once: Claude's own `error` report
-                // comes 15 to 27 ms before its `StopFailure` hook.
+                // A failed turn fails once. Claude's own `error` report
+                // usually comes first, and its record then changes nothing,
+                // even after an `idle` or the next turn (`stopFailuresDue`).
+                // A record that comes first fails the turn; the report then
+                // only adds its message.
+                if state.stopFailuresDue > 0 {
+                    state.stopFailuresDue -= 1
+                    break
+                }
                 guard state.runtimeErrorMessage == nil else { break }
                 failTurn(message, state: &state, effects: &effects)
 
@@ -470,6 +483,9 @@ enum AgentStateReducer {
             if state.turnState == .starting {
                 startTurn(&state, effects: &effects, activity: .executing)
             }
+            // A failure this report raises has its `StopFailure` record to
+            // come; one the record raised first has had it.
+            if state.runtimeErrorMessage == nil { state.stopFailuresDue += 1 }
             failTurn(report.message, state: &state, effects: &effects)
         }
     }
