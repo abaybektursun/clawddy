@@ -21,6 +21,20 @@ A file for [guiding coding agents](https://agents.md/).
   directory; the wrapper restores the symlink after a build and preserves
   replaced copies in `<root>/xcframework/history`.
 
+## Never Build Debug
+
+- Never build, install or run a debug version of the app or of the library it
+  links. Every app build is the optimized Release build.
+- The library the app links (`./build.nu -Demit-macos-app=false`) is built with
+  `-Doptimize=ReleaseFast`; the wrapper adds it and refuses `-Doptimize=Debug`.
+  `macos/build.nu` refuses `--configuration Debug`.
+- Before installing or handing over an app, check that it is not a debug
+  build: the library `macos/GhosttyKit.xcframework/macos-arm64_x86_64/ghostty-internal.a`
+  is about 300 MB optimized and over 430 MB in debug, and a debug app shows a
+  debug-build warning at launch.
+- Zig unit tests (`./build.nu test ...`) may run in Zig's test mode; they never
+  produce an app.
+
 ## Commands
 
 - **Build:** `./build.nu`

@@ -29,12 +29,15 @@ def external-root [override?: string] {
 
 def main [
     --scheme: string = "Ghostty"       # Xcode scheme (Ghostty, DockTilePlugin)
-    --configuration: string = "Release" # Build configuration (Debug, Release, ReleaseLocal)
+    --configuration: string = "Release" # Build configuration (Release, ReleaseLocal); Debug is refused
     --action: string = "build"         # xcodebuild action (build, test, clean, etc.)
     --identity: string = "dev"         # App identity (dev, production); tests always use their own
     --build-root: string                # Override GHOSTTY_MACOS_BUILD_ROOT
     --show-paths                        # Print resolved storage paths without building
 ] {
+    if $configuration == "Debug" {
+        error make { msg: "Debug builds of the app are not allowed in this workspace; build Release." }
+    }
     if $identity not-in ["production" "dev"] {
         error make { msg: $"Unknown identity ($identity); expected dev or production" }
     }

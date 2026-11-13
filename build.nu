@@ -223,6 +223,9 @@ def --wrapped main [
     # default is a debug build, which makes every app built afterwards slow
     # and show the debug-build warning, so that library is optimized unless
     # the caller chooses a mode.
+    if "-Doptimize=Debug" in $arguments {
+        error make { msg: "Debug builds are not allowed in this workspace; omit -Doptimize or use a release mode." }
+    }
     let builds_app_library = ("-Demit-macos-app=false" in $arguments)
     let chooses_mode = ($arguments | any {|a| $a starts-with "-Doptimize=" })
     let zig_arguments = if $builds_app_library and not $chooses_mode {
