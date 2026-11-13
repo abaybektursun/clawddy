@@ -129,7 +129,10 @@ final class DiagnosticsRecord: Sendable {
 /// `health` without running a CLI, launches are prepared by `prepareLaunch`,
 /// and launch requests and cleanups are recorded. The default launch runs
 /// `/usr/bin/true` and reads nothing, where the real Claude launch reads the
-/// user's Claude settings. Used from the main thread only: the harness runs
+/// user's Claude settings. It names no session of its own, so each
+/// `SessionStart` binds at once, as for a resumed session; a test of a new
+/// or forked Claude session, whose binding waits for its first turn, uses
+/// `useRealClaudeLaunch`. Used from the main thread only: the harness runs
 /// all IO inline.
 final class FakeProviders: @unchecked Sendable {
     let real: AgentProviderTable
@@ -334,9 +337,10 @@ final class AgentBridgeHarness {
     var binFolder: URL { folder.appendingPathComponent("bin", isDirectory: true) }
 
     /// Launches go through the real Claude provider, which finds a stand-in
-    /// `claude` in `binFolder` that exits at once. Unlike the default launch
-    /// it reads the user's Claude settings, as the provider's own tests do;
-    /// it writes only under the harness root.
+    /// `claude` in `binFolder` that exits at once, and which names the
+    /// session a new or forked launch creates. Unlike the default launch it
+    /// reads the user's Claude settings, as the provider's own tests do; it
+    /// writes only under the harness root.
     func useRealClaudeLaunch() throws {
         let executable = binFolder.appendingPathComponent("claude")
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)

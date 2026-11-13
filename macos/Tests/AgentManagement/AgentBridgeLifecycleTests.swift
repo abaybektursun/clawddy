@@ -234,20 +234,19 @@ struct AgentBridgeLifecycleTests {
         #expect(h.aggregateChanges == [.idle, .attention])
     }
 
-    /// The fork marker stays until the forked Claude is seen alive, at its
-    /// first report; its `SessionStart` binds the fork's own session.
-    @Test func forkLaunchUsesPendingForkAndClearsItOnceAlive() throws {
+    /// A fork keeps its marker until its session is saved, at its first
+    /// turn: Claude writes a forked session only with its first entry
+    /// (review S1 capture), so being alive is not enough. The first turn
+    /// makes the fork's own session the binding and drops the marker.
+    @Test func forkKeepsPendingForkUntilItsFirstTurn() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
+        try h.useRealClaudeLaunch()
         let sourceID = try h.addAgent("Source")
         h.start()
         try h.launch(sourceID, session: "source-session")
-
-        let fork = try #require(h.bridge.forkAgent(
-            sourceId: sourceID,
-            config: h.config,
-            project: AgentBridgeHarness.projectName,
-            task: AgentBridgeHarness.taskName))
+        try h.completeTurn(sourceID)
+        let fork = try forkOf(sourceID, in: h)
         #expect(fork.name == "Source-fork")
         #expect(h.exists(h.statusFile(fork.id, "fork.json")))
 
@@ -258,12 +257,111 @@ struct AgentBridgeLifecycleTests {
             provider: .claudeCode,
             sourceSessionID: "source-session"))
         #expect(request.session == nil)
+        let forkSession = try #require(h.agent(fork.id).sessionID)
+        #expect(try h.launchScript().contains(shellCommand([
+            "--resume", "source-session", "--fork-session", "--session-id", forkSession,
+        ])))
 
-        try h.hook(fork.id, "SessionStart", session: "fork-session")
-        #expect(try h.binding(fork.id).sessionID == "fork-session")
-        #expect(h.exists(h.statusFile(fork.id, "fork.json")))
         try h.osc(fork.id, "state=idle:app=claude-code")
+        try h.hook(fork.id, "SessionStart", session: forkSession)
+        #expect(h.exists(h.statusFile(fork.id, "fork.json")))
+        #expect(!h.exists(h.statusFile(fork.id, "session.json")))
+
+        try h.startTurn(fork.id)
         #expect(!h.exists(h.statusFile(fork.id, "fork.json")))
+        #expect(try h.binding(fork.id) == AgentSessionBinding(
+            provider: .claudeCode,
+            sessionID: forkSession,
+            launchGeneration: try h.generation(fork.id)))
+    }
+
+    /// Review S1: a seeded fork opened and closed without a prompt has no
+    /// session on disk, so its next launch forks again from the source,
+    /// under a new ID, and starts; it is not told that its conversation is
+    /// missing, and its link to the source stays.
+    @Test func forkClosedWithoutAPromptForksAgain() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        try h.useRealClaudeLaunch()
+        let sourceID = try h.addAgent("Source")
+        h.start()
+        try h.launch(sourceID, session: "source-session")
+        try h.completeTurn(sourceID)
+        let fork = try forkOf(sourceID, in: h)
+
+        try h.activate(fork.id)
+        let first = try #require(h.agent(fork.id).sessionID)
+        try h.osc(fork.id, "state=idle:app=claude-code")
+        try h.hook(fork.id, "SessionStart", session: first)
+        try h.osc(fork.id, "state=clear")
+        try h.providerExited(fork.id, status: 0)
+        #expect(!h.exists(h.statusFile(fork.id, "session.json")))
+        #expect(h.exists(h.statusFile(fork.id, "fork.json")))
+
+        try h.activate(fork.id)
+        let agent = try h.agent(fork.id)
+        let second = try #require(agent.sessionID)
+        #expect(second != first)
+        #expect(try h.launchScript().contains(shellCommand([
+            "--resume", "source-session", "--fork-session", "--session-id", second,
+        ])))
+        try h.osc(fork.id, "state=idle:app=claude-code")
+        try h.hook(fork.id, "SessionStart", session: second)
+        try h.hook(fork.id, "SessionEnd", session: second)
+        #expect(agent.displayState == .idle)
+        #expect(agent.missingSessionID == nil)
+        #expect(agent.failureMessage == nil)
+    }
+
+    /// Review S1 and M3: a new agent's session is not on disk before its
+    /// first turn. A first launch that ends before one, here at the folder
+    /// trust dialog, which exits with status 1 and reports nothing, or after
+    /// Claude started but nothing was typed, leaves no binding, so the next
+    /// launch starts a new session under a new ID instead of being told that
+    /// a conversation it never had could not be resumed. Once a turn has
+    /// started, the next launch resumes the session.
+    @Test func newSessionIsResumedOnlyAfterItsFirstTurn() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        try h.useRealClaudeLaunch()
+        let id = try h.addAgent("Agent")
+        h.start()
+        let agent = try h.agent(id)
+        func launchesNewSession() throws -> String {
+            let sessionID = try #require(agent.sessionID)
+            let script = try h.launchScript()
+            #expect(script.contains(shellCommand(["--session-id", sessionID, "--name", "Agent"])))
+            #expect(!script.contains("--resume"))
+            return sessionID
+        }
+
+        try h.activate(id)
+        let declined = try launchesNewSession()
+        try h.osc(id, "state=clear")
+        try h.providerExited(id, status: 1)
+        #expect(agent.displayState == .failed)
+        #expect(!h.exists(h.statusFile(id, "session.json")))
+
+        try h.activate(id)
+        let unprompted = try launchesNewSession()
+        #expect(unprompted != declined)
+        try h.osc(id, "state=idle:app=claude-code")
+        try h.hook(id, "SessionStart", session: unprompted)
+        try h.providerExited(id, status: 0)
+        #expect(!h.exists(h.statusFile(id, "session.json")))
+
+        try h.activate(id)
+        let prompted = try launchesNewSession()
+        #expect(prompted != unprompted)
+        try h.osc(id, "state=idle:app=claude-code")
+        try h.hook(id, "SessionStart", session: prompted)
+        try h.completeTurn(id)
+        #expect(try h.binding(id).sessionID == prompted)
+        try h.providerExited(id, status: 0)
+
+        try h.activate(id)
+        #expect(try h.launchScript().contains(shellCommand(["--resume", prompted, "--name", "Agent"])))
+        #expect(agent.missingSessionID == nil)
     }
 
     /// A resume of a session Claude cannot find, as captured for P3.6: it
@@ -309,8 +407,11 @@ struct AgentBridgeLifecycleTests {
         let project = try #require(h.config.project(forAgent: id))
         h.bridge.startFresh(id: id, host: h.host, project: project)
 
-        let fresh = try h.binding(id).sessionID
+        // The new session is not on disk before its first turn, so nothing
+        // names it yet.
+        let fresh = try #require(agent.sessionID)
         #expect(fresh != "gone-session" && UUID(uuidString: fresh) != nil)
+        #expect(!h.exists(h.statusFile(id, "session.json")))
         #expect(!h.exists(h.statusFile(id, "session")))
         let script = try h.launchScript()
         #expect(script.contains(shellCommand(["--session-id", fresh, "--name", "Agent"])))
@@ -319,7 +420,8 @@ struct AgentBridgeLifecycleTests {
         #expect(agent.displayState == .launching)
         // Start fresh is only for a missing session.
         h.bridge.startFresh(id: id, host: h.host, project: project)
-        #expect(try h.binding(id).sessionID == fresh)
+        #expect(agent.sessionID == fresh)
+        #expect(h.providers.launchRequests.count == 2)
     }
 
     /// The usual order: Claude runs `SessionEnd` before it exits (0.303 s
@@ -729,4 +831,14 @@ struct AgentBridgeLifecycleTests {
         #expect(try h.launchScripts().isEmpty)
         #expect(try h.agent(id).displayState == .launching)
     }
+}
+
+/// A fork of `sourceID` in the harness's task, as the agent list makes one.
+@MainActor
+private func forkOf(_ sourceID: UUID, in h: AgentBridgeHarness) throws -> AgentEntry {
+    try #require(h.bridge.forkAgent(
+        sourceId: sourceID,
+        config: h.config,
+        project: AgentBridgeHarness.projectName,
+        task: AgentBridgeHarness.taskName))
 }

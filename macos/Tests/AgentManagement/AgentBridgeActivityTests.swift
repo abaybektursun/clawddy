@@ -345,9 +345,10 @@ struct AgentBridgeActivityTests {
     }
 
     /// Every `SessionStart` the real hook script records rebinds the agent,
-    /// whatever its source, in the order Claude sends them (P3.5a case 7):
-    /// after `/clear` the binding names the new session, and Restart
-    /// resumes it.
+    /// whatever its source, in the order Claude sends them (P3.5a case 7),
+    /// once its session is on disk: after `/clear` the binding names the new
+    /// session, and Restart resumes it. The launched session is saved by
+    /// its first turn (review S1 capture).
     @Test func sessionStartHookRebindsAfterClear() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -355,7 +356,7 @@ struct AgentBridgeActivityTests {
         let id = try h.addAgent("Agent")
         h.start()
         try h.activate(id)
-        let launched = try h.binding(id).sessionID
+        let launched = try #require(h.agent(id).sessionID)
         let cleared = "8d0e5f6a-3b2c-4d1e-9f8a-7b6c5d4e3f2a"
         let agent = try h.agent(id)
         func run(_ payload: String) throws {
@@ -372,6 +373,9 @@ struct AgentBridgeActivityTests {
         }
 
         try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionStart","source":"startup","model":"claude-test"}"#)
+        try h.osc(id, "state=idle:app=claude-code")
+        #expect(!h.exists(h.statusFile(id, "session.json")))
+        try h.completeTurn(id)
         #expect(try h.binding(id) == binding(launched))
         try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionEnd","reason":"clear"}"#)
         try run(#"{"session_id":"\#(cleared)","hook_event_name":"SessionStart","source":"clear"}"#)

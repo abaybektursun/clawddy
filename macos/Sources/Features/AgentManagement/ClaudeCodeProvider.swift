@@ -102,31 +102,28 @@ struct ClaudeCodeProvider: Sendable {
             root: root,
             hooks: overlayHooks(agentID: request.agentID, generation: request.launchGeneration))
         var arguments: [String] = []
-        var newSession: AgentSessionBinding?
+        var newSessionID: String?
         var resumedSessionID: String?
         // The ID of a session this launch creates, in Claude's lowercase form.
-        let chosenSession = AgentSessionBinding(
-            provider: id,
-            sessionID: UUID().uuidString.lowercased(),
-            launchGeneration: request.launchGeneration)
+        let chosenSessionID = UUID().uuidString.lowercased()
 
-        // A fork marker stays until the forked process is seen alive, so
-        // while it exists the fork has not started, and this launch forks
-        // again rather than resuming a session that may not exist. Claude
-        // accepts `--session-id` together with `--resume` only with
-        // `--fork-session`.
+        // A fork marker stays until the fork's session is saved, at its first
+        // turn, so while it exists the fork has no session on disk, and this
+        // launch forks again rather than resuming a session that does not
+        // exist. Claude accepts `--session-id` together with `--resume` only
+        // with `--fork-session`.
         if let pending = request.pendingFork, pending.provider == id {
-            newSession = chosenSession
+            newSessionID = chosenSessionID
             arguments += [
                 "--resume", pending.sourceSessionID,
-                "--fork-session", "--session-id", chosenSession.sessionID,
+                "--fork-session", "--session-id", chosenSessionID,
             ]
         } else if let session = request.session, session.provider == id {
             resumedSessionID = session.sessionID
             arguments += ["--resume", session.sessionID]
         } else {
-            newSession = chosenSession
-            arguments += ["--session-id", chosenSession.sessionID]
+            newSessionID = chosenSessionID
+            arguments += ["--session-id", chosenSessionID]
         }
         // Claude takes the agent's label at every launch, resumes included,
         // so a rename reaches the session at its next launch.
@@ -153,7 +150,7 @@ struct ClaudeCodeProvider: Sendable {
             arguments: arguments,
             environment: environment,
             metadataAvailability: availability,
-            newSession: newSession,
+            newSessionID: newSessionID,
             resumedSessionID: resumedSessionID))
     }
 

@@ -307,46 +307,54 @@ struct AgentHookIntegrationTests {
         #expect(try filesUnder(sandbox.url) == before)
     }
 
-    /// A new Claude session launches as `--session-id <new> --name <label>`,
-    /// and the new ID is the agent's binding before the process starts. The
-    /// next launch resumes that session, still named.
+    /// A new Claude session launches as `--session-id <new> --name <label>`.
+    /// Preparing the launch saves nothing: Claude writes the session only
+    /// with its first entry (review S1 capture), so until the bridge saves
+    /// the binding at the first turn, the next launch chooses a new ID. Once
+    /// it is saved, the next launch resumes that session, still named.
     @Test func claudeNewLaunchChoosesSessionID() throws {
         let sandbox = try HookSandbox()
         defer { sandbox.remove() }
         let request = sandbox.request(.claudeCode)
         let claude = sandbox.bin.appendingPathComponent("claude").path
-        func binding() throws -> AgentSessionBinding {
-            try #require(try AgentSessionStore.session(
-                for: request.agentID,
-                provider: .claudeCode,
-                directory: sandbox.root.statusDir))
-        }
+        let bindingFile = AgentSessionStore.sessionURL(request.agentID, sandbox.root.statusDir)
 
         let first = try sandbox.prepareSurfaceLaunch(request)
-        let chosen = try binding()
-        let sessionID = chosen.sessionID
+        let sessionID = try #require(first.newSessionID)
         #expect(UUID(uuidString: sessionID) != nil && sessionID == sessionID.lowercased())
-        #expect(chosen == AgentSessionBinding(
-            provider: .claudeCode,
-            sessionID: sessionID,
-            launchGeneration: request.launchGeneration))
+        #expect(first.resumedSessionID == nil)
+        #expect(!FileManager.default.fileExists(atPath: bindingFile.path))
         let firstScript = try String(contentsOf: first.scriptURL, encoding: .utf8)
         #expect(firstScript.contains(shellCommand([claude, "--session-id", sessionID, "--name", "Agent"])))
         #expect(!firstScript.contains("--resume"))
 
+        var unsaved = request
+        unsaved.launchGeneration = UUID()
+        let again = try sandbox.prepareSurfaceLaunch(unsaved)
+        #expect(try #require(again.newSessionID) != sessionID)
+
+        let saved = AgentSessionBinding(
+            provider: .claudeCode,
+            sessionID: sessionID,
+            launchGeneration: request.launchGeneration)
+        try AgentSessionStore.write(saved, for: request.agentID, directory: sandbox.root.statusDir)
         var next = request
         next.launchGeneration = UUID()
         let second = try sandbox.prepareSurfaceLaunch(next)
         let secondScript = try String(contentsOf: second.scriptURL, encoding: .utf8)
         #expect(secondScript.contains(shellCommand([claude, "--resume", sessionID, "--name", "Agent"])))
         #expect(!secondScript.contains("--session-id"))
-        #expect(try binding() == chosen)
+        #expect(second.newSessionID == nil && second.resumedSessionID == sessionID)
+        #expect(try AgentSessionStore.session(
+            for: request.agentID,
+            provider: .claudeCode,
+            directory: sandbox.root.statusDir) == saved)
     }
 
     /// A fork launches as `--resume <source> --fork-session --session-id
-    /// <new>`, and the new ID is the agent's binding before the process
-    /// starts. Until the fork is seen alive its marker stays, and a relaunch
-    /// forks again under another new ID; once the bridge has cleared the
+    /// <new>`, and preparing it saves nothing. Until the fork's first turn
+    /// the bridge keeps its marker, and a relaunch forks again under another
+    /// new ID; once the bridge has saved the fork's session and cleared the
     /// marker, the next launch resumes the fork's own session.
     @Test func forkLaunchAnnouncesItsNewSessionID() throws {
         let sandbox = try HookSandbox()
@@ -358,41 +366,39 @@ struct AgentHookIntegrationTests {
             AgentPendingFork(provider: .claudeCode, sourceSessionID: "live-session"),
             for: request.agentID,
             directory: statusDir)
-        func launch() throws -> (binding: AgentSessionBinding, script: String) {
+        func launch() throws -> (sessionID: String?, script: String) {
             let launch = try sandbox.prepareSurfaceLaunch(request)
-            let binding = try #require(try AgentSessionStore.session(
-                for: request.agentID,
-                provider: .claudeCode,
-                directory: statusDir))
-            return (binding, try String(contentsOf: launch.scriptURL, encoding: .utf8))
+            return (launch.newSessionID, try String(contentsOf: launch.scriptURL, encoding: .utf8))
         }
         func command(_ arguments: [String]) -> String {
             arguments.map(AgentHookRuntime.shellQuote).joined(separator: " ")
         }
 
         let first = try launch()
-        let forkID = first.binding.sessionID
+        let forkID = try #require(first.sessionID)
         #expect(UUID(uuidString: forkID) != nil && forkID == forkID.lowercased())
-        #expect(first.binding == AgentSessionBinding(
-            provider: .claudeCode,
-            sessionID: forkID,
-            launchGeneration: request.launchGeneration))
+        #expect(!FileManager.default.fileExists(atPath: AgentSessionStore.sessionURL(request.agentID, statusDir).path))
         #expect(first.script.contains(command([
             sandbox.bin.appendingPathComponent("claude").path,
             "--resume", "live-session", "--fork-session", "--session-id", forkID, "--name", "Agent",
         ])))
 
         let again = try launch()
-        #expect(again.binding.sessionID != forkID)
+        let againID = try #require(again.sessionID)
+        #expect(againID != forkID)
         #expect(again.script.contains(command([
-            "--resume", "live-session", "--fork-session", "--session-id", again.binding.sessionID,
+            "--resume", "live-session", "--fork-session", "--session-id", againID,
         ])))
 
+        try AgentSessionStore.write(
+            AgentSessionBinding(provider: .claudeCode, sessionID: againID, launchGeneration: request.launchGeneration),
+            for: request.agentID,
+            directory: statusDir)
         try AgentSessionStore.clearPendingFork(for: request.agentID, directory: statusDir)
         let resumed = try launch()
-        #expect(resumed.binding == again.binding)
+        #expect(resumed.sessionID == nil)
         #expect(resumed.script.contains(command([
-            sandbox.bin.appendingPathComponent("claude").path, "--resume", again.binding.sessionID,
+            sandbox.bin.appendingPathComponent("claude").path, "--resume", againID,
         ])))
         #expect(!resumed.script.contains("--fork-session"))
     }

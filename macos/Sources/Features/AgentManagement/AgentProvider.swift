@@ -246,11 +246,13 @@ struct AgentPreparedLaunch: Sendable {
     var arguments: [String]
     var environment: [String: String]
     var metadataAvailability: AgentMetadataAvailability
-    /// The session this launch creates under an ID it chose, recorded as the
-    /// agent's binding before the process starts: every new or forked Claude
-    /// session. Nil when the launch resumes a session, and for Codex, which
-    /// cannot be given an ID.
-    var newSession: AgentSessionBinding?
+    /// The ID of the session this launch creates: every new or forked Claude
+    /// session. Claude writes such a session to disk only with its first
+    /// entry (`cli-facts.md`, review S1 capture), so it becomes the agent's
+    /// binding only once its first turn starts; until then the next launch
+    /// creates or forks it again. Nil when the launch resumes a session, and
+    /// for Codex, which cannot be given an ID.
+    var newSessionID: String?
     /// The saved session a Claude launch resumes. Claude ends a resume of a
     /// session it cannot find with `SessionEnd` and no `SessionStart`, which
     /// is how the agent learns that the session is missing.
@@ -423,6 +425,8 @@ struct AgentPreparedSurfaceLaunch: Sendable {
     var integrationIssue: String?
     /// See `AgentPreparedLaunch.resumedSessionID`.
     var resumedSessionID: String?
+    /// See `AgentPreparedLaunch.newSessionID`.
+    var newSessionID: String?
 }
 
 enum AgentSurfaceLaunchOutcome: Sendable {
@@ -494,22 +498,6 @@ struct AgentLaunchCoordinator: Sendable {
                 provider: provider,
                 generation: generation,
                 integrationIssue: nil)
-        }
-        // A session ID the launch chose is the agent's binding before the
-        // process starts; the bridge rewrites the binding from each
-        // `SessionStart` of the launch.
-        if let session = prepared.newSession {
-            do {
-                try AgentSessionStore.write(session, for: agentID, directory: root.statusDir)
-            } catch {
-                return .failure(
-                    .launchPreparationFailed(
-                        provider,
-                        "The new session's ID could not be saved: \(error.localizedDescription)"),
-                    provider: provider,
-                    generation: generation,
-                    integrationIssue: nil)
-            }
         }
         let integrationIssue: String?
         switch entry.prepareIntegration() {
@@ -584,7 +572,8 @@ struct AgentLaunchCoordinator: Sendable {
             environment: environment,
             metadataAvailability: prepared.metadataAvailability,
             integrationIssue: integrationIssue,
-            resumedSessionID: prepared.resumedSessionID))
+            resumedSessionID: prepared.resumedSessionID,
+            newSessionID: prepared.newSessionID))
     }
 }
 

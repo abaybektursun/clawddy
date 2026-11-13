@@ -578,7 +578,8 @@ final class AgentBridge {
             apply(
                 .surfaceOpened(
                     generation: launch.generation,
-                    resumedSessionID: launch.resumedSessionID),
+                    resumedSessionID: launch.resumedSessionID,
+                    newSessionID: launch.newSessionID),
                 to: agent)
             onSurfacePresentationChanged?(agentID)
         }
@@ -900,19 +901,22 @@ final class AgentBridge {
             removeLaunchScript(for: id)
             let provider = agent.provider
             integrationIssues[provider] = nil
-            let root = root
-            store(
-                AgentSessionStore.forkURL(id, root.statusDir),
-                "The fork marker of \(agent.name) could not be removed, so its next launch forks again"
-            ) {
-                try AgentSessionStore.clearPendingFork(for: id, directory: root.statusDir)
+            // A launch that created its session keeps its fork marker until
+            // the session is saved.
+            if !agent.runtime.sessionUnsaved {
+                clearForkMarker(of: agent)
             }
             if provider == .codex {
+                let root = root
                 store(root.codexHookReviewMarker, "The Codex hook review notice could not be cleared") {
                     try CodexProvider.clearHookReviewRequired(root: root)
                 }
             }
             refreshProviderHealth(provider)
+        }
+        if effects.contains(.sessionSaved), let sessionID = agent.sessionID {
+            saveBinding(sessionID, of: agent)
+            clearForkMarker(of: agent)
         }
         if effects.contains(where: {
             if case .providerExited = $0 { return true }
@@ -975,29 +979,20 @@ final class AgentBridge {
         provider: AgentProviderID,
         to agent: AgentInstance
     ) {
-        // The one place the binding follows the provider: every `SessionStart`
-        // of the current launch, whatever its source (startup, resume,
-        // clear, compact, fork), names the session the next launch resumes.
-        // After `/clear` that is the new session, not the one launched.
+        // The binding follows the provider: every `SessionStart` of the
+        // current launch, whatever its source (startup, resume, clear,
+        // compact, fork), names the session the next launch resumes. After
+        // `/clear` that is the new session, not the one launched. A session
+        // the launch created is not on disk before its first turn, which
+        // saves the binding then (`perform`).
         let sessionID: String?
         switch domainEvent {
         case .sessionStarted(let started, _, _): sessionID = started
         case .sessionBound(let bound): sessionID = bound
         default: sessionID = nil
         }
-        if let sessionID, let generation = agent.launchGeneration {
-            let binding = AgentSessionBinding(
-                provider: provider,
-                sessionID: sessionID,
-                launchGeneration: generation)
-            let agentID = agent.id
-            let statusDir = statusDir
-            store(
-                AgentSessionStore.sessionURL(agentID, statusDir),
-                "Session \(sessionID) of \(agent.name) could not be saved, so its next launch may not resume it"
-            ) {
-                try AgentSessionStore.write(binding, for: agentID, directory: statusDir)
-            }
+        if let sessionID, !agent.runtime.sessionUnsaved {
+            saveBinding(sessionID, of: agent)
         }
 
         guard rawEvent.model != nil || rawEvent.permissionMode != nil || rawEvent.sessionID != nil
@@ -1017,6 +1012,35 @@ final class AgentBridge {
         metadata.observedAt = scheduler.now
         agent.metadata = metadata
         agent.metadataAvailability = .available
+    }
+
+    /// Makes `sessionID`, a session on disk, the one the agent's next launch
+    /// resumes.
+    private func saveBinding(_ sessionID: String, of agent: AgentInstance) {
+        guard let generation = agent.launchGeneration else { return }
+        let binding = AgentSessionBinding(
+            provider: agent.provider,
+            sessionID: sessionID,
+            launchGeneration: generation)
+        let agentID = agent.id
+        let statusDir = statusDir
+        store(
+            AgentSessionStore.sessionURL(agentID, statusDir),
+            "Session \(sessionID) of \(agent.name) could not be saved, so its next launch may not resume it"
+        ) {
+            try AgentSessionStore.write(binding, for: agentID, directory: statusDir)
+        }
+    }
+
+    private func clearForkMarker(of agent: AgentInstance) {
+        let id = agent.id
+        let statusDir = statusDir
+        store(
+            AgentSessionStore.forkURL(id, statusDir),
+            "The fork marker of \(agent.name) could not be removed, so its next launch forks again"
+        ) {
+            try AgentSessionStore.clearPendingFork(for: id, directory: statusDir)
+        }
     }
 
     private func runtimeVersion(for provider: AgentProviderID) -> String? {

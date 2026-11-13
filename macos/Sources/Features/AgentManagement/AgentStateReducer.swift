@@ -84,11 +84,19 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// The saved session could not be read, so this launch did not start.
     /// The agent can only start fresh; `failureMessage` says why.
     var sessionUnreadable = false
+    /// This launch created its session, `sessionID`, and the session is not
+    /// on disk yet: Claude writes a new or forked session only with its
+    /// first entry. It is saved, and becomes the agent's binding, when the
+    /// first turn starts (`sessionSaved`); until then a relaunch creates or
+    /// forks it again instead of resuming a session that does not exist.
+    var sessionUnsaved = false
 }
 
 enum AgentRuntimeEvent: Equatable, Sendable {
     case launchRequested(generation: UUID)
-    case surfaceOpened(generation: UUID, resumedSessionID: String? = nil)
+    /// `newSessionID` is the session the launch creates under an ID it
+    /// chose, which is not on disk until the first turn.
+    case surfaceOpened(generation: UUID, resumedSessionID: String? = nil, newSessionID: String? = nil)
     case launchTimedOut(generation: UUID)
     case launchFailed(generation: UUID, message: String, sessionUnreadable: Bool = false)
     case interactionRequired(generation: UUID, interaction: AgentInteractionState)
@@ -111,6 +119,9 @@ enum AgentRuntimeEvent: Equatable, Sendable {
 
 enum AgentRuntimeEffect: Equatable, Sendable {
     case becameAlive
+    /// The session the launch created is on disk now: it is the agent's
+    /// binding, and a fork it came from is done.
+    case sessionSaved
     case completed
     case waitingForUser
     case failed
@@ -142,10 +153,14 @@ enum AgentStateReducer {
                 sessionID: current.sessionID,
                 turnState: .inactive)
 
-        case .surfaceOpened(let generation, let resumedSessionID):
+        case .surfaceOpened(let generation, let resumedSessionID, let newSessionID):
             guard state.launchGeneration == generation else { break }
             state.surfaceState = .open
             state.resumingSessionID = resumedSessionID
+            if let newSessionID {
+                state.sessionID = newSessionID
+                state.sessionUnsaved = true
+            }
 
         case .launchTimedOut(let generation):
             guard state.launchGeneration == generation,
@@ -470,6 +485,11 @@ enum AgentStateReducer {
         state.interactionState = .none
         state.runtimeErrorMessage = nil
         clearUnread(&state, effects: &effects)
+        // The turn's prompt is the session's first entry, which writes it.
+        if state.sessionUnsaved {
+            state.sessionUnsaved = false
+            effects.append(.sessionSaved)
+        }
     }
 
     private static func endTurn(_ state: inout AgentRuntimeSnapshot) {

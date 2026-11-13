@@ -1059,3 +1059,23 @@ Same machine, Claude Code 2.1.322, same harness, run from this shell (not inside
 **Rule used in P3.6:** a Claude launch that resumes a saved session (`--resume <id>`, not a fork) and records `SessionEnd` before any `SessionStart` found no such session. The agent shows it as a failed start that offers "Start fresh". The exit record (status 1) may arrive on either side of `SessionEnd`. A resume that exits with no hook at all stays an ordinary start failure. The on-screen text is not read.
 
 Not captured: whether Claude looks for the id only under the current folder's project. A session that exists but was started in another folder may give the same result.
+
+## Review S1 capture (2026-11-12): is a session with no message resumable?
+
+Claude Code 2.1.323 (one patch release after the captures above), same harness and machine, run from this shell (not inside a Clawddy agent), user's configured model, `--settings` logging hooks in every run. Seven runs, all in one folder: `/Volumes/Xcode/GhosttyBuilds/ghostty/tmp/review-s1/<run>/` (each with `steps.json`, `settings.json`, `run.txt` and `cap/`), working folder `review-s1/work`. `clean-env` removed every `CLAUDE*` variable, including `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE`, which this shell carries; the debug log shows the user's own settings set that name, and the result below holds with it.
+
+| Run | Command | Typed | Hooks | Exit | Transcript afterwards |
+|---|---|---|---|---|---|
+| a | `--session-id <A>` | trust, one one-word prompt, `/exit` | `SessionStart startup`, `UserPromptSubmit`, `Stop`, `SessionEnd prompt_input_exit` | 0 | `<A>.jsonl` written |
+| b | `--resume <A> --fork-session --session-id <B>` | `/exit` only | `SessionStart fork` (its `transcript_path` names `<B>.jsonl`), `SessionEnd prompt_input_exit` | 0 | **no `<B>.jsonl`**; `<A>.jsonl` byte-identical |
+| b2 | `--resume <B>` | nothing | `SessionEnd other` only | 1 | "No conversation found with session ID: `<B>`" |
+| c | `--session-id <C>` (folder already trusted) | `/exit` only | `SessionStart startup`, `SessionEnd prompt_input_exit` | 0 | **no `<C>.jsonl`** |
+| c2 | `--resume <C>` | nothing | `SessionEnd other` only | 1 | "No conversation found with session ID: `<C>`" |
+| d | `--resume <A>` | `/clear`, then `/exit` | `SessionStart resume`, `SessionEnd clear`, `SessionStart clear` (new id `<D>`), `SessionEnd prompt_input_exit` | 0 | `<D>.jsonl` written (4495 bytes) |
+| d2 | `--resume <D>` | `/exit` only | `SessionStart resume`, `SessionEnd prompt_input_exit` | 0 | resumed |
+
+- **A new or forked session with no message is never written.** Both report `idle` at once and run `SessionStart` with the transcript path they would use, but the file does not exist when they exit, and a later `--resume` of the id fails exactly as in the P3.6 capture: no `SessionStart`, `SessionEnd reason: "other"`, exit status 1.
+- **The first entry appended writes it.** A prompt does (a; the failing turns of P3.5a case 2 also left transcripts). `/clear` does too: the post-clear session holds the `/clear` command entry (`<command-name>/clear</command-name>`) and resumes (d, d2).
+- **Consequence for Clawddy:** a binding names a resumable session only once the session has had its first entry. Clawddy cannot see the file, so it takes the first turn as that point (a settled `working`, a `blocked` or an `error`): until then a launch that created its session under an ID it chose has not saved it, and the next launch forks again from the fork's source, or starts a new session with a new `--session-id`. Waiting for the turn is conservative: a `/clear` with no prompt also writes the session, but nothing in the hooks Clawddy subscribes to separates it from a fork's `SessionStart`, and forking again loses only that empty session.
+
+**Safety:** none of the four session ids appears anywhere in `<CLAWDDY_CONFIG>/status/`. `run.sh` saw changes only in two live agents' files, from the owner's own sessions running at the time. The old global `clawddy-provider-hook.sh` entry ran on each `SessionStart` and `SessionEnd`, found no agent identity and exited 0.

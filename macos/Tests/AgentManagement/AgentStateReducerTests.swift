@@ -87,6 +87,58 @@ struct AgentStateReducerTests {
         #expect(exited.effects == [.providerExited(0)])
     }
 
+    /// Review S1: a session the launch created is saved, and named for the
+    /// next launch, by its first turn and nothing earlier: Claude writes a
+    /// new or forked session only with its first entry. Being alive saves
+    /// nothing; a turn that fails or waits at once saves it too; later turns
+    /// save nothing more.
+    @Test func createdSessionIsSavedByItsFirstTurnOnly() {
+        let generation = UUID()
+        func report(_ state: Ghostty.Action.ProgramStatus.State) -> AgentRuntimeEvent {
+            .provider(
+                generation: generation,
+                provider: .claudeCode,
+                eventID: UUID().uuidString,
+                event: .programStatus(Ghostty.Action.ProgramStatus(
+                    state: state, kind: nil, progress: nil, id: nil,
+                    app: "claude-code", title: nil, message: nil)),
+                isViewed: false)
+        }
+        var state = AgentStateReducer.reduce(
+            AgentRuntimeSnapshot(sessionID: "earlier"),
+            event: .launchRequested(generation: generation)).state
+        state = AgentStateReducer.reduce(
+            state,
+            event: .surfaceOpened(generation: generation, newSessionID: "chosen")).state
+        #expect(state.sessionID == "chosen" && state.sessionUnsaved)
+
+        let alive = AgentStateReducer.reduce(state, event: report(.idle))
+        #expect(alive.effects == [.becameAlive])
+        #expect(alive.state.sessionUnsaved)
+        let working = AgentStateReducer.reduce(alive.state, event: report(.working))
+        #expect(working.effects.isEmpty && working.state.sessionUnsaved)
+        let started = AgentStateReducer.reduce(working.state, event: .turnStartSettled(generation: generation))
+        #expect(started.effects == [.sessionSaved])
+        #expect(!started.state.sessionUnsaved && started.state.sessionID == "chosen")
+
+        var next = AgentStateReducer.reduce(started.state, event: report(.done)).state
+        next = AgentStateReducer.reduce(next, event: report(.working)).state
+        #expect(!AgentStateReducer.reduce(next, event: .turnStartSettled(generation: generation))
+            .effects.contains(.sessionSaved))
+
+        // A failure or a permission prompt before the `working` settles.
+        for first in [Ghostty.Action.ProgramStatus.State.error, .blocked] {
+            #expect(AgentStateReducer.reduce(working.state, event: report(first)).effects.contains(.sessionSaved))
+        }
+        // A launch that resumes a saved session has nothing to save.
+        let resumed = AgentStateReducer.reduce(
+            AgentStateReducer.reduce(
+                AgentRuntimeSnapshot(),
+                event: .launchRequested(generation: generation)).state,
+            event: .surfaceOpened(generation: generation, resumedSessionID: "saved")).state
+        #expect(!resumed.sessionUnsaved)
+    }
+
     @Test func nonzeroExitBeforeFirstLifecycleEventIsAStartFailure() {
         let generation = UUID()
         let launching = AgentStateReducer.reduce(
