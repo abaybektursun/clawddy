@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 import UserNotifications
@@ -8,6 +9,27 @@ import UserNotifications
 /// watcher sees appends.
 @MainActor
 struct AgentBridgeStatusSeamTests {
+    /// Review M4: the real scheduler's timers run in the event-tracking and
+    /// modal-panel modes as well as the default one, like the main queue
+    /// that delivers the program's reports, so the turn-start delay goes on
+    /// while a menu is open, a window is live-resized or a modal alert is up,
+    /// and a `done` that follows its `working` still completes the turn.
+    /// `ManualScheduler`, which the bridge tests use, has no run-loop modes,
+    /// so this checks where the real timer is registered.
+    @Test func runLoopTimersRunInEveryCommonMode() throws {
+        let timer = AgentRunLoopScheduler().timer(interval: 3600, repeats: false) {}
+        defer { timer.invalidate() }
+        let runLoopTimer = unsafeBitCast(try #require(timer as? Timer), to: CFRunLoopTimer.self)
+        for mode in [RunLoop.Mode.default, .eventTracking, .modalPanel] {
+            #expect(
+                CFRunLoopContainsTimer(
+                    CFRunLoopGetMain(),
+                    runLoopTimer,
+                    CFRunLoopMode(rawValue: mode.rawValue as CFString)),
+                "\(mode.rawValue)")
+        }
+    }
+
     /// The event file is one way into `ingest`, not a second path into the
     /// state: records read from it drive exactly the transitions and
     /// notifications that the same observations given to `ingest` directly

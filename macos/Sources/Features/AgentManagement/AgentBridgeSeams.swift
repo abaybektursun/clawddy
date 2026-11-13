@@ -38,7 +38,12 @@ protocol AgentScheduler {
 }
 
 /// Timers on the main run loop and delayed calls on the main queue, each
-/// running its action in a main-actor task.
+/// running its action in a main-actor task. Both run in the run loop's
+/// common modes: while a menu is tracked, a window is live-resized or a
+/// modal session runs, as well as in the default mode. The main queue,
+/// which delivers every program-status report, runs in them too, so a
+/// timer that waits on a report (the turn-start delay) never falls behind
+/// the reports that follow it.
 struct AgentRunLoopScheduler: AgentScheduler {
     /// Nonisolated so it can be a default argument.
     nonisolated init() {}
@@ -50,9 +55,11 @@ struct AgentRunLoopScheduler: AgentScheduler {
         repeats: Bool,
         _ action: @escaping @MainActor () -> Void
     ) -> any AgentTimer {
-        Timer.scheduledTimer(withTimeInterval: interval, repeats: repeats) { _ in
+        let timer = Timer(timeInterval: interval, repeats: repeats) { _ in
             Task { @MainActor in action() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
     }
 
     func after(_ delay: TimeInterval, _ action: @escaping @MainActor () -> Void) {
