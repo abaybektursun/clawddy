@@ -528,10 +528,41 @@ struct AgentMigrationTests {
         #expect(Set(try tree(dev.url).keys) == Set(["agents.json", "state.json", "migration-seedDevCopy.json"] + forks))
         let permissions = try FileManager.default.attributesOfItem(atPath: dev.url.path)[.posixPermissions] as? NSNumber
         #expect(permissions?.intValue == 0o700)
-        // The dev root exists now: seeding again refuses, and no staging
-        // folder is left beside it.
+        // The dev root holds an `agents.json` now: seeding again refuses,
+        // and nothing was written beside the root.
         #expect(throws: AgentMigrationAbort.self) { try seedAgentDevCopy(from: source, to: dev) }
         #expect(try FileManager.default.contentsOfDirectory(atPath: sandbox.url.path).sorted() == ["dev", "root"])
+    }
+
+    /// Review M8: a seed that stops part-way writes nothing beside the dev
+    /// root and leaves it without an `agents.json`, so the next start seeds
+    /// again, over what the stopped seed wrote, to the same tree as a seed
+    /// that never stopped.
+    @Test func interruptedSeedLeavesNothingBesideTheRootAndSeedsAgain() throws {
+        struct Injected: Error {}
+        let sandbox = MigrationSandbox()
+        defer { sandbox.remove() }
+        try MigrationFixture.messy().write(to: sandbox.root)
+        let clean = AgentDataRoot(url: sandbox.url.appendingPathComponent("clean", isDirectory: true))
+        try seedAgentDevCopy(from: sandbox.root, to: clean)
+        let expected = try tree(clean.url)
+
+        for step in [AgentMigrationStep.statusWrites, .state] {
+            let dev = AgentDataRoot(url: sandbox.url.appendingPathComponent("dev-\(step)", isDirectory: true))
+            #expect(throws: Injected.self) {
+                try seedAgentDevCopy(from: sandbox.root, to: dev) { if $0 == step { throw Injected() } }
+            }
+            #expect(!FileManager.default.fileExists(atPath: dev.agentsFile.path))
+            #expect(AgentDataRoot.seedsDevCopy(
+                bundleIdentifier: AgentDataRoot.devBundleIdentifier,
+                configExists: FileManager.default.fileExists(atPath: dev.agentsFile.path),
+                productionConfigExists: true))
+            #expect(try FileManager.default.contentsOfDirectory(atPath: sandbox.url.path)
+                .allSatisfy { ["root", "clean"].contains($0) || $0.hasPrefix("dev-") })
+
+            try seedAgentDevCopy(from: sandbox.root, to: dev)
+            #expect(try tree(dev.url) == expected, "\(step)")
+        }
     }
 
     /// The seeded root, as the app loads it, holds the Claude agents only,

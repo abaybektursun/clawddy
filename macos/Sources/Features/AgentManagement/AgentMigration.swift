@@ -845,32 +845,34 @@ func runCleanupV5OnFirstStart(
         defaults: defaults)
 }
 
-/// The dev seed: writes a new root at `destination` holding `source`'s
-/// Claude agents, each with a fork marker in place of its binding, and their
-/// unread completions. `source` is only read. The new root is built beside
-/// `destination` and renamed into place, so an interrupted seed leaves no
-/// partial root. Throws when `destination` exists.
+/// The dev seed: writes `source`'s Claude agents into `destination`, each
+/// with a fork marker in place of its binding, and their unread
+/// completions. `source` is only read. The caller holds `destination`'s
+/// lock, so two instances never seed at once. The plan is applied in
+/// commit-point order, `agents.json` last of the writes, so a seed that
+/// stops leaves a root without one, which the next start seeds again over
+/// what it left, and nothing anywhere else. Throws when `destination`
+/// already has an `agents.json`.
 @discardableResult
 func seedAgentDevCopy(
     from source: AgentDataRoot,
-    to destination: AgentDataRoot
+    to destination: AgentDataRoot,
+    afterStep: (AgentMigrationStep) throws -> Void = { _ in }
 ) throws -> AgentMigrationReport {
     let fm = FileManager.default
-    guard !fm.fileExists(atPath: destination.url.path) else {
-        throw AgentMigrationAbort("\(destination.url.path) already exists; delete it to seed again.")
+    guard !fm.fileExists(atPath: destination.agentsFile.path) else {
+        throw AgentMigrationAbort("\(destination.agentsFile.path) already exists; delete it to seed again.")
     }
     let plan = try planAgentMigration(
         AgentDataSnapshot.read(from: source, defaults: nil),
         mode: .seedDevCopy)
-    let staging = AgentDataRoot(url: destination.url.deletingLastPathComponent().appendingPathComponent(
-        ".\(destination.url.lastPathComponent)-seeding-\(UUID().uuidString)",
-        isDirectory: true))
-    try fm.createDirectory(
-        at: staging.statusDir,
-        withIntermediateDirectories: true,
-        attributes: [.posixPermissions: 0o700])
-    try apply(plan, to: staging, defaults: nil) { _ in }
-    try fm.moveItem(at: staging.url, to: destination.url)
+    for folder in [destination.url, destination.statusDir] {
+        try fm.createDirectory(
+            at: folder,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+    }
+    try apply(plan, to: destination, defaults: nil, afterStep: afterStep)
     return plan.report
 }
 

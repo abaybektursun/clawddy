@@ -64,9 +64,10 @@ final class ClawddyController: NSObject {
         // Before anything reads the data, and before the lock, which the
         // cleanup takes itself.
         Self.cleanUpOlderDataOnFirstStart(root, homeDirectory: home)
-        // Before the lock, which creates the root.
-        Self.seedDevCopyOnFirstStart(root, homeDirectory: home)
         rootLock = Self.lockOrExit(root)
+        // Under the lock, so two dev instances started together never both
+        // seed: the second is told the first is running.
+        Self.seedDevCopyOnFirstStart(root, homeDirectory: home)
         Self.logger.info("data root \(root.url.path, privacy: .public)")
 
         self.ghostty = ghostty
@@ -122,14 +123,14 @@ final class ClawddyController: NSObject {
     /// The dev identity's first start copies the live Claude agents in, each
     /// as a fork of its live session, so the dev app never resumes a session
     /// the live app may be running. The live root is only read. A failed
-    /// seed stops the app: starting empty would hide the failure, and the
-    /// next start would not seed again.
+    /// seed stops the app: starting empty would hide the failure. It leaves
+    /// no `agents.json`, so the next start seeds again.
     private static func seedDevCopyOnFirstStart(_ root: AgentDataRoot, homeDirectory: URL) {
         let fm = FileManager.default
         let production = AgentDataRoot.production(homeDirectory: homeDirectory)
         guard AgentDataRoot.seedsDevCopy(
             bundleIdentifier: Bundle.main.bundleIdentifier,
-            rootExists: fm.fileExists(atPath: root.url.path),
+            configExists: fm.fileExists(atPath: root.agentsFile.path),
             productionConfigExists: fm.fileExists(atPath: production.agentsFile.path))
         else { return }
         do {

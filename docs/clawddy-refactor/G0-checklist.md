@@ -103,14 +103,16 @@ This covers its `metadata.json`, `events` and bindings.
 
 ```sh
 cat ~/.config/clawddy-dev/status/$ID.session.json   # sessionID is the <new ID> from the ps line
-ls ~/.config/clawddy-dev/status/$ID.fork.json       # gone: removed once the agent was seen alive
+ls ~/.config/clawddy-dev/status/$ID.fork.json       # gone: removed at the agent's first turn (P0.8 build: once it was seen alive)
 cat ~/.config/ghostty-agents/status/$ID.session.json 2>/dev/null || cat ~/.config/ghostty-agents/status/$ID.session
 ```
 
 Passes when the dev `sessionID` equals the `--session-id` of the ps line and
 differs from the live one. If `fork.json` is still there, Clawddy Dev never
-saw the agent start (no hook arrived); its next Start forks again under
-another new ID. Report that rather than retrying silently.
+saw the first turn start; its next Start forks again under another new ID.
+Report that rather than retrying silently. A fork closed without a prompt
+keeps its `fork.json` and has no `session.json` on purpose: Claude does not
+save a session before its first message, so the next Start forks again.
 
 ## 5. Hot key, notifications, environment, agent-cron
 
@@ -134,15 +136,21 @@ runs is expected; anything else is a failure.
 
 - It reads the live root and never writes it: `agents.json`, `state.json`,
   the Claude agents' binding files, and the unread end of each journal (a
-  preflight check). It builds `~/.config/.clawddy-dev-seeding-<uuid>` and
-  renames it to `~/.config/clawddy-dev`. Codex agents are not copied, and
-  nothing is copied from `cron/`, the journals, `runtime/` or `hooks/`.
+  preflight check). Holding the dev root's lock, it writes the fork markers
+  and `state.json` into `~/.config/clawddy-dev`, then `agents.json` last.
+  Codex agents are not copied, and nothing is copied from `cron/`, the
+  journals, `runtime/` or `hooks/`. (The frozen P0.8 build under
+  `gates/G0` instead builds `~/.config/.clawddy-dev-seeding-<uuid>` and
+  renames it into place.)
 - If the seed fails, the app stops at once ("Clawddy Dev quit unexpectedly").
   The reason is in the newest `ghostty-*.ips` in
-  `~/Library/Logs/DiagnosticReports/`, after "Could not seed". No dev root is
-  left, so the next launch seeds again; delete a leftover
-  `~/.config/.clawddy-dev-seeding-*` folder first. The likeliest cause is the
-  live app writing a file during the read; relaunching is enough.
+  `~/Library/Logs/DiagnosticReports/`, after "Could not seed". The dev root
+  has no `agents.json` then, so the next launch seeds again over what was
+  written, and nothing is left beside it. (With the frozen P0.8 build, delete
+  a leftover `~/.config/.clawddy-dev-seeding-*` folder first.) The likeliest
+  cause is the live app writing a file during the read; relaunching is enough.
+- A second Clawddy Dev started at the same time says that Clawddy is already
+  running and quits; only the first one seeds.
 - The workspace window opens with the seeded agents. Nothing starts until you
   press Start.
 - macOS asks once whether "Clawddy Dev" may send notifications, the first time
@@ -169,7 +177,8 @@ then:
 rm -rf ~/.config/clawddy-dev
 ```
 
-The next launch seeds again from the live root. Sessions the dev agents
+The next launch seeds again from the live root, as it does whenever the dev
+root has no `agents.json`. Sessions the dev agents
 created stay in Claude's own store and do not affect the live agents. The dev
 app's window and selection preferences are in their own domain; to reset them
 too: `defaults delete com.mitchellh.ghostty.clawddy-dev`.

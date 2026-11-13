@@ -89,23 +89,24 @@ struct AgentDataRootTests {
         #expect(mismatch(nil, production) != nil)
     }
 
-    /// The dev seed runs for the dev bundle only, only while its root is
-    /// absent, and only when there is a production `agents.json` to copy.
-    @Test func onlyDevIdentitySeedsAbsentRoot() {
+    /// The dev seed runs for the dev bundle only, only while its root has no
+    /// `agents.json`, and only when there is a production `agents.json` to
+    /// copy.
+    @Test func onlyDevIdentitySeedsUnseededRoot() {
         let bundles: [String?] = [
             "com.mitchellh.ghostty", "com.mitchellh.ghostty.clawddy-dev",
             "com.mitchellh.ghostty.clawddy-tests", "com.mitchellh.ghostty.debug", nil,
         ]
         for bundle in bundles {
-            for rootExists in [false, true] {
+            for configExists in [false, true] {
                 for productionConfigExists in [false, true] {
                     let seeds = AgentDataRoot.seedsDevCopy(
                         bundleIdentifier: bundle,
-                        rootExists: rootExists,
+                        configExists: configExists,
                         productionConfigExists: productionConfigExists)
                     let expected = bundle == "com.mitchellh.ghostty.clawddy-dev"
-                        && !rootExists && productionConfigExists
-                    #expect(seeds == expected, "\(bundle ?? "nil") root \(rootExists) production \(productionConfigExists)")
+                        && !configExists && productionConfigExists
+                    #expect(seeds == expected, "\(bundle ?? "nil") config \(configExists) production \(productionConfigExists)")
                 }
             }
         }
@@ -114,7 +115,7 @@ struct AgentDataRootTests {
         // The test host is never the dev identity, so it never seeds.
         #expect(!AgentDataRoot.seedsDevCopy(
             bundleIdentifier: Bundle.main.bundleIdentifier,
-            rootExists: false,
+            configExists: false,
             productionConfigExists: true))
     }
 

@@ -67,15 +67,16 @@ struct AgentDataRoot: Equatable, Sendable {
 
     /// Whether this start first copies the production root's Claude agents
     /// into its own root (`seedAgentDevCopy`). Only the dev bundle does,
-    /// only while its own root does not exist, and only when the production
+    /// only while its own root has no `agents.json` (it has none before the
+    /// first seed, nor after one that stopped), and only when the production
     /// root has an `agents.json` to copy (agent-cron alone may have created
     /// that folder). Every other start uses its root as it is, or empty.
     static func seedsDevCopy(
         bundleIdentifier: String?,
-        rootExists: Bool,
+        configExists: Bool,
         productionConfigExists: Bool
     ) -> Bool {
-        bundleIdentifier == devBundleIdentifier && !rootExists && productionConfigExists
+        bundleIdentifier == devBundleIdentifier && !configExists && productionConfigExists
     }
 
     /// Whether this start first runs `cleanupV5` on its root
