@@ -623,6 +623,34 @@ struct AgentStateReducerTests {
         #expect(lateChildEvent.state.processState == .exited)
         #expect(lateChildEvent.state.turnState == .inactive)
         #expect(lateChildEvent.effects.isEmpty)
+
+        // The exit report skips the event file's delay, so records written
+        // before the exit can arrive after it. A late session start or
+        // prompt brings nothing back; a late completion still counts; and a
+        // second exit, such as Codex's exit record, changes nothing.
+        let lateStart = AgentStateReducer.reduce(
+            exited,
+            event: providerEvent(
+                generation,
+                id: "start-after-exit",
+                event: .sessionStarted(sessionID: "session-1", model: nil, permissionMode: nil)))
+        #expect(lateStart.state.processState == .exited)
+        #expect(lateStart.effects.isEmpty)
+        let latePrompt = AgentStateReducer.reduce(
+            exited,
+            event: providerEvent(generation, id: "prompt-after-exit", event: .turnStarted(turnID: "turn-1")))
+        #expect(latePrompt.state == exited)
+        #expect(latePrompt.effects.isEmpty)
+        let lateCompletion = AgentStateReducer.reduce(
+            exited,
+            event: providerEvent(generation, id: "stop-after-exit", event: .turnCompleted(turnID: "turn-1")))
+        #expect(lateCompletion.state.processState == .exited)
+        #expect(lateCompletion.effects == [.completed, .unreadChanged])
+        let secondExit = AgentStateReducer.reduce(
+            exited,
+            event: providerEvent(generation, id: "exit-record", event: .providerExited(status: 1)))
+        #expect(secondExit.state == exited)
+        #expect(secondExit.effects.isEmpty)
     }
 
     private func runningState(_ generation: UUID) -> AgentRuntimeSnapshot {

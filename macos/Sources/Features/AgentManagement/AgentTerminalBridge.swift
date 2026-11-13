@@ -267,6 +267,10 @@ enum AgentSurfaceLaunchOutcome: Sendable {
 }
 
 struct AgentLaunchCoordinator: Sendable {
+    /// The id of the program-status record on which the launch script
+    /// reports the provider's exit.
+    static let exitReportID = "clawddy"
+
     let providers: AgentProviderTable
     let root: AgentDataRoot
 
@@ -364,6 +368,16 @@ struct AgentLaunchCoordinator: Sendable {
                 generation: generation,
                 statusDirectory: root.statusDir)
             : ""
+        // The login shell that keeps the terminal is no agent: it gets none
+        // of the identity the launch gave the terminal, so neither it nor a
+        // provider started in it by hand can report as the agent.
+        let identity = environment.keys
+            .filter(AgentTerminalEnvironmentPolicy.inheritedAgentIdentityVariables.contains)
+            .sorted()
+        let unsetIdentity = identity.isEmpty ? "" : "unset \(identity.joined(separator: " "))"
+        // After the provider returns: the exit report, an OSC 7501 report on
+        // the record `exitReportID` whose `msg` is the exit status in
+        // decimal, base64 as the protocol requires.
         let script = """
             #!/bin/zsh -l
             \(AgentTerminalEnvironmentPolicy.shellPrelude)
@@ -373,6 +387,8 @@ struct AgentLaunchCoordinator: Sendable {
             \(command)
             command_status=$?
             \(recordExit)
+            printf '\\033]7501;state=clear:id=\(Self.exitReportID):msg=%s\\007' "$(printf %s "$command_status" | /usr/bin/base64)"
+            \(unsetIdentity)
             printf '\\n\\033[33mAgent exited (status %s). Continuing in your login shell.\\033[0m\\n' "$command_status"
             exec "${SHELL:-/bin/zsh}" -l
             """
@@ -1047,8 +1063,9 @@ final class AgentBridge {
     /// records its hooks append to its event file, and its terminal's close
     /// and program-status reports. An observation from another launch, about
     /// an agent that is gone, a record the provider's table does not allow
-    /// in the event file, or a program-status report from a provider whose
-    /// table names its hooks as the source of turn activity, changes nothing.
+    /// in the event file, or a program-status report other than the launch
+    /// script's exit report from a provider whose table names its hooks as
+    /// the source of turn activity, changes nothing.
     func ingest(_ observation: AgentStatusObservation) {
         guard !isTerminating else { return }
         let id = observation.agentID
@@ -1081,14 +1098,18 @@ final class AgentBridge {
         generation: UUID
     ) {
         let id = agent.id
+        // Every launch script reports its provider's exit, Codex's included.
+        if report.id == AgentLaunchCoordinator.exitReportID {
+            ingestExitReport(report, agent: agent, generation: generation)
+            return
+        }
         guard providers[agent.provider].turnActivity == .surface else {
             // Codex reports too, but its turn activity comes from its hooks.
             diagnose(.debug, "ignored program status for \(id): the \(agent.provider.displayName) table names its hooks")
             return
         }
         // Only the program's own record counts. A record beneath it never
-        // changes the agent's state, and the launch script's `clawddy`
-        // record is P3.7's.
+        // changes the agent's state.
         guard report.id == nil else { return }
         let kind = report.kind.map { String(describing: $0) } ?? "-"
         diagnose(.debug, "program status \(id) generation \(generation): \(report.state) kind=\(kind)")
@@ -1100,6 +1121,38 @@ final class AgentBridge {
                 eventID: UUID().uuidString,
                 event: .programStatus(report),
                 isViewed: isViewed(id)),
+            to: agent)
+        perform(effects, of: agent)
+    }
+
+    /// The report the launch script prints once the provider has returned:
+    /// `state=clear` on the record `exitReportID`, with the exit status in
+    /// decimal as its message. It ends the launch; from then on nothing its
+    /// terminal reports changes the agent until the next launch, so a
+    /// provider started by hand in the login shell that follows cannot bring
+    /// the agent back. `ingest` takes it only from the agent's own terminal
+    /// for the current launch. Any program running in that terminal could
+    /// print the same bytes; that is accepted, because it can only end its
+    /// own agent's launch. Anything else on that record is ignored.
+    private func ingestExitReport(
+        _ report: Ghostty.Action.ProgramStatus,
+        agent: AgentInstance,
+        generation: UUID
+    ) {
+        guard report.state == .clear, let status = report.message.flatMap({ Int($0) }) else {
+            diagnose(
+                .error,
+                "ignored \(report.state) on record \(AgentLaunchCoordinator.exitReportID) for \(agent.id): an exit report is a clear with a decimal exit status as its message, here \(report.message ?? "none")")
+            return
+        }
+        diagnose(.info, "provider of \(agent.id) exited with status \(status), generation \(generation)")
+        let effects = apply(
+            .provider(
+                generation: generation,
+                provider: agent.provider,
+                eventID: UUID().uuidString,
+                event: .providerExited(status: status),
+                isViewed: isViewed(agent.id)),
             to: agent)
         perform(effects, of: agent)
     }

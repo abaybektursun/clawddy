@@ -271,7 +271,8 @@ struct AgentBridgeLifecycleTests {
     /// and no `SessionStart`, and exits with status 1. The agent says why it
     /// could not start and offers only to start fresh, which forgets the
     /// saved session, the untagged file older builds wrote included, and
-    /// launches a new one.
+    /// launches a new one. Here `SessionEnd` reaches the bridge before the
+    /// exit report, which then changes nothing.
     @Test func missingSessionIsExplicitFailure() throws {
         // `SessionEnd` before `SessionStart` is the only sign; a Claude hook
         // list without `SessionEnd` cannot tell a missing session apart.
@@ -290,16 +291,20 @@ struct AgentBridgeLifecycleTests {
         #expect(try h.launchScript().contains(shellCommand(["--resume", "gone-session", "--name", "Agent"])))
 
         try h.hook(id, "SessionEnd", session: "gone-session")
-        try h.providerExited(id, status: 1)
-
         let agent = try h.agent(id)
         #expect(agent.displayState == .failed)
+        #expect(agent.missingSessionID == "gone-session")
+        try h.providerExited(id, status: 1)
+
+        #expect(agent.displayState == .failed)
+        #expect(agent.processState == .exited)
         #expect(agent.missingSessionID == "gone-session")
         #expect(agent.failureMessage
             == "Claude Code found no conversation with session ID gone-session, so the agent could not be resumed.")
         // The fallback shell keeps the terminal, which shows Claude's message.
         #expect(h.host.hasSurface(id: id))
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
+        #expect(h.notifier.announced == ["Agent encountered an error"])
 
         let project = try #require(h.config.project(forAgent: id))
         h.bridge.startFresh(id: id, host: h.host, project: project)
@@ -317,11 +322,14 @@ struct AgentBridgeLifecycleTests {
         #expect(try h.binding(id).sessionID == fresh)
     }
 
-    /// The exit record may come before Claude's `SessionEnd`; the failure
-    /// then says why once `SessionEnd` arrives. Until it does, a resume that
-    /// exits with status 1 without running any hook is an ordinary start
-    /// failure: declining the folder's trust dialog looks like that, and the
-    /// session may well exist.
+    /// The usual order: Claude runs `SessionEnd` before it exits (0.303 s
+    /// in the capture), but the exit report skips the event file's delay and
+    /// reaches the bridge first. From the exit report on, the agent shows
+    /// that it couldn't start, notified once; `SessionEnd`, a moment later,
+    /// only says why and offers to start fresh, without a second
+    /// notification. Until it arrives, a resume that exits with status 1 is
+    /// an ordinary start failure: declining the folder's trust dialog looks
+    /// like that, runs no hook, and the session may well exist.
     @Test func missingSessionNeedsSessionEndBeforeSessionStart() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -332,19 +340,28 @@ struct AgentBridgeLifecycleTests {
             for: id,
             directory: h.root.statusDir)
         h.start()
+        h.spawn()
         try h.activate(id)
 
+        try h.at(0.31)
         try h.providerExited(id, status: 1)
         let agent = try h.agent(id)
         #expect(agent.displayState == .failed)
         #expect(agent.missingSessionID == nil)
+        #expect(!agent.canOnlyStartFresh)
         #expect(agent.failureMessage == "The provider exited before the agent session started (status 1).")
+        #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
+        #expect(h.notifier.announced == ["Agent encountered an error"])
 
-        try h.hook(id, "SessionEnd", session: "saved-session")
+        try h.hook(id, at: 0.303 + 0.25, "SessionEnd", session: "saved-session")
+        #expect(agent.displayState == .failed)
         #expect(agent.missingSessionID == "saved-session")
+        #expect(agent.canOnlyStartFresh)
         #expect(agent.failureMessage
             == "Claude Code found no conversation with session ID saved-session, so the agent could not be resumed.")
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
+        #expect(h.notifier.announced == ["Agent encountered an error"])
+        #expect(h.aggregateChanges == [.idle, .attention])
     }
 
     @Test func surfaceDeathIsExitedAndCleansUp() async throws {

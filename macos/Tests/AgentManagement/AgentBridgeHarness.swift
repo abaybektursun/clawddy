@@ -575,9 +575,15 @@ final class AgentBridgeHarness {
         try hook(id, event, session: session, trigger: trigger)
     }
 
-    /// Appends the record the launch script writes when the provider exits,
-    /// and polls.
+    /// The provider returns with `status`: its launch script prints the exit
+    /// report in the agent's terminal, as every launch script does.
     func providerExited(_ id: UUID, status: Int) throws {
+        try osc(id, exitReport(status))
+    }
+
+    /// Appends the `ProviderExited` record that Codex's launch script still
+    /// writes, until gate G4, just before its exit report, and polls.
+    func providerExitRecord(_ id: UUID, status: Int) throws {
         let provider = try agent(id).provider
         let launch = try generation(id)
         try append(
@@ -678,6 +684,13 @@ func programStatus(_ body: String) throws -> Ghostty.Action.ProgramStatus {
         app: fields["app"].map(String.init),
         title: try text("title"),
         message: try text("msg"))
+}
+
+/// The body of the report a launch script prints when its provider returns
+/// with `status`: the record `clawddy` cleared, with the status in decimal,
+/// base64, as its message.
+func exitReport(_ status: Int) -> String {
+    "state=clear:id=clawddy:msg=\(Data(String(status).utf8).base64EncodedString())"
 }
 
 /// Yields to the main actor until `condition` holds, at most `limit` times.

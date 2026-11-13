@@ -393,7 +393,7 @@ struct AgentBridgeActivityTests {
 
     /// `/clear` ends the session with `SessionEnd`, `reason: "clear"`, while
     /// Claude's process goes on: the agent stays running and posts nothing,
-    /// and the next `SessionStart` rebinds it. Only the exit record ends the
+    /// and the next `SessionStart` rebinds it. Only the exit report ends the
     /// process.
     @Test func sessionEndWithReasonClearKeepsAgentAlive() throws {
         let h = try AgentBridgeHarness()

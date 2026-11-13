@@ -53,8 +53,8 @@ struct AgentProgramStatusTests {
     }
 
     /// F1 (exp1): declining the trust dialog reports `clear`, and Claude
-    /// exits with status 1. `clear` is no sign of life, so the launch failed
-    /// to start.
+    /// exits with status 1, which the launch script reports at once. `clear`
+    /// is no sign of life, so the launch failed to start.
     @Test func declinedTrustIsAStartFailure() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -68,7 +68,7 @@ struct AgentProgramStatusTests {
         #expect(agent.processState == .launching)
         #expect(agent.displayState == .launching)
         #expect(try h.launchScripts().count == 1)
-        try h.at(2.555 + hookDelay)
+        try h.at(2.555)
         try h.providerExited(id, status: 1)
 
         #expect(agent.displayState == .failed)
@@ -244,9 +244,10 @@ struct AgentProgramStatusTests {
 
     /// F1 and F2 (exp2): `/exit` reports `working`, then `clear` three times
     /// within 16 ms. Nothing is raised, and nothing touches the terminal,
-    /// which these reports reach inside the app tick. The provider's exit
-    /// record ends the launch; the login shell keeps the terminal.
-    @Test func exitBlipRaisesNothingAndTheExitRecordEndsTheLaunch() throws {
+    /// which these reports reach inside the app tick. The launch script's
+    /// exit report ends the launch, also inside the app tick; the login shell
+    /// keeps the terminal.
+    @Test func exitBlipRaisesNothingAndTheExitReportEndsTheLaunch() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent")
@@ -264,10 +265,11 @@ struct AgentProgramStatusTests {
         #expect(agent.displayState == .idle)
         #expect(agent.processState == .running)
         #expect(h.host.calls == calls)
-        try h.at(71.143 + hookDelay)
+        try h.at(71.143)
         try h.providerExited(id, status: 0)
 
         #expect(agent.displayState == .dead)
+        #expect(h.host.calls == calls)
         #expect(h.host.hasSurface(id: id))
         #expect(h.aggregateChanges == [.idle])
         #expect(h.notifier.posted.isEmpty)
@@ -637,10 +639,10 @@ struct AgentProgramStatusTests {
 
     // MARK: What does not count
 
-    /// Reports after the launch ended change nothing: after the provider's
-    /// exit record, as from a `claude` typed into the login shell that
-    /// follows (P3.7 gives the exit its own report), from an earlier launch,
-    /// and from a terminal that has closed.
+    /// Reports after the launch ended change nothing: after the launch
+    /// script's exit report, as from a `claude` typed into the login shell
+    /// that follows, including the exit report printed again; from an
+    /// earlier launch; and from a terminal that has closed.
     @Test func reportsAfterExitAreIgnored() async throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -650,10 +652,16 @@ struct AgentProgramStatusTests {
         let agent = try h.agent(id)
         let first = try h.generation(id)
         try h.providerExited(id, status: 0)
+        let exited = agent.runtime
 
         try h.osc(id, working)
         h.scheduler.advance(by: 1)
         try h.osc(id, "state=blocked:app=claude-code:kind=permission")
+        try h.osc(id, modelError)
+        // The launch ends once: a second exit report, with a status that
+        // would have been a start failure, changes nothing either.
+        try h.providerExited(id, status: 1)
+        #expect(agent.runtime == exited)
         #expect(agent.displayState == .dead)
         #expect(agent.turnState == .inactive)
 
@@ -712,8 +720,8 @@ struct AgentProgramStatusTests {
     }
 
     /// Only the program's own record counts. A record beneath it never
-    /// changes the agent's state, and the id `clawddy`, which the launch
-    /// script will use (P3.7), is ignored without a word.
+    /// changes the agent's state, and is ignored without a word. (The record
+    /// `clawddy` is the launch script's exit report.)
     @Test func subRecordsAreIgnored() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -725,7 +733,6 @@ struct AgentProgramStatusTests {
 
         try h.osc(id, "state=working:id=task.1:app=claude-code")
         try h.osc(id, "state=blocked:id=task.1/tool:kind=permission:app=claude-code")
-        try h.osc(id, "state=error:id=clawddy")
         h.scheduler.advance(by: 1)
 
         #expect(agent.displayState == .idle)

@@ -178,6 +178,10 @@ enum AgentStateReducer {
         case .provider(let generation, let provider, let eventID, let domainEvent, let isViewed):
             guard state.launchGeneration == generation else { break }
             if case .providerExited(let status) = domainEvent {
+                // A launch's provider exits once. Codex's exit record, which
+                // its launch script still writes, follows the exit report and
+                // changes nothing, as does a report printed again later.
+                guard state.processState != .exited else { return (current, []) }
                 // "Pre-start" is the launch phase, not "not currently
                 // running": a session that started has moved the process to
                 // .running, and its exit, with any status, is no launch
@@ -198,12 +202,13 @@ enum AgentStateReducer {
             }
 
             switch domainEvent {
-            case .sessionStarted, .turnStarted:
+            case .sessionStarted, .turnCompleted, .turnFailed:
                 confirmProviderAlive(&state, effects: &effects)
-            case .turnCompleted, .turnFailed:
-                if state.processState != .exited {
-                    confirmProviderAlive(&state, effects: &effects)
-                }
+            case .turnStarted:
+                // A prompt the event file delivers after the exit report
+                // starts no turn: the provider has gone.
+                guard state.processState != .exited else { return (current, []) }
+                confirmProviderAlive(&state, effects: &effects)
             case .programStatus(let report):
                 // The provider has exited or its terminal has closed: what
                 // the terminal reports now is not this launch's provider.
@@ -305,8 +310,9 @@ enum AgentStateReducer {
                 // What a session end does tell: Claude ends a resume of a
                 // session it cannot find before starting it, with
                 // `SessionEnd`, no `SessionStart`, and exit status 1. The
-                // exit record may come first and has then already marked the
-                // launch failed, without saying why.
+                // exit report, which skips the event file's delay, usually
+                // comes first and has then already marked the launch failed
+                // and notified it; this only says why.
                 if let missing = state.resumingSessionID {
                     state.resumingSessionID = nil
                     state.missingSessionID = missing
@@ -511,11 +517,15 @@ enum AgentStateReducer {
         effects.append(.unreadChanged)
     }
 
+    /// The provider is seen alive. A launch whose provider has exited, or
+    /// whose terminal has closed, is never alive again: a hook record that
+    /// arrives after the exit report was written before the exit, and the
+    /// event file delivered it late.
     private static func confirmProviderAlive(
         _ state: inout AgentRuntimeSnapshot,
         effects: inout [AgentRuntimeEffect]
     ) {
-        guard state.processState != .running else { return }
+        guard state.processState == .notStarted || state.processState == .launching else { return }
         state.processState = .running
         state.failureMessage = nil
         state.resumingSessionID = nil

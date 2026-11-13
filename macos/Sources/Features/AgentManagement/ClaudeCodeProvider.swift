@@ -36,7 +36,7 @@ struct ClaudeCodeProvider: Sendable {
         AgentProviderEntry(
             turnActivity: .surface,
             hookEvents: Self.hookEvents,
-            recordsExit: true,
+            recordsExit: false,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },
             probe: { probe(environmentPath: $0) },

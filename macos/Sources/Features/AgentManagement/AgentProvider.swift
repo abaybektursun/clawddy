@@ -335,7 +335,7 @@ enum AgentDomainEvent: Equatable, Sendable {
     case turnFailed(String?)
     /// A session ended. The process need not have: `/clear` ends one session
     /// and starts the next in the same process, and an exit is reported by
-    /// its own record.
+    /// the launch script.
     case sessionEnded
     case providerExited(status: Int)
 }
@@ -349,8 +349,9 @@ struct AgentProviderEntry: Sendable {
     typealias Meaning = @Sendable (AgentRawProviderEvent) -> [AgentDomainEvent]
 
     /// The source that reports the agent's turn activity. The launch timeout
-    /// waits for its first report, and `ingest` drops program-status reports
-    /// for a provider whose turn activity comes from its hooks. Only the
+    /// waits for its first report, and `ingest` drops program-status reports,
+    /// except the launch script's exit report, for a provider whose turn
+    /// activity comes from its hooks. Only the
     /// event file's silence makes an active turn show as delayed: a program
     /// reports nothing during a long tool call (131 s captured).
     var turnActivity: AgentStatusObservation.Source
@@ -359,8 +360,10 @@ struct AgentProviderEntry: Sendable {
     /// records are made from the same table, and `ingest` drops a hook
     /// record of any other event.
     var hookEvents: [String: Meaning]
-    /// Whether the launch script records the provider's exit in the event
-    /// file, as a `ProviderExited` record.
+    /// Whether the launch script also records the provider's exit in the
+    /// event file, as a `ProviderExited` record. Every launch script reports
+    /// the exit in the terminal, which is what ends the launch; Codex keeps
+    /// the record until gate G4.
     var recordsExit: Bool
     var prepareIntegration: @Sendable () -> Result<AgentIntegrationPreparation, AgentProviderIssue>
     var prepareLaunch: @Sendable (AgentLaunchRequest) -> Result<AgentPreparedLaunch, AgentProviderIssue>
