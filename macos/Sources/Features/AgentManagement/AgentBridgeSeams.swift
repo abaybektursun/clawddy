@@ -231,6 +231,9 @@ protocol AgentSurfaceHost: AnyObject {
     /// Asks the user before closing the agent's terminal while its process
     /// runs, and calls `close` only if they agree.
     func confirmClose(id: UUID, then close: @escaping @MainActor () -> Void)
+    /// Whether closing the agent's terminal now would kill a running
+    /// process, as Ghostty judges it for its own terminals.
+    func closeNeedsConfirmation(id: UUID) -> Bool
     func removeSurface(id: UUID)
 }
 

@@ -204,6 +204,9 @@ final class FakeSurfaceHost: AgentSurfaceHost {
 
     /// Makes `presentPreparedSurface` create nothing and return false.
     var refusesPresent = false
+    /// Agents whose terminal runs a process that closing it would kill,
+    /// as Ghostty's `needsConfirmQuit` reports it.
+    var processRunning: Set<UUID> = []
     /// Where the surfaces' closes and program status are reported.
     weak var bridge: AgentBridge?
     private(set) var calls: [Call] = []
@@ -241,6 +244,10 @@ final class FakeSurfaceHost: AgentSurfaceHost {
     func confirmClose(id: UUID, then close: @escaping @MainActor () -> Void) {
         calls.append(.confirmClose(id))
         pendingClose = close
+    }
+
+    func closeNeedsConfirmation(id: UUID) -> Bool {
+        surfaces[id] != nil && processRunning.contains(id)
     }
 
     /// Answers the open close question: Close when `confirmed`, else Cancel.

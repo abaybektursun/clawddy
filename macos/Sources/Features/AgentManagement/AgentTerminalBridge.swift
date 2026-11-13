@@ -448,6 +448,19 @@ final class AgentBridge {
         }
 
         if host.hasSurface(id: id), agent.processState == .exited {
+            // Restart replaces the terminal that the provider's exit left on
+            // the login shell, and with it whatever the user started there,
+            // so a running process is asked about first, as for Cmd-W.
+            if host.closeNeedsConfirmation(id: id) {
+                host.confirmClose(id: id) { [weak self, weak host] in
+                    guard let self, let host, let agent = self.agents[id],
+                          agent.processState == .exited
+                    else { return }
+                    self.discardSurfaceForRestart(id: id, host: host, provider: agent.provider)
+                    self.activate(id: id, host: host, project: project, discardingSession: discardingSession)
+                }
+                return
+            }
             discardSurfaceForRestart(id: id, host: host, provider: agent.provider)
         }
 

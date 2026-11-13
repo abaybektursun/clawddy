@@ -112,6 +112,45 @@ struct AgentProviderExitTests {
     /// Only what the launch script prints ends a launch. On the record
     /// `clawddy`, a report that is not `clear`, or has no decimal exit
     /// status as its message, is ignored and logged as an error.
+    /// Review M6: Restart replaces the terminal the provider's exit left on
+    /// the login shell. While something runs there, a build or a `claude`
+    /// typed by hand, Restart asks first, as Cmd-W does: Cancel keeps the
+    /// terminal and starts nothing, Close replaces it and starts the agent.
+    /// With nothing running, Restart replaces it at once.
+    @Test func restartAsksBeforeKillingWhatRunsInTheFallbackShell() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.launch(id)
+        try h.providerExited(id, status: 0)
+        let agent = try h.agent(id)
+        let surface = try #require(h.host.surfaces[id])
+        h.host.processRunning.insert(id)
+
+        try h.activate(id)
+        #expect(h.host.calls.last == .confirmClose(id))
+        h.host.answerClose(confirmed: false)
+        #expect(h.host.surfaces[id] === surface)
+        #expect(agent.processState == .exited)
+        #expect(h.providers.launchRequests.count == 1)
+
+        try h.activate(id)
+        #expect(h.host.calls.last == .confirmClose(id))
+        h.host.answerClose(confirmed: true)
+        #expect(h.host.calls.suffix(3) == [.remove(id), .select(id), .present(id)])
+        #expect(h.host.surfaces[id] !== surface)
+        #expect(agent.displayState == .launching)
+        #expect(h.providers.launchRequests.count == 2)
+
+        try h.osc(id, "state=idle:app=claude-code")
+        try h.providerExited(id, status: 0)
+        h.host.processRunning.remove(id)
+        try h.activate(id)
+        #expect(!h.host.calls.suffix(3).contains(.confirmClose(id)))
+        #expect(h.providers.launchRequests.count == 3)
+    }
+
     @Test func onlyTheLaunchScriptsReportEndsTheLaunch() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }

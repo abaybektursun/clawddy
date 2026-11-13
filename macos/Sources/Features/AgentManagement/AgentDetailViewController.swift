@@ -307,6 +307,12 @@ final class AgentDetailViewController: NSViewController {
         }
     }
 
+    /// Ghostty's own test (`needsConfirmQuit`): the process has not exited
+    /// and, where the shell reports its prompt, is not sitting at it.
+    func closeNeedsConfirmation(id: UUID) -> Bool {
+        panesByID[id]?.surface.needsConfirmQuit ?? false
+    }
+
     func removeSurface(id: UUID) {
         logger.info("removeSurface \(id)")
         guard let pane = panesByID.removeValue(forKey: id) else { return }
