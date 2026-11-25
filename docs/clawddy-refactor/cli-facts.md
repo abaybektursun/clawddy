@@ -1153,3 +1153,165 @@ For `docs/clawddy-design/flows.md` 5 (does Claude Code title the conversation?) 
 - "Continue an earlier conversation…" in the same folder: Enter on the list bound the new agent to the conversation above (its binding file names it), named it "Single word reply 2", tracked its turn (Working, then Done), and after `/exit` a bring-back resumed that conversation.
 - Esc on the list removed the agent within 0.1 s, nothing notified, nothing kept in Recently removed.
 - Not tried: Codex's list (`codex resume`), whose choice binds only through Codex's hooks.
+
+## agy (Antigravity CLI 1.5.17) captures (2026-11-25)
+
+For `docs/clawddy-design/agy-plan.md`. agy 1.5.17 (`agy --version` prints `1.5.17`), run in a pseudo-terminal of its own by the probe script (`/Volumes/Xcode/GhosttyBuilds/ghostty/redesign-notes/agy/probes/stage1/probe.py`, outside the repository; captures beside it and in `probes/run2..run7-osc.log`). The probe answers the `7501;?` query as the fork does and `TERM` is `xterm-ghostty`; 120×40 cells. Each probe ran in a new throwaway folder `<WS>`, trusted for that session with `--settings '{"trustedWorkspaces":["<WS>"]}'`, and with a hook folder `<HOOKDIR>` passed with `--add-dir <HOOKDIR>` whose `.agents/hooks.json` logs every record. Prompts were one-line requests ("Reply with the single word ok."). Redactions: `<WS>`, `<HOOKDIR>`, `<id>`/`<A>`/`<B>` for conversation ids, `<model>` for the model's name and id, `<plan>` for the account's plan; the banner's account line is never shown. Times are seconds since launch; only OSC 7501 (`OSC`), hooks (`HOOK`) and keys (`KEY`) are shown.
+
+### Status reports
+
+- **Format:** `ESC ] 7501 ; state=<s>[:kind=<k>]:app=antigravity[:msg=<base64>] BEL`. Always BEL, always `app=antigravity`, fields always in this order. Never `id`, `progress` or `title`, never `clear`.
+- **The query comes first** (`ESC]7501;?BEL`, 0.11–0.18 s). **Without an answer agy never reports** and otherwise works the same.
+
+| Report | Bytes (msg decoded) | When |
+| --- | --- | --- |
+| Sign-in check | `state=blocked:kind=auth:app=antigravity:msg=` "Sign in required" (`U2lnbiBpbiByZXF1aXJlZA==`) | Right after the answer, while the start-up sign-in runs. Not always: absent once when the answer came late (0.78 s) and when sign-in failed offline |
+| Ready | `state=idle:app=antigravity` | 30–40 ms after the sign-in check in ten starts; **500 ms after it in two** (0.14 → 0.64 s; both resumes that added a folder the conversation did not have yet). Another resume took 30 ms |
+| Folder trust dialog | `state=blocked:kind=permission:app=antigravity:msg=` "Trust this folder?" | Instead of `idle`, while the dialog shows |
+| Turn starts | `state=working:app=antigravity` | 10–20 ms after Return. **On a resumed conversation it carries the conversation's title as msg** (e.g. "Alpha And Beta Output"); in a conversation made in this process it carries none |
+| Question | `state=blocked:kind=question:app=antigravity:msg=` the question | When the question menu shows. **Cut to 179 characters and "…"** past 180: a 272-character question gave 180 characters |
+| Command needs approval | `state=blocked:kind=permission:app=antigravity:msg=` "Approve Bash: echo chosen" | When the permission menu shows (default mode; auto mode approves `echo` itself) |
+| Answer or approval given | `state=working:app=antigravity` | 20 ms after Return |
+| Turn ends | `state=done:app=antigravity:msg=` the reply's first line | After the Stop hook returns (40–90 ms after it starts). **Always a msg.** A reply "alpha\nbeta" gave "alpha"; a long first line is cut to 199 characters and "…" (200) |
+| First key after `done` or `error` | `state=idle:app=antigravity` | Typing a character, the first Control-D, or Escape after an error |
+| Interrupt | `state=idle:app=antigravity` | 60 ms after Escape |
+| Failure | `state=error:app=antigravity:msg=` the error | See "A live failure" |
+| Exit | `state=idle:app=antigravity` | At exit, after the terminal is restored |
+
+- `/clear` reports nothing.
+
+### Timelines
+
+**A new conversation from `--prompt-interactive=<text>`** (reply "alpha\nbeta"):
+```
+   0.78 OSC   ?
+   0.88 OSC   state=idle                     (no sign-in report this time; see above)
+   2.06 OSC   state=working                  (the first prompt, 1.2 s after idle)
+   3.21 HOOK  SessionStart <A>
+   3.30 HOOK  PreInvocation <A> invocationNum=0 initialNumSteps=1
+   6.18 HOOK  PostInvocation <A> invocationNum=0
+   6.22 HOOK  Stop <A> terminationReason=NO_TOOL_CALL fullyIdle=true error=""
+   6.26 OSC   state=done  [msg='alpha']
+```
+**A question** (typed prompt in the same conversation, Return on option 1):
+```
+   8.50 KEY   text typed  →  OSC state=idle
+   9.08 OSC   state=working
+   9.08 HOOK  PreInvocation <A> invocationNum=0 initialNumSteps=3
+  12.55 OSC   state=blocked:kind=question  [msg='Before we continue … palette that …']
+  14.09 KEY   enter
+  14.11 OSC   state=working
+  14.12 HOOK  PostInvocation <A> invocationNum=0
+  14.15 HOOK  PreInvocation <A> invocationNum=1
+  17.31 HOOK  PostInvocation <A> invocationNum=1
+  17.34 HOOK  Stop <A>
+  17.43 OSC   state=done  [msg='yes']
+```
+**A command that needs approval** (default mode, `--prompt-interactive`, Return on option 1):
+```
+   1.45 OSC   state=working
+   2.40 HOOK  SessionStart <B>
+   2.43 HOOK  PreInvocation <B> invocationNum=0
+   5.56 OSC   state=blocked:kind=permission  [msg='Approve Bash: echo chosen']
+   7.12 KEY   enter
+   7.14 OSC   state=working
+   7.16 HOOK  PostInvocation <B> invocationNum=0      (the transcript already holds the command's result)
+   7.20 HOOK  PreInvocation <B> invocationNum=1
+  17.23 HOOK  PostInvocation <B> invocationNum=1
+  17.27 HOOK  Stop <B>
+  17.29 OSC   state=done  [msg='done']
+```
+**An interrupt with a message queued:**
+```
+  19.99 OSC   state=working
+  20.02 HOOK  PreInvocation <A> invocationNum=0
+  35.56 KEY   "queued words", enter                   (nothing reported, no hook)
+  37.11 KEY   esc
+  37.17 OSC   state=idle
+```
+No PostInvocation, **no Stop**, and nothing more in the transcript after the prompt's own line; the queued text is back in the input box; the transcript area shows `  ⎿  Interrupted · What should Antigravity CLI do instead?`. Nothing came later either (the conversation was left by `/clear` 6 s later).
+
+**`/clear`, then a prompt:** nothing reported and no hook at `/clear`. The presence lock moves to a new id at once (before any prompt); the old one is released. The next prompt: `working` (47.29), `SessionStart` with the new id (47.40), `PreInvocation` (47.43), …, `Stop` (50.94), `done` (50.96).
+
+**`--conversation <A>`, then a prompt:** sign-in check (0.14), `idle` (0.64; 0.17 in another resume); the transcript of `<A>` is drawn again above the box; the lock of `<A>` is held from the start. **No hook before the first prompt, and no SessionStart at the first prompt either:** `working` with the title as msg (5.28), `PreInvocation <A> invocationNum=0 initialNumSteps=12` (5.34), `PostInvocation`, `Stop` (7.90), `done` (7.93). SessionStart fires only for a conversation made in this process.
+
+**`--conversation` with an id that does not exist:** nothing on screen, nothing reported beyond the usual start-up, no lock for that id. agy starts a new session: the first prompt makes a new id, and SessionStart, PreInvocation and Stop carry the new id.
+
+**A live failure** (the process given `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` naming a closed local port; nothing else changed): no sign-in report, `idle` (0.13), the banner shows no model. The prompt: `state=error` 10 ms after Return, msg "failed to construct executor: plan model not specified; you must specify a valid model", with no `working` before it and **no hook at all** (no SessionStart, no Stop). On screen under the prompt's echo: `⚠ failed to construct executor: …` (red) and `Error ID: <uuid>-1` (grey). The state stays `error` until Escape, which reports `idle`.
+
+### Hooks
+
+- **A resumed conversation keeps the folders it was made with.** `<A>` was made with `--add-dir <HOOKDIR-1>`; `--conversation <A> --add-dir <HOOKDIR-2>` ran the hooks of both folders, once each, and `workspacePaths` listed the launch folder, `<HOOKDIR-1>`, `<HOOKDIR-2>`. Passing `<HOOKDIR-1>` again on a resume ran its hooks once and listed it once.
+- **Loaded from `--add-dir` folders:** `<HOOKDIR>/.agents/hooks.json` runs, with no trust question for `<HOOKDIR>`; agy's log says "loaded 1 named hooks from 1 hooks.json file(s)". `{"<name>": {"<Event>": [{"type": "command", "command": "...", "timeout": 10}]}}` is the shape used.
+- **The process:** working folder `<HOOKDIR>/.agents`; environment adds `ANTIGRAVITY_CONVERSATION_ID=<id>`; the record on stdin, one line of JSON with sorted keys.
+- **Common fields:** `artifactDirectoryPath` (`~/.gemini/antigravity-cli/brain/<id>`), `conversationId`, `cwd` (the launch folder, not the hook's folder), `hookEventName`, `lastUserInput` (the prompt of the turn, also on SessionStart), `modelName` (`<model id>`), `transcriptPath`, `workspacePaths` (the launch folder, then each added folder).
+- **`transcriptPath` begins with a literal `~/`** and names `…/brain/<id>/.system_generated/logs/transcript_full.jsonl`. The docs name `transcript.jsonl`; both files exist and hold the same steps.
+- **PreInvocation, PostInvocation:** add `initialNumSteps` (steps in the transcript at that moment) and `invocationNum` (0 at each turn's start, +1 after each tool result or answer).
+- **Stop:** adds `continuationActive` (false), `error` (""), `executionNum` (0), `fullyIdle` (true), `terminationReason` ("NO_TOOL_CALL" for every turn seen).
+- **What a hook prints:** hooks that print nothing at all and hooks that print `{}` behave the same on SessionStart, PreInvocation, PostInvocation and Stop: nothing on screen, nothing in agy's log, turns unchanged. (A PreToolUse hook that prints `{}` denies the tool call; probes `run2`.)
+- **The transcript at Stop:** in every turn seen (four) the file named by `transcriptPath` already held the turn's last `PLANNER_RESPONSE` line, full text included ("alpha\nbeta"), when Stop ran; it was there at PostInvocation already. The file grows next only at the next prompt.
+- **Transcript lines** (one JSON object per step, `json.dumps` spacing): `{"step_index", "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "created_at", "content": "<USER_REQUEST>\n<prompt>\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: <time>.\n</ADDITIONAL_METADATA>"}` (the first prompt also carries a `<USER_SETTINGS_CHANGE>` block); `{"step_index", "source": "MODEL", "type": "PLANNER_RESPONSE", "status", "created_at", "model", "input_tokens", "cache_read_tokens", "output_tokens", "thinking"?, "content"?, "tool_calls"?}`; `{"type": "GENERIC", "content": "Created At: …\nCompleted At: …\n<result>"}` for a tool result (an answer is "A1: yes"). A `PLANNER_RESPONSE` that calls a tool has `tool_calls` and empty or no `content`; the reply is the last one with `content`.
+
+### The presence lock
+
+- `~/.gemini/antigravity-cli/presence/<id>.lock`, 0 bytes, open read-write by the process and held with an exclusive `flock` (a non-blocking `flock` from another process fails while agy runs, succeeds after).
+- Taken when the conversation is made (the first prompt), at start on a resume, and moved to the new id at `/clear`. Before the first prompt only the `presence` folder is open. The file stays after exit, free.
+- Conversations are stored as `~/.gemini/antigravity-cli/conversations/<id>.db`.
+
+### Screens
+
+- **Banner** (at start): agy's logo, then beside it "Antigravity CLI 1.5.17", the account and `(<plan>)`, the model's name and effort ("<model> (High)"), the folder. A sign-in screen ("Welcome to the Antigravity CLI…", "Signing in...") shows on the alternate screen first and is gone once ready.
+- **Input box:** a full-width rule, the box, a full-width rule, the footer. The box's first row is `>` (blue `#8ab4f8`) and a space, then the text; continuation rows are indented two spaces.
+- **Mode hints** (grey `#9aa0a6`, on the box's first row when it is empty):
+  - default (`agentMode: ""`): none, a bare `>`;
+  - `--mode accept-edits`: "> Accept-edits mode: file edits auto-approved (shift+tab to cycle)";
+  - auto (no `--mode`, no `agentMode` in the settings): "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
+  - `--mode plan`: "> Plan mode: research & plan only (shift+tab to cycle)".
+  The hint shows only until the box has held text in this process (the first-prompt argument does not count): after a typed prompt was sent, or after typed text was emptied, the empty box is a bare `>`.
+- **Footer:** on the left "? for shortcuts" (empty box), nothing (text in the box), "esc to cancel" (working, or a menu showing), "  Press up to edit queued messages" (a message queued), "press ctrl+c again to exit" / "press ctrl+d again to exit"; on the right, right-aligned, "<mode> · <model> · <effort>" ("auto · <model> · high"); default mode leaves out the mode.
+- **Echo of a prompt:** a rule of 60 cells, then `> <prompt>` in bold blue, wrapped rows indented two spaces. The reply follows indented two spaces. This is the trap of plan item 4: only the box's rules span the terminal.
+- **Working:** a braille spinner and "Generating..." or "Loading..." (grey with a moving highlight) above the box; tool lines `● Ran (echo chosen) (ctrl+o to expand)`; thinking lines `▸ Thought for 3s, 150 tokens`.
+- **A queued message:** `▸ queued words (alt+m to send immediately)` above the box.
+- **Question menu** (the question also printed above it as `? <question>`):
+```
+Question
+────────────────────────────────────────── (full width)
+Question 1/1: <question, wrapped>
+> 1. yes
+  2. no
+  3. Write-in...
+  ↑/↓ Navigate · enter Select · esc Skip
+esc to cancel                                         auto · <model> · high
+```
+  After Enter the transcript shows `> yes` (bold blue) under the question.
+- **Permission menu** (a `● Ran (echo chosen) (ctrl+o to expand)` line above it):
+```
+Command
+────────────────────────────────────────── (full width)
+Requesting permission for:
+   echo chosen
+Run this command?
+> 1. Yes, run command
+  2. Yes, and always allow in this conversation for commands that start with 'echo'
+  3. Yes, and always allow for commands that start with 'echo' (Persist to settings.json)
+  4. No, cancel
+  ↑/↓ Navigate · tab Amend · ctrl+g edit/expand command
+esc to cancel                                                <model> · high
+```
+- **Trust dialog** (a folder not trusted): "Accessing workspace:", the folder, "Do you trust the contents of this project?", "Antigravity CLI requires permission to read, edit, and execute files here.", "> Yes, I trust this folder", "  No, exit", "  ↑/↓ Navigate · enter Confirm".
+- **At exit:** `ESC[>4m ESC[<1u CR LF LF ESC[J ESC[?2004l ESC[0 q`, the `idle` report, then "Resume with -c (or command below):" and "agy --conversation=<id>" when a conversation exists. Exit status 0.
+- **At start** agy writes `ESC[?2026$p ESC[?2027$p ESC]11;?BEL ESC]7501;?BEL`, switches to the alternate screen for sign-in, and sets bracketed paste, `ESC[>4;2m` and the kitty keyboard flags `ESC[>5u`.
+
+### Keys
+
+- **Return** submits; a bracketed paste lands in the box as typed, its newline kept (`run7`).
+- **Escape** while working interrupts (60 ms to `idle`). With text in an idle box, **Escape twice empties it when the presses are less than about 0.3 s apart**: 0.16 s and 0.27 s apart emptied it; 0.33, 0.39, 0.7 and 1.2 s apart did not. One Escape does nothing to the text.
+- **Control-C** with no turn: the first arms "press ctrl+c again to exit" and leaves the text; still armed 4 s later and after a paste; the second exits, typed text and all (`run7`). With a turn running it interrupts (plan, decision 5). Not probed again: the plan forbids sending it.
+- **Control-D** on an empty box: the first shows "press ctrl+d again to exit", the second exits. With text in the box it does nothing.
+- **Shift+Tab** cycles default → accept-edits → auto → plan, changing the hint and the footer.
+- **Control-U** empties the line before the cursor. Typing `y` on the permission menu did nothing (`run3`); digits on the menus were not tried.
+- A message sent while working is queued and does not interrupt; Escape gives it back into the box.
+
+### Not seen
+
+`done` without a msg; `terminationReason` other than "NO_TOOL_CALL"; a Stop record with `error` set; what Escape does on the question or permission menu; what agy reports after start-up when signed out; the usage limit.

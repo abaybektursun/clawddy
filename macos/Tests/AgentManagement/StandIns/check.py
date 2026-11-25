@@ -1,13 +1,16 @@
 #!/usr/bin/env -S python3 -I
-"""Drives the stand-in `claude` and `codex` in pseudo-terminals and checks what
-they show, report (OSC 7501) and run (hooks, notify).
+"""Drives the stand-in `claude`, `codex` and `agy` in pseudo-terminals and checks
+what they show, report (OSC 7501) and run (hooks, notify).
 
 usage: check.py [name ...]     run every check, or only those named
 
 Each check gets its own temporary folder laid out like a harness folder:
 bin/<cli> (a link to the stand-in), standin/<session-id>.json (its script),
 work/ (the working folder), settings.json whose hooks append their stdin to
-hooks.log, and a statusLine command that saves its input. The terminal side
+hooks.log, and a statusLine command that saves its input; for agy a hook folder
+hookdir/.agents/hooks.json (passed with --add-dir $HOOKDIR) whose hooks append
+their stdin to hooks.log and their working folder and conversation variable to
+hookctx.log, and agy-data/ as its data folder. The terminal side
 answers the OSC 7501 query as Ghostty does and encodes keys with the kitty
 protocol once the program pushes it, as Ghostty does. A small screen model
 replays the output so checks can read the screen as text.
@@ -32,6 +35,7 @@ import unicodedata
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPLY = "\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth"
+AGY_EVENTS = ["SessionStart", "PreInvocation", "PostInvocation", "Stop"]
 EVENTS = ["SessionStart", "UserPromptSubmit", "Stop", "StopFailure", "SessionEnd", "PreToolUse", "PostToolUse",
           "PermissionRequest", "Notification", "PreCompact", "PostCompact", "SubagentStop"]
 
@@ -128,7 +132,7 @@ class Run:
             os.makedirs(os.path.join(tmp, d), exist_ok=True)
         exe = os.path.join(tmp, "bin", cli)
         if not os.path.exists(exe):
-            os.symlink(os.path.join(HERE, "claude"), exe)
+            os.symlink(os.path.join(HERE, "agy" if cli == "agy" else "claude"), exe)
         if script is not None:
             with open(os.path.join(tmp, "standin", sid + ".json"), "w") as f:
                 json.dump(script, f)
@@ -141,14 +145,23 @@ class Run:
         with open(self.settings, "w") as f:
             json.dump({"hooks": {e: [{"hooks": [{"type": "command", "command": hook, "timeout": 5}]}] for e in EVENTS},
                        "statusLine": {"type": "command", "command": f"cat > {q(self.status_log)}; echo 'main · 2 checks'"}}, f)
+        self.hookdir = os.path.join(tmp, "hookdir")
+        self.data = os.path.join(tmp, "agy-data")
+        self.ctx_log = os.path.join(tmp, "hookctx.log")
+        os.makedirs(os.path.join(self.hookdir, ".agents"), exist_ok=True)
+        ctx = f'{hook}; printf "%s %s\\n" "$(pwd)" "$ANTIGRAVITY_CONVERSATION_ID" >> {q(self.ctx_log)}'
+        with open(os.path.join(self.hookdir, ".agents", "hooks.json"), "w") as f:
+            json.dump({"check": {e: [{"type": "command", "command": ctx, "timeout": 5}] for e in AGY_EVENTS}}, f)
         self.rows, self.cols = rows, cols
         self.chunks = []      # output bytes, and ("resize", rows, cols) markers
         self.raw = b""
         self.kitty = [0]
         self.status = None
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "CODEX", "GHOSTTY", "CLAWDDY"))}
-        env.update(TERM="xterm-ghostty", TERM_PROGRAM="ghostty", COLORTERM="truecolor")
-        argv = [exe] + [a.replace("$SETTINGS", self.settings).replace("$NOTIFY", self.notify_log) for a in args]
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("CLAUDE", "CODEX", "GHOSTTY", "CLAWDDY", "AGY", "ANTIGRAVITY"))}
+        env.update(TERM="xterm-ghostty", TERM_PROGRAM="ghostty", COLORTERM="truecolor", AGY_STANDIN_DATA_DIR=self.data)
+        argv = [exe] + [a.replace("$SETTINGS", self.settings).replace("$NOTIFY", self.notify_log)
+                        .replace("$HOOKDIR", self.hookdir) for a in args]
         self.pid, self.fd = pty.fork()
         if self.pid == 0:
             os.chdir(os.path.join(tmp, "work"))
@@ -211,8 +224,9 @@ class Run:
         self.pump(0.02)
 
     KEYS = {"enter": "\r", "esc": "\x1b", "ctrl-c": "\x03", "ctrl-d": "\x04", "down": "\x1b[B", "up": "\x1b[A",
-            "backspace": "\x7f"}
-    KITTY = {"esc": "\x1b[27u", "ctrl-c": "\x1b[99;5u", "ctrl-d": "\x1b[100;5u"}
+            "backspace": "\x7f", "ctrl-u": "\x15", "shift-tab": "\x1b[Z"}
+    KITTY = {"esc": "\x1b[27u", "ctrl-c": "\x1b[99;5u", "ctrl-d": "\x1b[100;5u", "ctrl-u": "\x1b[117;5u",
+             "shift-tab": "\x1b[9;2u"}
 
     def key(self, name):
         self.send(self.KITTY[name] if self.kitty[-1] & 1 and name in self.KITTY else self.KEYS[name])
@@ -268,7 +282,7 @@ class Run:
             return []
         with open(self.log) as f:
             items = [json.loads(line) for line in f if line.strip()]
-        return [h for h in items if event is None or h["hook_event_name"] == event]
+        return [h for h in items if event is None or h.get("hook_event_name", h.get("hookEventName")) == event]
 
     def hook(self, event, pred=lambda h: True):
         return lambda: next((h for h in self.hooks(event) if pred(h)), None)
@@ -710,6 +724,212 @@ def check_dialogs(tmp):
         run.wait("idle after skipping", lambda: "idle" in run.states())
         run.wait("the composer", run.screen_has("Ask Codex to do anything"))
         return "trust: blocked/permission, hooks after trust; codex update dialog: silent until skipped"
+    finally:
+        run.close()
+
+
+AGY_QUESTION = ("Before the harbour view ships, should the evening palette keep the old blue tones while the morning "
+                "palette moves to the warmer colours described in the second part of the notes, or should both "
+                "palettes stay exactly as they are today?")
+AGY_AUTH = b"\x1b]7501;state=blocked:kind=auth:app=antigravity:msg=U2lnbiBpbiByZXF1aXJlZA==\x07"
+AGY_IDLE = b"\x1b]7501;state=idle:app=antigravity\x07"
+
+
+def held(path):
+    """Whether another process holds an flock on `path`."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def box(run):
+    """The rows between the last two full-width rules: agy's input box."""
+    rows = run.screen()
+    rules = [i for i, r in enumerate(rows) if r == "─" * run.cols]
+    return rows[rules[-2] + 1:rules[-1]] if len(rules) > 1 else None
+
+
+def footer(run):
+    return [r for r in run.screen() if r][-1]
+
+
+def last_reply(path):
+    with open(path) as f:
+        steps = [json.loads(line) for line in f]
+    return [s for s in steps if s["type"] == "PLANNER_RESPONSE" and s.get("content")][-1]["content"], len(steps)
+
+
+def check_agy(tmp):
+    """agy: start, first prompt, question, permission, interrupt with a queued message, exit, resume, Ctrl-C."""
+    script = {"title": "Harbour palette", "steps": [
+        {"wait": "prompt"}, {"finish": "First line of the reply.\nSecond line."},
+        {"wait": "prompt"}, {"ask": AGY_QUESTION, "options": ["yes", "no"]}, {"finish": "yes"},
+        {"wait": "prompt"}, {"permission": "make test"}, {"finish": "Tests pass."},
+        {"wait": "prompt"}, {"print": ["⏺ Bash(make long)"]}, {"wait": 30}, {"finish": "not reached"}]}
+    run = Run(tmp, "agy", ["--add-dir", "$HOOKDIR", "--effort", "medium", "--prompt-interactive=-first prompt"],
+              script=script, sid="default")
+    try:
+        run.wait("idle", lambda: "idle" in run.states())
+        expect(run.states()[:3] == ["?", "blocked", "idle"] and AGY_AUTH in run.raw and AGY_IDLE in run.raw,
+               f"start-up reports: {run.states()}")
+        run.wait("the mode's hint in the box", lambda: box(run) == ["> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)"])
+        stop = run.wait("Stop of the first prompt", run.hook("Stop"))
+        cid = stop["conversationId"]
+        start = run.hooks("SessionStart")
+        pre = run.hooks("PreInvocation")
+        expect(len(start) == 1 and start[0]["conversationId"] == cid and start[0]["lastUserInput"] == "-first prompt",
+               f"SessionStart: {start}")
+        expect(pre[0]["invocationNum"] == 0 and pre[0]["initialNumSteps"] == 1, f"PreInvocation: {pre}")
+        expect(stop["terminationReason"] == "NO_TOOL_CALL" and stop["fullyIdle"] is True and stop["error"] == ""
+               and stop["workspacePaths"] == [os.path.join(tmp, "work"), run.hookdir] and stop["modelName"] == "example-model",
+               f"Stop: {stop}")
+        with open(run.ctx_log) as f:
+            expect(set(f.read().split("\n")[:-1]) == {f"{run.hookdir}/.agents {cid}"}, "hooks run in .agents with the id set")
+        reply, steps = last_reply(stop["transcriptPath"])
+        expect(reply == "First line of the reply.\nSecond line." and steps == 2, f"transcript: {reply!r}, {steps}")
+        run.wait("done", lambda: run.states()[-1] == "done")
+        done = [f for f, _ in run.reports() if f.get("state") == "done"][-1]
+        expect(done["msg"] == "First line of the reply.", f"done msg: {done}")
+        lock = os.path.join(run.data, "presence", cid + ".lock")
+        expect(held(lock), "the conversation's lock is held")
+        run.wait("the echo of the prompt", lambda: "> -first prompt" in run.screen() and "─" * 60 in run.screen())
+        expect(footer(run).endswith("auto · example-model · medium"), f"footer: {footer(run)!r}")
+        # A question longer than 180 characters is cut in the report.
+        run.type("ask me")
+        run.wait("idle once a key is typed after done", lambda: run.states()[-1] == "idle")
+        run.key("enter")
+        blocked = run.wait("blocked", lambda: next((f for f, _ in run.reports() if f.get("kind") == "question"), None))
+        expect(blocked["msg"] == AGY_QUESTION[:179] + "…", f"question msg: {blocked}")
+        run.wait("the question menu", lambda: "> 1. yes" in run.screen() and "  3. Write-in..." in run.screen())
+        run.key("down")
+        run.wait("selection moves", lambda: "> 2. no" in run.screen())
+        run.key("up")
+        run.key("enter")
+        run.wait("Stop after the answer", lambda: len(run.hooks("Stop")) == 2)
+        expect(any(h["invocationNum"] == 1 for h in run.hooks("PreInvocation")), "the model is called again after the answer")
+        run.wait("a bare box once typed in", lambda: box(run) == [">"])
+        # Permission.
+        run.type("run the tests")
+        run.key("enter")
+        perm = run.wait("blocked permission", lambda: next((f for f, _ in run.reports() if f.get("kind") == "permission"), None))
+        expect(perm["msg"] == "Approve Bash: make test", f"permission msg: {perm}")
+        run.wait("the permission menu", lambda: "Requesting permission for:" in run.screen() and "> 1. Yes, run command" in run.screen())
+        run.key("enter")
+        run.wait("Stop after approving", lambda: len(run.hooks("Stop")) == 3)
+        expect(last_reply(stop["transcriptPath"])[0] == "Tests pass.", "the reply is in the transcript at Stop")
+        # Interrupt with a queued message.
+        run.type("count slowly")
+        run.key("enter")
+        run.wait("the tool line", lambda: "● Ran (make long) (ctrl+o to expand)" in run.screen())
+        _, before = last_reply(stop["transcriptPath"])
+        run.type("queued words")
+        run.key("enter")
+        run.wait("the queued line", lambda: "▸ queued words (alt+m to send immediately)" in run.screen()
+                 and footer(run).startswith("  Press up to edit queued messages"))
+        run.key("esc")
+        run.wait("idle", lambda: run.states()[-1] == "idle")
+        run.wait("queued text back in the box", lambda: box(run) == ["> queued words"])
+        expect("  ⎿  Interrupted · What should Antigravity CLI do instead?" in run.screen(), "the interrupt line")
+        run.pump(0.5)
+        expect(len(run.hooks("Stop")) == 3 and last_reply(stop["transcriptPath"])[1] == before,
+               "no Stop and no transcript step for an interrupted turn")
+        run.key("esc")
+        run.key("esc")
+        run.wait("Escape twice empties the box", lambda: box(run) == [">"])
+        # Control-D twice on an empty box exits.
+        run.key("ctrl-d")
+        run.wait("the exit hint", lambda: footer(run).startswith("press ctrl+d again to exit"))
+        run.key("ctrl-d")
+        run.wait("exit", lambda: run.status is not None, timeout=5)
+        expect(os.WEXITSTATUS(run.status) == 0, f"exit {run.status}")
+        expect(run.raw.endswith(AGY_IDLE + f"\r\nResume with -c (or command below):\r\nagy --conversation={cid}\r\n".encode()),
+               f"exit bytes: {run.raw[-160:]!r}")
+        expect(not held(lock), "the lock is free after exit")
+    finally:
+        run.close()
+    n_hooks = len(run.hooks())
+    run = Run(tmp, "agy", ["--add-dir", "$HOOKDIR", "--conversation", cid])
+    try:
+        run.wait("auth", lambda: "blocked" in run.states())
+        t = time.monotonic()
+        run.wait("idle", lambda: "idle" in run.states())
+        waited = time.monotonic() - t
+        expect(waited > 0.4, f"a resume stands on sign-in about 0.5 s: {waited:.2f}")
+        expect(held(lock), "the lock is held from the start when resuming")
+        run.type("again")
+        run.key("enter")
+        pre = run.wait("PreInvocation", lambda: next((h for h in run.hooks()[n_hooks:] if h["hookEventName"] == "PreInvocation"), None))
+        work = [f for f, _ in run.reports() if f.get("state") == "working"][-1]
+        expect(work.get("msg") == "Harbour palette", f"a resumed conversation's working carries its title: {work}")
+        run.wait("Stop", lambda: any(h.get("hookEventName") == "Stop" for h in run.hooks()[n_hooks:]))
+        expect(not [h for h in run.hooks()[n_hooks:] if h["hookEventName"] == "SessionStart"],
+               "no SessionStart on resume, not even at the first prompt")
+        expect(pre["conversationId"] == cid and pre["initialNumSteps"] > 1, f"PreInvocation after resume: {pre}")
+        # Control-C: the first arms the exit and keeps the text, the second exits.
+        run.type("kept")
+        run.key("ctrl-c")
+        run.wait("the Control-C hint", lambda: footer(run).startswith("press ctrl+c again to exit"))
+        expect(box(run) == ["> kept"] and run.status is None, "one Control-C keeps the text and the program")
+        run.key("ctrl-c")
+        run.wait("exit", lambda: run.status is not None, timeout=5)
+        return f"conversation {cid[:8]}; 7501 {' → '.join(run.states())}"
+    finally:
+        run.close()
+
+
+def check_agy_screens(tmp):
+    """agy: mode hints and Shift+Tab, the trust dialog, an unknown conversation id, a failure, skipped permissions."""
+    run = Run(os.path.join(tmp, "plan"), "agy", ["--mode", "plan"])
+    try:
+        run.wait("the plan hint", lambda: box(run) == ["> Plan mode: research & plan only (shift+tab to cycle)"])
+        expect(footer(run).endswith("plan · example-model · high"), f"footer {footer(run)!r}")
+        run.key("shift-tab")
+        run.wait("default mode: a bare box", lambda: box(run) == [">"] and footer(run).endswith("  example-model · high"))
+        run.key("shift-tab")
+        run.wait("accept-edits", lambda: box(run) == ["> Accept-edits mode: file edits auto-approved (shift+tab to cycle)"])
+    finally:
+        run.close()
+    run = Run(os.path.join(tmp, "default"), "agy", ["--settings", '{"agentMode": ""}'])
+    try:
+        run.wait("idle", lambda: "idle" in run.states())
+        run.wait("default mode from the settings", lambda: box(run) == [">"])
+    finally:
+        run.close()
+    run = Run(os.path.join(tmp, "trust"), "agy", [], script={"trust": True}, sid="default")
+    try:
+        trust = run.wait("blocked on trust", lambda: next((f for f, _ in run.reports() if f.get("kind") == "permission"), None))
+        expect(trust["msg"] == "Trust this folder?" and run.states()[:3] == ["?", "blocked", "blocked"], f"trust: {run.states()}")
+        run.wait("the dialog", lambda: "> Yes, I trust this folder" in run.screen()
+                 and "Do you trust the contents of this project?" in run.screen())
+        run.key("enter")
+        run.wait("idle once trusted", lambda: run.states()[-1] == "idle")
+    finally:
+        run.close()
+    script = {"steps": [{"wait": "prompt"}, {"permission": "rm -r build"}, {"fail": "error"}]}
+    run = Run(os.path.join(tmp, "unknown"), "agy", ["--add-dir", "$HOOKDIR", "--conversation", "0b9e2c1a-7d4f-4e3b-9a52-1c0ffee00000",
+                                                   "--dangerously-skip-permissions"], script=script, sid="default")
+    try:
+        run.wait("idle", lambda: "idle" in run.states())
+        run.pump(0.6)
+        expect(not run.hooks(), "an unknown id: no hook before the first prompt")
+        run.type("go")
+        run.key("enter")
+        err = run.wait("error", lambda: next((f for f, _ in run.reports() if f.get("state") == "error"), None))
+        expect(err["msg"].startswith("failed to construct executor"), f"error: {err}")
+        expect(not any(f.get("state") == "blocked" for f, _ in run.reports()[3:]), "skipped permissions do not ask")
+        start = run.hooks("SessionStart")
+        expect(len(start) == 1 and start[0]["conversationId"] != "0b9e2c1a-7d4f-4e3b-9a52-1c0ffee00000",
+               f"an unknown id starts a new conversation: {start}")
+        expect(not run.hooks("Stop"), "a failure runs no Stop")
+        run.wait("the error on screen", lambda: any(r.startswith("⚠ failed to construct executor") for r in run.screen()))
+        run.key("esc")
+        run.wait("Escape after the error reports idle", lambda: run.states()[-1] == "idle")
+        return "plan/default/accept-edits hints, trust dialog, unknown id → new conversation, error, no Stop"
     finally:
         run.close()
 

@@ -237,7 +237,7 @@ def "main start" [
     mkdir $bin
     let command = ($contents | get --optional command)
     let standins = ($env.FILE_PWD | path join "Tests/AgentManagement/StandIns")
-    for cli in ["claude" "codex"] {
+    for cli in ["claude" "codex" "agy"] {
         let target = ($bin | path join $cli)
         rm -f $target
         if $real {

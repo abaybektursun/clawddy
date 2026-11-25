@@ -1,0 +1,865 @@
+#!/usr/bin/env -S python3 -I
+"""Stand-in for the `agy` CLI (Antigravity CLI 1.5.17).
+
+It looks and reports like the real CLI towards the app and towards a person
+looking at the terminal, and never calls a model or the network. Observed
+behaviour of the real CLI: the "agy" section of
+docs/clawddy-refactor/cli-facts.md (probes of 2026-11-25 against 1.5.17).
+The input decoding, the event loop, the drawing machinery and the script
+director are the `claude` stand-in's, loaded from the file beside this one;
+what agy does differently is here.
+
+What it does
+- Arguments: --prompt-interactive=TEXT (also -i TEXT), --conversation ID
+  (also -r, --resume), --add-dir DIR (repeatable), --dangerously-skip-
+  permissions, --model ID, --effort LEVEL, --mode accept-edits|auto|plan,
+  --settings JSON-or-file (only "agentMode" is read; "" is default mode).
+  Other flags are accepted and ignored; --print is refused. `--version`
+  prints the version as the real one does.
+- Its data folder stands for ~/.gemini/antigravity-cli and is
+  $AGY_STANDIN_DATA_DIR, or <dir>/agy-data where <dir>/bin holds this
+  program. It never reads or writes the person's home. In it:
+  conversations/<id>.db (empty; the conversation exists),
+  presence/<id>.lock (held with flock while this process has the
+  conversation open; the file stays after exit, as the real one's does),
+  brain/<id>/.system_generated/logs/transcript_full.jsonl (the transcript, in
+  the real format: one JSON object per step, USER_INPUT, PLANNER_RESPONSE,
+  GENERIC).
+- A conversation exists only after the first prompt: its id is made then,
+  its lock taken, SessionStart runs. --conversation with an id that exists
+  (a conversation file, or a script under that id) resumes it: the lock is
+  taken at start and SessionStart never runs, not even at the first prompt.
+  An id that does not exist is ignored without a word, as the real one does:
+  the first prompt makes a new id. /clear (or /new) moves to a new id at once
+  (lock included); its SessionStart runs at the next prompt. Not modelled: the
+  real one remembers the folders a conversation was made with and adds them
+  back on a resume.
+- Terminal: raw mode, bracketed paste, kitty keyboard flags pushed
+  (ESC[>5u), as the real one. A banner, the transcript, then the bottom area:
+  spinner and queued messages while working, the input box between two
+  full-width rules ("> " and the text; empty it shows the mode's hint until
+  anything was typed in this process, then a bare ">"), and the footer (left:
+  "? for shortcuts", "esc to cancel", "  Press up to edit queued messages",
+  "press ctrl+c again to exit", or nothing while text is typed; right:
+  "<mode> · <model> · <effort>", no mode in default mode). Each submitted
+  prompt is echoed above as a 60-cell rule and "> text".
+- Status reports (OSC 7501, BEL-terminated, app=antigravity, fields in the
+  order state, kind, app, msg): it asks `7501;?` at start and reports only
+  once the terminal answers. Then `blocked kind=auth` "Sign in required",
+  and `idle` 0.03 s later (0.5 s when resuming: the longest seen, on two
+  resumes; others took 0.03 s), or `blocked kind=permission`
+  "Trust this folder?" when the script asks for the trust dialog. A turn:
+  `working` at once (with the conversation's title as msg when resumed and
+  the script names one), `done` with the reply's first line as msg (cut to
+  199 characters and "…" past 200), sent after the Stop hook returns. A
+  question: `blocked kind=question` with the question as msg (cut to 179 and
+  "…" past 180). A permission menu: `blocked kind=permission` "Approve Bash:
+  <command>". A failure: `error` with the error text; no hook runs. The first
+  key after `done` or `error` reports `idle`. Exit reports `idle`.
+- Hooks: .agents/hooks.json of the working folder and of each added folder
+  is read at start ({"name": {"enabled": bool, "<Event>": [{"type":
+  "command", "command": "...", "timeout": 30}, ...]}}; matcher groups with a
+  "hooks" list are read too). SessionStart, PreInvocation, PostInvocation and
+  Stop run through `/bin/sh -c` with that .agents folder as the working
+  folder, ANTIGRAVITY_CONVERSATION_ID set, and the record on stdin: sorted
+  keys, camelCase, as the real ones (artifactDirectoryPath, conversationId,
+  cwd, hookEventName, lastUserInput, modelName, transcriptPath,
+  workspacePaths; PreInvocation/PostInvocation add initialNumSteps and
+  invocationNum; Stop adds continuationActive, error, executionNum,
+  fullyIdle, terminationReason "NO_TOOL_CALL"). Paths under $HOME are
+  written with "~" as the real ones are. What a hook prints is ignored. A
+  hook that fails or times out adds a line "⚠ <Event> hook failed ..." (the
+  stand-in's own wording; nothing about this is captured). The transcript
+  holds the turn's reply before Stop runs. An interrupted turn runs no
+  further hook and writes nothing more to the transcript.
+- Keys: typing edits the box; paste inserts as typed; Return submits. While
+  working a submitted message is queued ("▸ text (alt+m to send
+  immediately)") and sent as the next turn when the turn ends. Escape (or
+  Control-C) while working interrupts: `idle`, "⎿  Interrupted · What should
+  Antigravity CLI do instead?", queued text goes back into the box. Escape on
+  a question or permission menu interrupts too (not captured). With text in
+  an idle box, Escape twice within 0.3 s empties it. Control-C with no turn
+  arms "press ctrl+c again to exit" (the text stays); the second Control-C
+  exits. Control-D on an empty box arms "press ctrl+d again to exit"; the
+  second exits; with text it does nothing. Shift+Tab cycles default,
+  accept-edits, auto, plan. On exit it prints "Resume with -c (or command
+  below):" and "agy --conversation=<id>" when a conversation exists.
+  SIGTERM and SIGHUP end it the same way.
+
+Key log: as the `claude` stand-in, under the conversation id.
+
+The script file: <dir>/standin/<conversation id>.json, else
+<dir>/standin/default.json, in the `claude` stand-in's format (its "screen"
+LINEs and "steps"), with these differences:
+  "title":  the conversation's title: the msg of `working` when resumed
+  "trust":  true shows agy's folder-trust dialog first ("Yes" selected)
+  steps:    {"permission": "make test"}   a Bash call that needs approval
+                                          (runs at once with --dangerously-
+                                          skip-permissions)
+            {"fail": KIND, "text": "..."} every kind reports `error`
+            {"finish": "text"}            "summary", "plus", "minus" unused
+  A prompt submitted while no turn is open opens one; its work is the next
+  steps, or the default turn (a few tool lines and a short reply).
+"""
+import base64
+import collections
+import datetime
+import fcntl
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import termios
+import textwrap
+import time
+import tty
+import uuid
+
+sys.dont_write_bytecode = True  # no cache files beside the stand-ins
+_loader = importlib.machinery.SourceFileLoader(
+    "claude_standin", os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "claude"))
+base = importlib.util.module_from_spec(importlib.util.spec_from_loader(_loader.name, _loader))
+_loader.exec_module(base)
+
+VERSION = "1.5.17"
+rgb = base.rgb
+RESET, BOLD, INV = base.RESET, base.BOLD, base.INV
+BLUE, GREY, RULE = rgb(138, 180, 248), rgb(154, 160, 166), rgb(60, 64, 67)
+AMBER, LIGHT, TEXT, RED = rgb(249, 171, 0), rgb(189, 193, 198), rgb(232, 234, 237), rgb(242, 139, 130)
+SPIN = "⣾⣽⣻⢿⡿⣟⣯⣷"
+MODES = ["", "accept-edits", "auto", "plan"]  # the order Shift+Tab cycles
+HINTS = {"accept-edits": "Accept-edits mode: file edits auto-approved (shift+tab to cycle)",
+         "auto": "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+         "plan": "Plan mode: research & plan only (shift+tab to cycle)"}
+INTERRUPTED = "Interrupted · What should Antigravity CLI do instead?"
+PERMISSION_OPTIONS = ["Yes, run command",
+                      "Yes, and always allow in this conversation for commands that start with '{w}'",
+                      "Yes, and always allow for commands that start with '{w}' (Persist to settings.json)",
+                      "No, cancel"]
+TRUST_OPTIONS = ["Yes, I trust this folder", "No, exit"]
+FAILED = "failed to construct executor: plan model not specified; you must specify a valid model"
+VALUES = {"--conversation": "conversation", "-r": "conversation", "--resume": "conversation",
+          "--prompt-interactive": "prompt", "-i": "prompt", "--add-dir": "add_dir", "--model": "model",
+          "--effort": "effort", "--mode": "mode", "--settings": "settings", "--agent": None, "--project": None,
+          "--log-file": None, "--print-timeout": None, "--input-format": None, "--output-format": None,
+          "--json-schema": None}
+
+
+def parse_args(argv):
+    o = {"conversation": None, "prompt": None, "add_dir": [], "model": None, "effort": None, "mode": None,
+         "settings": None, "skip": False}
+    i = 0
+    while i < len(argv):
+        flag, eq, v = argv[i].partition("=")
+        i += 1
+        if flag in ("-p", "--print", "--prompt"):
+            sys.exit("agy: the stand-in has no print mode")
+        if flag in VALUES:
+            if not eq:
+                if i >= len(argv):
+                    sys.exit(f"agy: {flag} needs a value")
+                v = argv[i]
+                i += 1
+            key = VALUES[flag]
+            if key == "add_dir":
+                o["add_dir"].append(v)
+            elif key:
+                o[key] = v
+        elif flag == "--dangerously-skip-permissions":
+            o["skip"] = True
+        # Any other flag or word is accepted and ignored.
+    return o
+
+
+def cut(text, limit):
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def b64(text):
+    return base64.b64encode(text.encode()).decode()
+
+
+def wrap(text, width):
+    """Text as rows of at most `width` characters, broken between words, as agy wraps."""
+    return [row for line in text.split("\n") for row in textwrap.wrap(line, max(1, width)) or [""]]
+
+
+def now_utc():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class Agy(base.StandIn):
+    def __init__(self, o):
+        self.o = o
+        self.cwd = os.getcwd()
+        self.data = os.environ.get("AGY_STANDIN_DATA_DIR") or os.path.join(base.HARNESS, "agy-data")
+        self.workspaces = [self.cwd] + [os.path.abspath(d) for d in o["add_dir"]]
+        settings = {}
+        if o["settings"]:
+            s = o["settings"]
+            settings = json.loads(s) if s.lstrip().startswith("{") else json.load(open(s))
+        mode = o["mode"] if o["mode"] is not None else settings.get("agentMode", "auto")
+        self.agent_mode = "" if mode == "default" else mode
+        if self.agent_mode not in MODES:
+            sys.exit(f"agy: unknown mode {mode!r}")
+        self.model = o["model"] or "example-model"
+        self.effort = o["effort"] or "high"
+        asked = o["conversation"]
+        self.resumed = bool(asked) and self.conversation_exists(asked)
+        self.sid = asked if self.resumed else None
+        self.script = base.load_script([asked] if self.resumed else [])
+        sc = self.script
+        self.title_text = sc.get("title")
+        self.folder = sc.get("folder") or self.cwd
+        self.first_prompt = o["prompt"]
+        self.hooks = self.load_hooks()
+        self.lock_fd = None
+        self.new_conversation = False  # SessionStart is due at the next prompt
+        self.step_index = self.transcript_lines() if self.sid else 0
+        self.last_input = ""
+        self.status_ok = False
+        self.reported = None
+        self.signed_in = False
+        # transcript and screen
+        self.entries = [("header", "")]
+        for line in sc.get("screen", []):
+            self.add(base.entry_of(line))
+            if line.startswith("> "):
+                self.last_input = line[2:]
+        self.printed = 0
+        self.dyn_rows = 0
+        self.dirty = True
+        self.full = True
+        # input
+        self.inbuf = b""
+        self.esc_at = None
+        self.pasting = False
+        self.paste = b""
+        self.input, self.cur = "", 0
+        self.typed = False  # anything typed in this process hides the mode's hint for good
+        self.esc_idle_at = None
+        self.armed = None  # "ctrl-c" or "ctrl-d": the next press exits
+        self.dialog = {"sel": 0} if sc.get("trust") else None
+        # turns
+        self.turn_open = False
+        self.turn_prompt = None
+        self.turn_started = 0.0
+        self.invocation = 0
+        self.queue = []
+        self.asking = None
+        self.permission = None
+        self.last_answer = None
+        self.unclaimed = None
+        # script
+        self.steps = collections.deque(sc.get("steps", []))
+        self.gen = None
+        self.begun = False
+        self.waiting = None
+        self.timers = []
+        self.signal = None
+        self.winch = False
+        self.hung = False
+
+    # ---- the data folder ----
+    def conversation_exists(self, cid):
+        return base.safe_name(cid) and (
+            os.path.exists(os.path.join(self.data, "conversations", cid + ".db"))
+            or os.path.exists(os.path.join(base.HARNESS, "standin", cid + ".json")))
+
+    def tilde(self, path):
+        home = os.environ.get("HOME", "")
+        return "~" + path[len(home):] if home and path.startswith(home.rstrip("/") + "/") else path
+
+    def brain(self):
+        return os.path.join(self.data, "brain", self.sid)
+
+    def transcript_path(self):
+        return os.path.join(self.brain(), ".system_generated", "logs", "transcript_full.jsonl")
+
+    def transcript_lines(self):
+        path = self.transcript_path()
+        return sum(1 for _ in open(path)) if os.path.exists(path) else 0
+
+    def log_step(self, kind, **fields):
+        os.makedirs(os.path.dirname(self.transcript_path()), exist_ok=True)
+        line = {"step_index": self.step_index, "source": "USER_EXPLICIT" if kind == "USER_INPUT" else "MODEL",
+                "type": kind, "status": "DONE", "created_at": now_utc(), **fields}
+        with open(self.transcript_path(), "a") as f:
+            f.write(json.dumps(line) + "\n")
+        self.step_index += 1
+
+    def model_step(self, **fields):
+        self.log_step("PLANNER_RESPONSE", model=self.model, input_tokens=2400, cache_read_tokens=8500,
+                      output_tokens=32, **fields)
+
+    def take_lock(self):
+        """Holds presence/<id>.lock. A second process on the same id is not refused, as with the real one."""
+        if self.lock_fd is not None:
+            os.close(self.lock_fd)
+        folder = os.path.join(self.data, "presence")
+        os.makedirs(folder, exist_ok=True)
+        fd = os.open(os.path.join(folder, self.sid + ".lock"), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            fd = None
+        self.lock_fd = fd
+
+    def new_id(self):
+        self.sid = str(uuid.uuid4())
+        self.step_index = 0
+        self.new_conversation = True
+        self.resumed = False
+        os.makedirs(os.path.join(self.data, "conversations"), exist_ok=True)
+        open(os.path.join(self.data, "conversations", self.sid + ".db"), "a").close()
+        self.take_lock()
+
+    # ---- hooks ----
+    def load_hooks(self):
+        found = []
+        for folder in self.workspaces:
+            path = os.path.join(folder, ".agents", "hooks.json")
+            if not os.path.exists(path):
+                continue
+            with open(path) as f:
+                named = json.load(f)
+            for definition in named.values():
+                if definition.get("enabled", True) is False:
+                    continue
+                for event in ("SessionStart", "PreInvocation", "PostInvocation", "Stop"):
+                    for item in definition.get(event, []):
+                        for h in item["hooks"] if "hooks" in item else [item]:
+                            if h.get("type", "command") == "command":
+                                found.append((event, os.path.dirname(path), h["command"], h.get("timeout", 30)))
+        return found
+
+    def hook(self, event, **fields):
+        if self.sid is None:
+            return
+        record = {"artifactDirectoryPath": self.tilde(self.brain()), "conversationId": self.sid, "cwd": self.cwd,
+                  "hookEventName": event, "lastUserInput": self.last_input, "modelName": self.model,
+                  "transcriptPath": self.tilde(self.transcript_path()), "workspacePaths": self.workspaces, **fields}
+        data = json.dumps(record, sort_keys=True)
+        env = dict(os.environ, ANTIGRAVITY_CONVERSATION_ID=self.sid)
+        for ev, folder, command, timeout in self.hooks:
+            if ev != event:
+                continue
+            try:
+                r = subprocess.run(["/bin/sh", "-c", command], input=data, text=True, capture_output=True,
+                                   timeout=timeout, cwd=folder, env=env)
+            except subprocess.TimeoutExpired:
+                self.add(("err", f"{event} hook failed: timed out after {timeout}s"))
+                continue
+            if r.returncode != 0:
+                self.add(("err", f"{event} hook failed with status {r.returncode}: {r.stderr.strip()[:200]}"))
+
+    def invocation_hook(self, event):
+        self.hook(event, initialNumSteps=self.step_index, invocationNum=self.invocation)
+
+    # ---- output ----
+    def report(self, state, kind=None, msg=None):
+        self.reported = (state, kind, msg)
+        if not self.status_ok:
+            return
+        body = f"7501;state={state}" + (f":kind={kind}" if kind else "") + ":app=antigravity"
+        if msg:
+            body += ":msg=" + b64(msg)
+        self.write("\x1b]" + body + "\x07")
+
+    def to_idle(self):
+        """The first key after a finished or failed turn reports idle."""
+        if self.reported and self.reported[0] in ("done", "error") and not self.turn_open:
+            self.report("idle")
+
+    # ---- turns ----
+    def start_turn(self, prompt):
+        self.turn_open = True
+        self.turn_prompt = prompt
+        self.turn_started = time.monotonic()
+        self.invocation = 0
+        self.armed = None
+        self.dirty = True
+        if prompt is not None:
+            self.add(("you", prompt))
+        self.report("working", msg=self.title_text if self.resumed else None)
+        if prompt is not None:
+            if self.sid is None:
+                self.new_id()
+            self.last_input = prompt
+            local = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+            self.log_step("USER_INPUT", content=f"<USER_REQUEST>\n{prompt}\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\n"
+                                                f"The current local time is: {local}.\n</ADDITIONAL_METADATA>")
+            if self.new_conversation:
+                self.new_conversation = False
+                self.hook("SessionStart")
+            self.invocation_hook("PreInvocation")
+        self.unclaimed = prompt
+        if self.waiting and self.waiting[0] in ("wait", "prompt"):
+            self.unclaimed = None
+            self.run_director(prompt)
+
+    def end_turn(self):
+        self.turn_open = False
+        self.asking = None
+        self.permission = None
+        self.dirty = True
+        if self.queue:
+            # A queued message is sent as the next turn.
+            queued, self.queue = "\n".join(self.queue), []
+            self.later(0.05, lambda: self.submit(queued))
+
+    def tool_done(self, result):
+        """A tool step finished: its result, then the model is called again."""
+        if self.sid:
+            self.log_step("GENERIC", content=f"Created At: {now_utc()}\nCompleted At: {now_utc()}\n{result}")
+        self.invocation_hook("PostInvocation")
+        self.invocation += 1
+        self.invocation_hook("PreInvocation")
+
+    def add_line(self, line):
+        e = base.entry_of(line)
+        self.add(e)
+        if not self.turn_open:
+            return
+        if e[0] == "tool" and self.sid:
+            m = re.match(r"([A-Za-z]+)\((.*)\)$", e[1])
+            name, args = (m.group(1), m.group(2)) if m else (e[1], "")
+            self.model_step(tool_calls=[{"name": "run_command" if name == "Bash" else name, "args": {"input": args}}])
+        elif e[0] == "out":
+            self.tool_done(e[1])
+
+    def finish(self, message, summary=None, plus=0, minus=0):
+        if not self.turn_open:
+            self.start_turn(None)
+        self.add(("text", message))
+        if self.sid:
+            self.model_step(content=message)
+        self.invocation_hook("PostInvocation")
+        self.hook("Stop", continuationActive=False, error="", executionNum=0, fullyIdle=True,
+                  terminationReason="NO_TOOL_CALL")
+        self.draw()
+        self.report("done", msg=cut(message.split("\n")[0], 200))
+        self.end_turn()
+
+    def fail(self, kind, text=None, resets=None):
+        if not self.turn_open:
+            self.start_turn(None)
+        text = text or FAILED
+        self.add(("err", text))
+        self.add(("plain", f"{GREY}Error ID: {uuid.uuid4()}-1{RESET}"))
+        self.draw()
+        self.report("error", msg=text)
+        self.end_turn()
+
+    def ask(self, question, options, header):
+        if not self.turn_open:
+            self.start_turn(None)
+        if self.sid:
+            self.model_step(tool_calls=[{"name": "ask_question", "args": {"questions": [
+                {"is_multi_select": False, "options": options, "question": question}]}}])
+        self.add(("ask", question))
+        self.asking = {"q": question, "options": options, "sel": 0}
+        self.draw()
+        self.report("blocked", kind="question", msg=cut(question, 180))
+
+    def answer(self, text):
+        self.asking = None
+        self.input, self.cur = "", 0
+        self.add(("answer", text))
+        self.last_answer = text
+        self.report("working", msg=self.title_text if self.resumed else None)
+        self.tool_done(f"A1: {text}")
+        if self.waiting and self.waiting[0] == "answer":
+            self.run_director(text)
+
+    def ask_permission(self, command):
+        if not self.turn_open:
+            self.start_turn(None)
+        if self.sid:
+            self.model_step(tool_calls=[{"name": "run_command", "args": {"CommandLine": command}}])
+        self.add(("tool", f"Bash({command})"))
+        if self.o["skip"]:
+            self.tool_done("")
+            return False
+        self.permission = {"command": command, "sel": 0}
+        self.draw()
+        self.report("blocked", kind="permission", msg=f"Approve Bash: {command}")
+        return True
+
+    def permit(self, sel):
+        self.permission = None
+        if sel == len(PERMISSION_OPTIONS) - 1:
+            self.add(("out", "Cancelled"))  # the stand-in's own wording; not captured
+        self.report("working", msg=self.title_text if self.resumed else None)
+        self.tool_done("" if sel < 3 else "cancelled")
+        if self.waiting and self.waiting[0] == "permission":
+            self.run_director()
+
+    def interrupt(self):
+        if not self.turn_open:
+            return
+        queued, self.queue = self.queue, []
+        if queued:
+            self.input = "\n".join(queued + ([self.input] if self.input else []))
+            self.cur = len(self.input)
+        self.add(("interrupted", INTERRUPTED))
+        self.turn_open = False
+        self.asking = None
+        self.permission = None
+        self.report("idle")
+        if self.gen:
+            self.gen.close()
+        while self.steps:
+            st = self.steps.popleft()
+            if "finish" in st or "fail" in st:
+                break
+        self.unclaimed = None
+        self.gen = self.director()
+        self.run_director()
+
+    def clear_conversation(self):
+        """/clear: a new conversation id at once; its SessionStart comes with the next prompt."""
+        self.entries = [("header", "")]
+        self.full = True
+        self.new_id()
+
+    # ---- the script ----
+    def do_step(self, st):
+        if "print" in st:
+            rate = st.get("rate", 5)
+            for line in st["print"]:
+                self.add_line(line)
+                yield ("sleep", 1.0 / rate)
+        elif "working" in st:
+            if not self.turn_open:
+                self.start_turn(None)
+            self.turn_started = time.monotonic() - st.get("elapsed", 0)
+            self.dirty = True
+        elif "finish" in st:
+            self.finish(st["finish"])
+        elif "ask" in st:
+            self.ask(st["ask"], st.get("options", []), st.get("header"))
+            yield ("answer",)
+        elif "permission" in st:
+            if self.ask_permission(st["permission"]):
+                yield ("permission",)
+        elif "fail" in st:
+            self.fail(st["fail"], st.get("text"))
+        elif "wait" in st:
+            yield ("prompt",) if st["wait"] == "prompt" else ("wait", float(st["wait"]))
+        else:
+            raise ValueError(f"unknown step in the stand-in script: {st}")
+
+    def default_work(self, prompt):
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", prompt or "")
+        w = max(words, key=len).lower() if words else "task"
+        yield ("sleep", 0.5)
+        for call, result in ((f"⏺ Bash(rg -n {w} src)", f"⎿ src/{w}.py:12: def {w}():"),
+                             ("⏺ Bash(make test)", "⎿ 48 passed")):
+            self.add_line(call)
+            yield ("sleep", 0.4)
+            self.add_line(result)
+            yield ("sleep", 0.4)
+        said = " ".join((self.turn_prompt or prompt or "the task").split())
+        said = said if len(said) <= 70 else said[:69] + "…"
+        self.finish(f"Done: {said}.\nOne file changed and the 48 tests pass.")
+
+    # ---- input ----
+    def submit(self, text):
+        if text.strip() in ("/clear", "/new") and not self.turn_open:
+            return self.clear_conversation()
+        if self.turn_open:
+            self.queue.append(text)
+            self.dirty = True
+            return
+        self.start_turn(text)
+
+    def insert(self, text):
+        self.to_idle()
+        self.typed = True
+        super().insert(text)
+
+    def key(self, k):
+        self.keylog(k)
+        self.dirty = True
+        self.to_idle()
+        if self.dialog:
+            return self.dialog_key(k)
+        if k != "esc":
+            self.esc_idle_at = None
+        a, p = self.asking, self.permission
+        menu = a or p
+        if k == "enter":
+            if a:
+                if a["sel"] < len(a["options"]):
+                    return self.answer(a["options"][a["sel"]])
+                return self.answer(self.input.strip()) if self.input.strip() else None
+            if p:
+                return self.permit(p["sel"])
+            text, self.input, self.cur = self.input, "", 0
+            if text.strip():
+                self.submit(text)
+            return
+        if k in ("esc", "ctrl-c") and self.turn_open:
+            return self.interrupt()
+        if k == "esc":
+            if self.input:
+                if self.esc_idle_at and time.monotonic() - self.esc_idle_at < 0.3:
+                    self.input, self.cur, self.esc_idle_at = "", 0, None
+                else:
+                    self.esc_idle_at = time.monotonic()
+            return
+        if k in ("ctrl-c", "ctrl-d"):
+            if k == "ctrl-d" and (self.input or self.turn_open):
+                return
+            if self.armed == k:
+                return self.exit("prompt_input_exit")
+            self.armed = k
+            return
+        if k == "shift-tab" and not menu:
+            self.agent_mode = MODES[(MODES.index(self.agent_mode) + 1) % len(MODES)]
+            return
+        if k in ("up", "down") and menu:
+            n = len(a["options"]) + 1 if a else len(PERMISSION_OPTIONS)
+            menu["sel"] = (menu["sel"] + (1 if k == "down" else -1)) % n
+            return
+        if k == "newline":
+            self.insert("\n")
+        elif k == "backspace" and self.cur:
+            self.input = self.input[:self.cur - 1] + self.input[self.cur:]
+            self.cur -= 1
+        elif k == "delete":
+            self.input = self.input[:self.cur] + self.input[self.cur + 1:]
+        elif k == "left":
+            self.cur = max(0, self.cur - 1)
+        elif k == "right":
+            self.cur = min(len(self.input), self.cur + 1)
+        elif k == "home":
+            self.cur = self.input.rfind("\n", 0, self.cur) + 1
+        elif k == "end":
+            nl = self.input.find("\n", self.cur)
+            self.cur = len(self.input) if nl < 0 else nl
+        elif k == "ctrl-u":
+            start = self.input.rfind("\n", 0, self.cur) + 1
+            self.input, self.cur = self.input[:start] + self.input[self.cur:], start
+        elif k == "ctrl-w":
+            m = re.search(r"\S*\s*$", self.input[:self.cur])
+            self.input, self.cur = self.input[:m.start()] + self.input[self.cur:], m.start()
+
+    def char(self, ch):
+        self.keylog("char " + ch)
+        if self.dialog or self.permission:
+            return
+        if self.asking:
+            self.asking["sel"] = len(self.asking["options"])  # typing writes in an answer
+        self.insert(ch)
+
+    def csi(self, params, final):
+        if final == "Z" or (final == "u" and params == "9;2"):
+            return self.key("shift-tab")
+        super().csi(params, final)
+
+    # ---- drawing ----
+    def render(self, entry, cols):
+        kind, text = entry
+        lines = text.split("\n")
+        if kind == "header":
+            return self.header(cols)
+        if kind == "you":
+            rows = wrap(text, cols - 2)
+            return RULE + "─" * min(60, cols) + RESET + "\r\n" + "\r\n".join(
+                f"{BLUE}{BOLD}{'> ' if i == 0 else '  '}{r}{RESET}" for i, r in enumerate(rows))
+        if kind == "text":
+            return "\r\n".join(f"{TEXT}  {line}{RESET}" for line in lines)
+        if kind == "tool":
+            m = re.match(r"([A-Za-z]+)\((.*)\)$", text)
+            if m and m.group(1) == "Bash":
+                return f"{AMBER}●{RESET} {AMBER}{BOLD}Ran{RESET} {LIGHT}({m.group(2)}){RESET} {LIGHT}(ctrl+o to expand){RESET}"
+            return f"{AMBER}●{RESET} {LIGHT}{text}{RESET}"
+        if kind == "out":
+            return f"{GREY}⎿  {text}{RESET}"
+        if kind == "interrupted":
+            return f"{GREY}  ⎿  {text}{RESET}"
+        if kind == "err":
+            return f"{RED}⚠ {text}{RESET}"
+        if kind == "ask":
+            return f"{AMBER}{BOLD}?{RESET} " + "\r\n".join(wrap(text, cols - 2))
+        if kind == "answer":
+            return f"{BLUE}{BOLD}> {text}{RESET}"
+        return text
+
+    def header(self, cols):
+        right = [f"{BLUE}{BOLD}Antigravity CLI {VERSION}{RESET}", f"{GREY}Example account (Example plan){RESET}",
+                 f"{GREY}{self.model} ({self.effort.capitalize()}){RESET}", f"{GREY}{self.folder}{RESET}", ""]
+        logo = ["     ▄▀▀▄    ", "    ▀▀▀▀▀▀   ", "   ▀▀▀▀▀▀▀▀  ", "  ▄▀▀    ▀▀▄ ", " ▄▀▀ ▀▀▄ ▀▀▄ "]
+        return "\r\n".join(f"{BLUE}{l}{RESET} {r}" for l, r in zip(logo, right)) + "\r\n"
+
+    def footer(self, cols, working):
+        if self.armed:
+            left = f"press {self.armed.replace('-', '+')} again to exit"
+        elif self.queue and not self.input:
+            left = "  Press up to edit queued messages"
+        elif working or self.asking or self.permission or self.dialog:
+            left = "esc to cancel" if not self.dialog else ""
+        elif self.input:
+            left = ""
+        else:
+            left = "? for shortcuts"
+        mode = self.agent_mode
+        right = ([(mode, BLUE if mode == "plan" else AMBER), (" · ", GREY)] if mode else []) + [
+            (f"{self.model} · {self.effort}", GREY)]
+        used = base.cells(left) + sum(base.cells(t) for t, _ in right)
+        return [(left, GREY), (" " * max(1, cols - used), "")] + right
+
+    def keys_row(self, parts):
+        row = [("  ", "")]
+        for i, (k, what) in enumerate(parts):
+            row += [(k, BLUE + BOLD), (f" {what}" + (" · " if i < len(parts) - 1 else ""), GREY)]
+        return row
+
+    def dynamic(self, rows, cols):
+        d = [[]]
+        a, p = self.asking, self.permission
+        working = self.turn_open and not a and not p
+        if self.dialog:
+            d += [[("Accessing workspace:", BOLD)]] + [[(r, "")] for r in wrap(self.cwd, cols)]
+            d += [[("Do you trust the contents of this project?", BOLD)],
+                  [("Antigravity CLI requires permission to read, edit, and execute files here.", "")]]
+            d += [[("> " if n == self.dialog["sel"] else "  ", BLUE), (o, BLUE if n == self.dialog["sel"] else "")]
+                  for n, o in enumerate(TRUST_OPTIONS)]
+            d.append(self.keys_row([("↑/↓", "Navigate"), ("enter", "Confirm")]))
+        elif a:
+            d += [[("Question", AMBER + BOLD)], [("─" * cols, RULE)], []]
+            d += [[(r, BOLD)] for r in wrap(f"Question 1/1: {a['q']}", cols)]
+            d.append([])
+            for n, opt in enumerate(a["options"] + [self.input or "Write-in..."]):
+                sel = n == a["sel"]
+                d.append([("> " if sel else "  ", BLUE), (f"{n + 1}. {opt}", BLUE if sel else "")])
+            d += [[], self.keys_row([("↑/↓", "Navigate"), ("enter", "Select"), ("esc", "Skip")])]
+        elif p:
+            word = p["command"].split()[0] if p["command"].split() else p["command"]
+            d += [[("Command", AMBER + BOLD)], [("─" * cols, RULE)], [], [("Requesting permission for:", LIGHT + BOLD)],
+                  [(f"   {p['command']}", LIGHT)], [], [("Run this command?", BOLD)]]
+            for n, opt in enumerate(PERMISSION_OPTIONS):
+                sel = n == p["sel"]
+                d.append([("> " if sel else "  ", BLUE), (f"{n + 1}. {opt.format(w=word)}", BLUE if sel else "")])
+            d += [[], self.keys_row([("↑/↓", "Navigate"), ("tab", "Amend"), ("ctrl+g", "edit/expand command")])]
+        else:
+            if working:
+                d.append([(SPIN[int(time.monotonic() * 10) % len(SPIN)] + "  ", ""), ("Generating...", GREY)])
+            for q in self.queue:
+                d.append([(f"▸ {' '.join(q.split())} (alt+m to send immediately)", GREY)])
+            room = max(1, rows - len(d) - 4)
+            if self.input:
+                box = self.editor_rows(cols - 2, ">", " ")[-room:]
+                box = [[(">" if n == 0 else " ", BLUE if n == 0 else ""), (" ", "")] + r[1:] for n, r in enumerate(box)]
+            elif not self.typed and HINTS.get(self.agent_mode):
+                box = [[(">", BLUE), (" ", ""), (HINTS[self.agent_mode], GREY)]]
+            else:
+                box = [[(">", BLUE)]]
+            d += [[("─" * cols, RULE)]] + box + [[("─" * cols, RULE)]]
+        d.append(self.footer(cols, working))
+        return [base.fit(r, cols)[0] for r in d[-rows:]]
+
+    # ---- lifetime ----
+    def start(self):
+        self.saved = termios.tcgetattr(0)
+        tty.setraw(0)
+        self.write("\x1b]7501;?\x07\x1b[?25l\x1b[?2004h\x1b[>4;2m\x1b[>5u")
+        r, w = os.pipe()
+        os.set_blocking(w, False)
+        self.wake_r = r
+        signal.set_wakeup_fd(w)
+        signal.signal(signal.SIGWINCH, lambda *_: setattr(self, "winch", True))
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(sig, lambda n, _: setattr(self, "signal", n))
+        if self.sid:
+            self.take_lock()
+        # Without an answer to the query agy works but never reports.
+        self.later(1.0, self.sign_in)
+        self.draw()
+
+    def status_ready(self):
+        """The terminal answered the query: reports from now on, starting with the sign-in check."""
+        self.status_ok = True
+        if self.signed_in:
+            # A late answer: the state it missed.
+            return self.report(*self.reported) if self.reported else None
+        self.report("blocked", kind="auth", msg="Sign in required")
+        self.later(0.5 if self.resumed else 0.03, self.sign_in)
+
+    def sign_in(self):
+        if self.signed_in:
+            return
+        self.signed_in = True
+        if self.dialog:
+            self.report("blocked", kind="permission", msg="Trust this folder?")
+            return
+        self.report("idle")
+        self.begin()
+
+    def begin(self):
+        if self.begun:
+            return
+        self.begun = True
+        self.gen = self.director()
+        self.run_director()
+        if self.first_prompt:
+            prompt = self.first_prompt
+            self.later(1.2, lambda: self.submit(prompt))
+
+    def dialog_key(self, k):
+        d = self.dialog
+        if k in ("up", "down"):
+            d["sel"] = (d["sel"] + 1) % len(TRUST_OPTIONS)
+        elif k == "enter" and d["sel"] == 0:
+            self.dialog = None
+            self.full = True
+            self.report("idle")
+            self.begin()
+        elif k == "enter" or (k == "ctrl-c" and self.armed == "ctrl-c"):
+            self.exit("other")
+        elif k == "ctrl-c":
+            self.armed = "ctrl-c"
+
+    def exit(self, reason, code=0, hung=False):
+        self.hung = hung
+        if self.dyn_rows:
+            self.write("\r" + (f"\x1b[{self.dyn_rows - 1}A" if self.dyn_rows > 1 else "") + "\x1b[J")
+            self.dyn_rows = 0
+        self.write("\x1b[?25h\x1b[>4m\x1b[<1u\r\n\n\x1b[J\x1b[?2004l\x1b[0 q")
+        self.report("idle")
+        if self.sid:
+            self.write(f"\r\nResume with -c (or command below):\r\nagy --conversation={self.sid}\r\n")
+        if hung:
+            try:
+                termios.tcsetattr(0, termios.TCSADRAIN, self.saved)
+            except termios.error:
+                pass  # the terminal is gone; nothing to restore
+        else:
+            termios.tcsetattr(0, termios.TCSADRAIN, self.saved)
+        sys.exit(code)
+
+
+def main():
+    argv = sys.argv[1:]
+    if any(a in ("--version", "-v") for a in argv):
+        print(VERSION)
+        return
+    if any(a in ("--help", "-h") for a in argv):
+        print(__doc__)
+        return
+    if not os.isatty(0):
+        sys.exit("agy: the stand-in needs a terminal")
+    app = Agy(parse_args(argv))
+    app.start()
+    app.loop()
+
+
+if __name__ == "__main__":
+    main()
