@@ -23,7 +23,8 @@ enum AgentSendResult: Equatable, Sendable {
 }
 
 /// What an agent's input line holds, read from its terminal's text
-/// (probes.md, P2 "Line parse", Claude Code 2.1.331 and Codex 0.169.0).
+/// (probes.md, P2 "Line parse", Claude Code 2.1.331 and Codex 0.169.0;
+/// cli-facts.md, agy 1.5.17, "Screens").
 enum AgentInputLine: Equatable, Sendable {
     case empty
     case holdsText(String)
@@ -42,7 +43,21 @@ enum AgentInputLine: Equatable, Sendable {
         switch provider {
         case .claudeCode: return claude(rows, prompted: prompted)
         case .codex: return codex(rows)
+        case .antigravity: return antigravity(rows)
         }
+    }
+
+    /// agy's input box (`AgentTail.antigravityBox`). It is empty when the
+    /// text after ">" is, or is the mode's hint, which ends "(shift+tab to
+    /// cycle)". A question, a permission or the folder-trust dialog takes
+    /// the box's place: no box.
+    private static func antigravity(_ rows: [String]) -> AgentInputLine {
+        guard let box = AgentTail.antigravityBox(rows) else { return .none }
+        let text = ([String(rows[box.lowerBound].dropFirst())] + rows[(box.lowerBound + 1)..<box.upperBound])
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty || text.hasSuffix("(shift+tab to cycle)") { return .empty }
+        return .holdsText(text)
     }
 
     /// Claude's input sits between the last two full-width rules, its first

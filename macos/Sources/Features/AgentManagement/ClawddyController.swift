@@ -135,7 +135,8 @@ final class ClawddyController: NSObject {
                     root: root,
                     // A harness never runs the owner's own Codex notify.
                     codexConfigFile: harness?.codexConfigFile
-                        ?? AgentConfig.codexConfigDir.appendingPathComponent("config.toml")),
+                        ?? AgentConfig.codexConfigDir.appendingPathComponent("config.toml"),
+                    agyDataFolder: harness?.agyDataFolder ?? AntigravityProvider.defaultDataFolder),
                 notifier: harness?.notifier ?? notifier),
             workspaceModel: AgentWorkspaceModel(defaults: isTestHost ? nil : .standard),
             notifier: notifier,

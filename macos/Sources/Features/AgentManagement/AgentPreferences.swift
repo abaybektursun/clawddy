@@ -6,20 +6,24 @@ struct AgentPreferences: Codable, Equatable, Sendable {
     var schemaVersion: Int
     var claudeCodeDefaultStartMode: AgentStartMode
     var codexDefaultStartMode: AgentStartMode
+    var antigravityDefaultStartMode: AgentStartMode
 
     init(
         claudeCodeDefaultStartMode: AgentStartMode = .unrestricted,
-        codexDefaultStartMode: AgentStartMode = .unrestricted
+        codexDefaultStartMode: AgentStartMode = .unrestricted,
+        antigravityDefaultStartMode: AgentStartMode = .unrestricted
     ) {
         schemaVersion = Self.currentSchemaVersion
         self.claudeCodeDefaultStartMode = claudeCodeDefaultStartMode
         self.codexDefaultStartMode = codexDefaultStartMode
+        self.antigravityDefaultStartMode = antigravityDefaultStartMode
     }
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
         case claudeCodeDefaultStartMode
         case codexDefaultStartMode
+        case antigravityDefaultStartMode
     }
 
     init(from decoder: Decoder) throws {
@@ -31,12 +35,16 @@ struct AgentPreferences: Codable, Equatable, Sendable {
         codexDefaultStartMode = try container.decodeIfPresent(
             AgentStartMode.self,
             forKey: .codexDefaultStartMode) ?? .unrestricted
+        antigravityDefaultStartMode = try container.decodeIfPresent(
+            AgentStartMode.self,
+            forKey: .antigravityDefaultStartMode) ?? .unrestricted
     }
 
     func defaultStartMode(for provider: AgentProviderID) -> AgentStartMode {
         switch provider {
         case .claudeCode: return claudeCodeDefaultStartMode
         case .codex: return codexDefaultStartMode
+        case .antigravity: return antigravityDefaultStartMode
         }
     }
 
@@ -44,6 +52,7 @@ struct AgentPreferences: Codable, Equatable, Sendable {
         switch provider {
         case .claudeCode: claudeCodeDefaultStartMode = mode
         case .codex: codexDefaultStartMode = mode
+        case .antigravity: antigravityDefaultStartMode = mode
         }
     }
 }
@@ -69,7 +78,8 @@ enum AgentPreferencesStore {
             return Loaded(
                 preferences: AgentPreferences(
                     claudeCodeDefaultStartMode: .standard,
-                    codexDefaultStartMode: .standard),
+                    codexDefaultStartMode: .standard,
+                    antigravityDefaultStartMode: .standard),
                 error: "Agent defaults could not be read from \(url.path) (\(AgentConfig.describeLoadFailure(error))), so new agents start with standard permissions.")
         }
     }

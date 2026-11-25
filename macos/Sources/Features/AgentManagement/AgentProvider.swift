@@ -3,6 +3,8 @@ import Foundation
 enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
     case claudeCode
     case codex
+    /// agy, the Antigravity CLI.
+    case antigravity
 
     var id: Self { self }
 
@@ -10,6 +12,7 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .claudeCode: return "Claude Code"
         case .codex: return "Codex"
+        case .antigravity: return "Antigravity"
         }
     }
 
@@ -17,6 +20,7 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .claudeCode: return "claude"
         case .codex: return "codex"
+        case .antigravity: return "agy"
         }
     }
 
@@ -24,12 +28,13 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .claudeCode: return "sparkles"
         case .codex: return "chevron.left.forwardslash.chevron.right"
+        case .antigravity: return "arrow.up.circle"
         }
     }
 
     func startModeTitle(_ mode: AgentStartMode) -> String {
         switch (self, mode) {
-        case (.claudeCode, .unrestricted): return "Dangerously skip permissions"
+        case (.claudeCode, .unrestricted), (.antigravity, .unrestricted): return "Dangerously skip permissions"
         case (.codex, .unrestricted): return "YOLO"
         case (_, .standard): return "Standard permissions"
         }
@@ -41,6 +46,8 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
             return "Bypasses all Claude Code permission checks."
         case (.codex, .unrestricted):
             return "Runs without approval prompts or the Codex sandbox."
+        case (.antigravity, .unrestricted):
+            return "Runs commands and edits files without asking."
         case (_, .standard):
             return "Uses the provider’s normal approval and sandbox behavior."
         }
@@ -49,7 +56,7 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
     func startModeArguments(_ mode: AgentStartMode) -> [String] {
         guard mode == .unrestricted else { return [] }
         switch self {
-        case .claudeCode: return ["--dangerously-skip-permissions"]
+        case .claudeCode, .antigravity: return ["--dangerously-skip-permissions"]
         case .codex: return ["--dangerously-bypass-approvals-and-sandbox"]
         }
     }
@@ -106,6 +113,8 @@ enum AgentProviderIssue: Error, Equatable, LocalizedError, Sendable {
     case launchPreparationFailed(AgentProviderID, String)
     /// The conversation it would resume runs in another terminal.
     case sessionOpenElsewhere(AgentProviderID, String)
+    /// The conversation it would resume no longer exists.
+    case sessionMissing(AgentProviderID, String)
 
     var errorDescription: String? {
         switch self {
@@ -119,6 +128,8 @@ enum AgentProviderIssue: Error, Equatable, LocalizedError, Sendable {
             return "\(provider.displayName) could not be prepared: \(reason)"
         case .sessionOpenElsewhere(let provider, let session):
             return "The \(provider.displayName) conversation \(session) is open in another terminal."
+        case .sessionMissing(let provider, let session):
+            return "\(provider.displayName) has no conversation \(session) any more."
         }
     }
 }
@@ -219,6 +230,9 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
     /// The turn, from the payload field the hook script reads for the
     /// provider: `prompt_id` for Claude, the notify's `turn-id` for Codex.
     var turnID: String?
+    /// agy's `invocationNum`: 0 at a turn's start, then one more after each
+    /// tool result or answer within the turn.
+    var invocation: String?
     var model: String?
     var permissionMode: String?
     /// What started a compaction: `manual` (`/compact`) or `auto`.
@@ -241,7 +255,7 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
 extension AgentRawProviderEvent {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, eventID, provider, launchGeneration, hookEventName
-        case sessionID, turnID, model, permissionMode, trigger, error, reason, source, text, prompts
+        case sessionID, turnID, invocation, model, permissionMode, trigger, error, reason, source, text, prompts
     }
 
     /// The hook script writes "" for each field its payload did not carry;
@@ -261,6 +275,7 @@ extension AgentRawProviderEvent {
         hookEventName = try container.decode(String.self, forKey: .hookEventName)
         sessionID = try text(.sessionID)
         turnID = try text(.turnID)
+        invocation = try text(.invocation)
         model = try text(.model)
         permissionMode = try text(.permissionMode)
         trigger = try text(.trigger)
@@ -316,11 +331,33 @@ enum AgentDomainEvent: Equatable, Sendable {
     case providerExited(status: Int)
 }
 
+/// How the reducer reads one CLI's terminal reports where the CLIs differ
+/// (`AgentStateReducer`): the values of its entry in the provider table.
+struct AgentReportRules: Equatable, Sendable {
+    /// A `done` with a message completes the turn. Claude's turns end in a
+    /// bare `done`, and one with a message ends something else, such as a
+    /// compaction; every agy turn ends in a `done` with the reply's first
+    /// line (`cli-facts.md`, agy).
+    var doneWithMessageCompletes: Bool
+    /// How long a sign-in report (`blocked`, kind `auth`) must stand, with
+    /// no other report replacing it, before it stops the agent with a login
+    /// problem; 0 counts it at once (`AgentBridge.updateSignInTimer`).
+    var signInStandTime: TimeInterval
+    /// A `working` report's message names the step under way, which the
+    /// agent shows as its activity.
+    var workingMessageIsActivity: Bool
+
+    /// Claude Code's and Codex's: a `done` with a message completes nothing,
+    /// a sign-in report counts at once, and `working` names the step.
+    static let standard = Self(doneWithMessageCompletes: false, signInStandTime: 0, workingMessageIsActivity: true)
+}
+
 /// One provider's entry in the provider table: how long its `working` must
-/// stand to start a turn, which hook events it subscribes to and what each
-/// means, and the functions that integrate, launch, probe and clean up after
-/// it. A test replaces any of them. Every provider reports its turns in its
-/// terminal (OSC 7501); the hooks add identity and text.
+/// stand to start a turn, how its reports read, which hook events it
+/// subscribes to and what each means, and the functions that integrate,
+/// launch, probe and clean up after it. A test replaces any of them. Every
+/// provider reports its turns in its terminal (OSC 7501); the hooks add
+/// identity and text.
 struct AgentProviderEntry: Sendable {
     /// What one record in the event file means for the agent.
     typealias Meaning = @Sendable (AgentRawProviderEvent) -> [AgentDomainEvent]
@@ -328,6 +365,7 @@ struct AgentProviderEntry: Sendable {
     /// How long a `working` report with no turn under way and no prompt
     /// must stand before the turn starts (`AgentBridge.updateTurnStartTimer`).
     var turnStartDelay: TimeInterval
+    var reports: AgentReportRules
     /// The hook events the provider subscribes to, each with what it means.
     /// The provider's hooks and the hook script's list of the events it
     /// records are made from the same table, and `ingest` drops a hook
@@ -349,18 +387,21 @@ struct AgentProviderEntry: Sendable {
 struct AgentProviderTable: Sendable {
     var claudeCode: AgentProviderEntry
     var codex: AgentProviderEntry
+    var antigravity: AgentProviderEntry
 
     subscript(provider: AgentProviderID) -> AgentProviderEntry {
         get {
             switch provider {
             case .claudeCode: return claudeCode
             case .codex: return codex
+            case .antigravity: return antigravity
             }
         }
         set {
             switch provider {
             case .claudeCode: claudeCode = newValue
             case .codex: codex = newValue
+            case .antigravity: antigravity = newValue
             }
         }
     }
@@ -368,11 +409,14 @@ struct AgentProviderTable: Sendable {
 
 extension AgentProviderTable {
     /// The real providers on `root`. `codexConfigFile` holds the owner's own
-    /// Codex `notify`, which each Codex launch's notify program runs.
-    init(root: AgentDataRoot, codexConfigFile: URL) {
+    /// Codex `notify`, which each Codex launch's notify program runs;
+    /// `agyDataFolder` is agy's own data folder, read for its conversations
+    /// and their locks.
+    init(root: AgentDataRoot, codexConfigFile: URL, agyDataFolder: URL = AntigravityProvider.defaultDataFolder) {
         self.init(
             claudeCode: ClaudeCodeProvider(root: root).entry,
-            codex: CodexProvider(root: root, configFile: codexConfigFile).entry)
+            codex: CodexProvider(root: root, configFile: codexConfigFile).entry,
+            antigravity: AntigravityProvider(root: root, dataFolder: agyDataFolder).entry)
     }
 }
 

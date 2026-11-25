@@ -97,10 +97,12 @@ struct AgentHookIntegrationTests {
                 agentID: agentID,
                 generation: UUID())
             for event in candidates {
+                // Claude's field names, and agy's (`hookEventName`,
+                // `conversationId`): each provider reads its own.
                 #expect(try sandbox.runShell(
                     command,
                     environment: sandbox.plainEnvironment,
-                    payload: #"{"session_id":"session-1","hook_event_name":"\#(event)"}"#) == 0)
+                    payload: #"{"session_id":"session-1","hook_event_name":"\#(event)","conversationId":"session-1","hookEventName":"\#(event)"}"#) == 0)
             }
             #expect(try sandbox.events(agentID).map(\.hookEventName) == table[provider].hookEvents.keys.sorted())
         }

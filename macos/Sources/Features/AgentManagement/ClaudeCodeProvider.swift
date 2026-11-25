@@ -53,6 +53,7 @@ struct ClaudeCodeProvider: Sendable {
     var entry: AgentProviderEntry {
         AgentProviderEntry(
             turnStartDelay: 1,
+            reports: .standard,
             hookEvents: Self.hookEvents,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },

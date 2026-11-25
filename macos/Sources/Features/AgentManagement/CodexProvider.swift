@@ -43,6 +43,7 @@ struct CodexProvider: Sendable {
     var entry: AgentProviderEntry {
         AgentProviderEntry(
             turnStartDelay: 3,
+            reports: .standard,
             hookEvents: Self.hookEvents,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },

@@ -88,6 +88,11 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// up to 0.3 s later, when an `idle` or the next turn may already have
     /// come; the record must then not fail a turn again.
     var stopFailuresDue = 0
+    /// A sign-in report that has not stood for its provider's
+    /// `signInStandTime` yet: agy reports one at many starts while signed
+    /// in. It counts once it has stood that long, unless another report
+    /// replaces it first (`signInSettled`).
+    var pendingSignIn: Ghostty.Action.ProgramStatus?
     /// The provider's exit status, as its launch script reported it.
     var exitStatus: Int?
     /// The user stopped the agent: its provider exited with status 0, or
@@ -131,7 +136,9 @@ enum AgentRuntimeEvent: Equatable, Sendable {
     /// chose, which is not on disk until the first turn.
     case surfaceOpened(generation: UUID, resumedSessionID: String? = nil, newSessionID: String? = nil)
     case launchTimedOut(generation: UUID)
-    case launchFailed(generation: UUID, problem: AgentRecord.Problem, sessionUnreadable: Bool = false)
+    /// `missingSessionID` when the session it would resume no longer exists.
+    case launchFailed(
+        generation: UUID, problem: AgentRecord.Problem, sessionUnreadable: Bool = false, missingSessionID: String? = nil)
     case provider(
         generation: UUID,
         provider: AgentProviderID,
@@ -143,6 +150,9 @@ enum AgentRuntimeEvent: Equatable, Sendable {
     case turnStartSettled(generation: UUID)
     /// Codex's `idle` has stood 3 s without a start-up `working`.
     case inputSettled(generation: UUID)
+    /// The sign-in report in `pendingSignIn` has stood for the provider's
+    /// `signInStandTime`.
+    case signInSettled(generation: UUID)
     /// Clawddy put `prompt` into the CLI and submitted it, for `by`.
     case sent(prompt: String, by: AgentRecord.Prompt.Sender)
     /// The agent's terminal is gone; `byUser` when the user closed it or
@@ -192,13 +202,16 @@ enum AgentRuntimeEffect: Equatable, Sendable {
 /// The one reducer of an agent's state: its record's states and every
 /// transition between them (`docs/clawddy-design/flows.md` 2.2), from what
 /// the CLI reports in its terminal and hooks and from what the person does.
+/// `rules` are how the agent's CLI's reports read (its provider table
+/// entry's `reports`).
 enum AgentStateReducer {
     static func reduce(
         _ current: AgentRuntimeSnapshot,
         event: AgentRuntimeEvent,
+        rules: AgentReportRules = .standard,
         at now: Date = .distantPast
     ) -> (state: AgentRuntimeSnapshot, effects: [AgentRuntimeEffect]) {
-        var reduction = Reduction(state: current, now: now)
+        var reduction = Reduction(state: current, rules: rules, now: now)
         reduction.apply(event)
         return (reduction.state, reduction.effects)
     }
@@ -208,12 +221,14 @@ enum AgentStateReducer {
 /// raises, and the time of the event.
 private struct Reduction {
     var state: AgentRuntimeSnapshot
+    let rules: AgentReportRules
     let now: Date
     var effects: [AgentRuntimeEffect] = []
     var provider: AgentProviderID = .claudeCode
 
-    init(state: AgentRuntimeSnapshot, now: Date) {
+    init(state: AgentRuntimeSnapshot, rules: AgentReportRules, now: Date) {
         self.state = state
+        self.rules = rules
         self.now = now
     }
 
@@ -261,9 +276,13 @@ private struct Reduction {
             state.telemetryHealth = .unavailable("It did not start within 30 seconds.")
             stop(AgentRecord.Problem(kind: .didNotStart))
 
-        case .launchFailed(let generation, let problem, let sessionUnreadable):
+        case .launchFailed(let generation, let problem, let sessionUnreadable, let missingSessionID):
             guard state.launchGeneration == generation else { return }
             state.sessionUnreadable = sessionUnreadable
+            if let missingSessionID {
+                state.missingSessionID = missingSessionID
+                effects.append(.sessionMissing)
+            }
             state.surfaceState = .failed
             state.processState = .exited
             state.activityState = .unknown
@@ -283,6 +302,15 @@ private struct Reduction {
         case .inputSettled(let generation):
             guard state.launchGeneration == generation, state.inputSettling else { return }
             becomeReady()
+
+        case .signInSettled(let generation):
+            guard state.launchGeneration == generation, state.processState != .exited,
+                  let report = state.pendingSignIn
+            else { return }
+            state.pendingSignIn = nil
+            confirmProviderAlive()
+            state.telemetryHealth = .live
+            failSignIn(report)
 
         case .sent(let raw, let by):
             // Capped as the CLI's report of it is, so that report matches.
@@ -422,6 +450,16 @@ private struct Reduction {
             }
             effects.append(.providerExited(status))
             return
+        }
+
+        if case .programStatus(let report) = domainEvent, state.processState != .exited {
+            // A sign-in report that must stand is no report yet: it changes
+            // nothing until it has stood, and any other report replaces it.
+            if report.state == .blocked, report.kind == .auth, rules.signInStandTime > 0 {
+                if state.pendingSignIn == nil { state.pendingSignIn = report }
+                return
+            }
+            state.pendingSignIn = nil
         }
 
         switch domainEvent {
@@ -595,17 +633,19 @@ private struct Reduction {
             }
             // Claude's report names the step under way ("Creating empty
             // marker file", cli-facts.md); a bare `working` has none now.
+            // agy's names a resumed conversation's title, never a step.
             if state.turnState != .inactive {
-                record.activity = report.message.map { AgentSentence.label($0) }.flatMap { $0.isEmpty ? nil : $0 }
+                let step = rules.workingMessageIsActivity ? report.message : nil
+                record.activity = step.map { AgentSentence.label($0) }.flatMap { $0.isEmpty ? nil : $0 }
             }
 
         case .blocked:
+            if report.kind == .auth {
+                failSignIn(report)
+                return
+            }
             if state.turnState == .inactive || state.turnState == .starting {
                 startTurn(activity: .executing)
-            }
-            if report.kind == .auth {
-                fail(AgentFailure(error: "authentication_failed", text: report.message))
-                return
             }
             // The hook's question, in full, wins over the report's.
             let question = record.question ?? report.message.map(Self.question)
@@ -629,9 +669,15 @@ private struct Reduction {
                 state.endedBeforeItsPrompt = completion
             case .active:
                 endTurn()
-                // Every captured `done` that completed a turn was bare; one
-                // with a summary ended something else, such as a compaction.
-                if report.message == nil {
+                // Every captured `done` of Claude's that completed a turn was
+                // bare; one with a summary ended something else, such as a
+                // compaction. agy's always carries the reply's first line,
+                // cut at 200 characters: the reply until its Stop record
+                // brings the whole of it.
+                if report.message == nil || rules.doneWithMessageCompletes {
+                    if state.pendingMessage == nil, let message = report.message {
+                        state.pendingMessage = String(message.prefix(AgentRecord.textLimit))
+                    }
                     if completion.provider == .codex { state.turnsEndedWithoutNotify += 1 }
                     complete(completion, isViewed: isViewed)
                 } else {
@@ -714,6 +760,15 @@ private struct Reduction {
             change(to: .finished)
             record.problem = nil
         }
+    }
+
+    /// A sign-in that no longer works stops the agent with the login
+    /// problem, as a failed turn.
+    private mutating func failSignIn(_ report: Ghostty.Action.ProgramStatus) {
+        if state.turnState == .inactive || state.turnState == .starting {
+            startTurn(activity: .executing)
+        }
+        fail(AgentFailure(error: "authentication_failed", text: report.message))
     }
 
     /// The question in a `blocked` report's message, without Claude's

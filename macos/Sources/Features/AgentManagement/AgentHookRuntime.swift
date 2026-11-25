@@ -45,7 +45,12 @@ enum AgentHookRuntime {
     /// appends records; the bridge writes the session binding from them. It
     /// records only the events of the provider's event table, each with the
     /// turn named by the payload field that table gives, and nothing for any
-    /// other event.
+    /// other event. For agy it prints `{}`, whatever happens.
+    ///
+    /// agy's last reply is not in its payload: the script reads the
+    /// transcript file the payload names (`~/` taken as the home folder),
+    /// one JSON object per line, from its end back to the turn's prompt
+    /// (`USER_INPUT`), and takes the last `PLANNER_RESPONSE` with content.
     ///
     /// Text (a prompt, a message, an error's text, a question) goes into the
     /// record without the shell ever parsing it: `plutil` reads the raw value
@@ -70,6 +75,9 @@ enum AgentHookRuntime {
           cat >/dev/null
           exit 0
         fi
+        case "$PROVIDER" in
+          \(AgentProviderID.antigravity.rawValue)) printf '%s\n' '\(AntigravityProvider.hookReply)' ;;
+        esac
 
         if ! mkdir -p "$DIR" 2>/dev/null; then
           echo "clawddy-provider-hook.sh: cannot create $DIR" >&2
@@ -93,7 +101,9 @@ enum AgentHookRuntime {
 
         INPUT=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
         TEXTS=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
-        trap 'rm -f "$INPUT" "$TEXTS"' EXIT HUP INT TERM
+        STEPS=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
+        STEP=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
+        trap 'rm -f "$INPUT" "$TEXTS" "$STEPS" "$STEP"' EXIT HUP INT TERM
         if [ "${5:-}" = \(notifyMode) ]; then
           # Codex's notify program. The payload is the last argument; the
           # words between `notify` and it are the owner's own notify command,
@@ -108,8 +118,16 @@ enum AgentHookRuntime {
           SESSION_KEY=thread-id
         else
           cat > "$INPUT" || fail "could not save the hook input to $INPUT"
-          EVENT_KEY=hook_event_name
-          SESSION_KEY=session_id
+          case "$PROVIDER" in
+            \(AgentProviderID.antigravity.rawValue))
+              EVENT_KEY=\(AntigravityProvider.eventField)
+              SESSION_KEY=\(AntigravityProvider.sessionField)
+              ;;
+            *)
+              EVENT_KEY=hook_event_name
+              SESSION_KEY=session_id
+              ;;
+          esac
         fi
         chmod 600 "$INPUT" 2>/dev/null
 
@@ -120,11 +138,31 @@ enum AgentHookRuntime {
           printf '%s' "$1" | /usr/bin/tr -cd '[:alnum:]_.:/-'
         }
         # The field's raw text, trailing newlines kept, in VALUE; false when
-        # the payload has no such field.
+        # the payload (or the file given second) has no such field.
         text() {
-          VALUE=$(/usr/bin/plutil -extract "$1" raw -o - "$INPUT" 2>/dev/null && printf x)
+          VALUE=$(/usr/bin/plutil -extract "$1" raw -o - "${2:-$INPUT}" 2>/dev/null && printf x)
           [ -n "$VALUE" ] || return 1
           VALUE=${VALUE%?x}
+        }
+        # The last reply in the transcript the field names, in VALUE; false
+        # when the turn has none.
+        reply() {
+          TRANSCRIPT=$(extract "$1")
+          case "$TRANSCRIPT" in
+            "~/"*) TRANSCRIPT="$HOME/${TRANSCRIPT#??}" ;;
+          esac
+          [ -f "$TRANSCRIPT" ] || return 1
+          # A last line without its newline would be joined to the one before.
+          { /bin/cat "$TRANSCRIPT" && { [ -z "$(/usr/bin/tail -c 1 "$TRANSCRIPT")" ] || echo; }; } \\
+            | /usr/bin/tail -r > "$STEPS" || fail "could not read $TRANSCRIPT"
+          while IFS= read -r LINE || [ -n "$LINE" ]; do
+            printf '%s' "$LINE" > "$STEP" || fail "could not write $STEP"
+            case "$(/usr/bin/plutil -extract type raw -o - "$STEP" 2>/dev/null)" in
+              USER_INPUT) return 1 ;;
+              PLANNER_RESPONSE) text content "$STEP" && [ -n "$VALUE" ] && return 0 ;;
+            esac
+          done < "$STEPS"
+          return 1
         }
 
         SID=$(sanitize "$(extract "$SESSION_KEY")")
@@ -140,23 +178,30 @@ enum AgentHookRuntime {
 
         [ -z "$EVENT" ] && fail "the hook input names no $EVENT_KEY"
         TEXT_FIELD=
-        PROMPTS_FIELD=
+        TRANSCRIPT_FIELD=
         case "$PROVIDER" in
         \(providerCase(.claudeCode, turnIDField: ClaudeCodeProvider.turnIDField, events: ClaudeCodeProvider.hookEvents, textFields: ClaudeCodeProvider.textFields))
         \(providerCase(.codex, turnIDField: CodexProvider.turnIDField, events: CodexProvider.hookEvents, textFields: CodexProvider.textFields, promptsField: CodexProvider.promptsField))
+        \(providerCase(.antigravity, invocationField: AntigravityProvider.invocationField, events: AntigravityProvider.hookEvents, textFields: AntigravityProvider.textFields, transcriptFields: AntigravityProvider.transcriptFields))
           *) fail "unknown provider $PROVIDER" ;;
         esac
-        TURN=$(sanitize "$(extract "$TURN_FIELD")")
+        TURN=
+        [ -n "$TURN_FIELD" ] && TURN=$(sanitize "$(extract "$TURN_FIELD")")
+        INVOCATION=
+        [ -n "$INVOCATION_FIELD" ] && INVOCATION=$(sanitize "$(extract "$INVOCATION_FIELD")")
         EVENTS="$DIR/$ID.events"
         LOCK="$DIR/$ID.events.lock"
         EVENT_LINE=$(printf \
-          '{"schemaVersion":1,"eventID":"%s","provider":"%s","launchGeneration":"%s","hookEventName":"%s","sessionID":"%s","turnID":"%s","model":"%s","permissionMode":"%s","trigger":"%s","error":"%s","reason":"%s","source":"%s"}' \
-          "$EVENT_ID" "$PROVIDER" "$GENERATION" "$EVENT" "$SID" "$TURN" "$MODEL" "$PERMISSION" "$TRIGGER" "$ERROR" "$REASON" "$SOURCE")
+          '{"schemaVersion":1,"eventID":"%s","provider":"%s","launchGeneration":"%s","hookEventName":"%s","sessionID":"%s","turnID":"%s","invocation":"%s","model":"%s","permissionMode":"%s","trigger":"%s","error":"%s","reason":"%s","source":"%s"}' \
+          "$EVENT_ID" "$PROVIDER" "$GENERATION" "$EVENT" "$SID" "$TURN" "$INVOCATION" "$MODEL" "$PERMISSION" "$TRIGGER" "$ERROR" "$REASON" "$SOURCE")
 
-        if [ -n "$TEXT_FIELD$PROMPTS_FIELD" ]; then
+        if [ -n "$TEXT_FIELD$PROMPTS_FIELD$TRANSCRIPT_FIELD" ]; then
           printf '%s' '<plist version="1.0"><dict/></plist>' > "$TEXTS" || fail "could not write $TEXTS"
           if [ -n "$TEXT_FIELD" ] && text "$TEXT_FIELD"; then
             /usr/bin/plutil -insert text -string "$VALUE" "$TEXTS" || fail "could not record $TEXT_FIELD"
+          fi
+          if [ -n "$TRANSCRIPT_FIELD" ] && reply "$TRANSCRIPT_FIELD"; then
+            /usr/bin/plutil -insert text -string "$VALUE" "$TEXTS" || fail "could not record the reply in $TRANSCRIPT"
           fi
           if [ -n "$PROMPTS_FIELD" ]; then
             COUNT=$(extract "$PROMPTS_FIELD")
@@ -186,22 +231,27 @@ enum AgentHookRuntime {
         """
 
     /// One provider's part of the script, made from its event table: the
-    /// payload field that names its turn, the hook events it records, the
-    /// field whose text each event carries, and the field holding a list of
-    /// prompts.
+    /// payload fields that name its turn and its invocation, the hook events
+    /// it records, the field whose text each event carries, the field naming
+    /// the transcript whose last reply an event carries, and the field
+    /// holding a list of prompts.
     private static func providerCase(
         _ provider: AgentProviderID,
-        turnIDField: String,
+        turnIDField: String? = nil,
+        invocationField: String? = nil,
         events: [String: AgentProviderEntry.Meaning],
         textFields: [String: String],
+        transcriptFields: [String: String] = [:],
         promptsField: String? = nil
     ) -> String {
-        let textCases = textFields.keys.sorted().map { event in
-            "      \(event)) TEXT_FIELD=\(textFields[event] ?? "") ;;"
+        let textCases = Set(textFields.keys).union(transcriptFields.keys).sorted().map { event in
+            let fields = [textFields[event].map { "TEXT_FIELD=\($0)" }, transcriptFields[event].map { "TRANSCRIPT_FIELD=\($0)" }]
+            return "      \(event)) \(fields.compactMap { $0 }.joined(separator: " ")) ;;"
         }.joined(separator: "\n")
         return """
           \(provider.rawValue))
-            TURN_FIELD=\(turnIDField)
+            TURN_FIELD=\(turnIDField ?? "")
+            INVOCATION_FIELD=\(invocationField ?? "")
             PROMPTS_FIELD=\(promptsField ?? "")
             case "$EVENT" in
               \(events.keys.sorted().joined(separator: "|"))) ;;

@@ -207,6 +207,13 @@ final class AgentHarness {
     /// program runs; absent unless a run puts one there, so a harness never
     /// runs the owner's own notify program.
     var codexConfigFile: URL { directory.appendingPathComponent("codex-config.toml") }
+    /// agy's data folder: the stand-in's `agy-data` when bin/ holds the
+    /// stand-in, else the real agy's own (`--real`).
+    var agyDataFolder: URL {
+        FileManager.default.fileExists(atPath: binDirectory.appendingPathComponent("agy").path)
+            ? directory.appendingPathComponent("agy-data", isDirectory: true)
+            : AntigravityProvider.defaultDataFolder
+    }
     var socketFile: URL { directory.appendingPathComponent("control.sock") }
     var pidFile: URL { directory.appendingPathComponent("pid") }
     /// Takes the bridge's notifications and announcements in place of the

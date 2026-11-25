@@ -97,10 +97,11 @@ final class AgentInstance: Identifiable {
     var canOnlyStartFresh: Bool { missingSessionID != nil || runtime.sessionUnreadable }
 
     /// The one way the state changes: one reducer application is at most one
-    /// observable mutation, and none when it changes nothing.
+    /// observable mutation, and none when it changes nothing. `rules` are
+    /// its provider table entry's `reports`.
     @discardableResult
-    func apply(_ event: AgentRuntimeEvent, at now: Date) -> [AgentRuntimeEffect] {
-        let result = AgentStateReducer.reduce(runtime, event: event, at: now)
+    func apply(_ event: AgentRuntimeEvent, rules: AgentReportRules = .standard, at now: Date) -> [AgentRuntimeEffect] {
+        let result = AgentStateReducer.reduce(runtime, event: event, rules: rules, at: now)
         guard result.state != runtime else { return result.effects }
         let wasWaiting = record.isWaitingOnYou
         let before = record
@@ -228,6 +229,7 @@ final class AgentBridge {
     @ObservationIgnored private(set) var journal: AgentHookJournalSource?
     private var healthRefreshGenerations: [AgentProviderID: UUID] = [:]
     private var turnStartTimers: [UUID: any AgentTimer] = [:]
+    private var signInTimers: [UUID: any AgentTimer] = [:]
     private var launchScripts: [UUID: URL] = [:]
     let root: AgentDataRoot
     private let providers: AgentProviderTable
@@ -873,7 +875,11 @@ final class AgentBridge {
 
     /// Empties the input line after an interrupt gave a prompt back: Claude
     /// clears on Escape twice within half a second (never on an empty line,
-    /// where it rewinds), Codex on Control-C (probes.md, P2).
+    /// where it rewinds), Codex on Control-C (probes.md, P2). agy gives back
+    /// no prompt, only the messages queued while it worked (`cli-facts.md`,
+    /// agy): text the person holds, which is never wiped, so the send that
+    /// follows refuses it. Control-C never goes to agy: with no turn running
+    /// it arms its exit, and a second one ends it, typed text and all.
     private func clearInputLine(of id: UUID, in host: any AgentSurfaceHost, done: @escaping @MainActor () -> Void) {
         guard let agent = agents[id], case .holdsText = inputLine(of: agent, in: host) else { return done() }
         switch agent.provider {
@@ -882,6 +888,8 @@ final class AgentBridge {
             scheduler.after(0.1) { host.input(.escape, to: id) }
         case .codex:
             host.input(.interrupt, to: id)
+        case .antigravity:
+            return done()
         }
         scheduler.after(0.3) { done() }
     }
@@ -1115,13 +1123,19 @@ final class AgentBridge {
             else { return }
             var sessionUnreadable = false
             var problem = AgentRecord.Problem(kind: .launch, text: issue.localizedDescription)
+            var missingSessionID: String?
             switch issue {
             case .unreadableSession: sessionUnreadable = true
             case .executableMissing: problem = AgentRecord.Problem(kind: .notInstalled)
             case .sessionOpenElsewhere: problem = AgentRecord.Problem(kind: .openElsewhere)
+            case .sessionMissing(_, let session):
+                problem = AgentRecord.Problem(kind: .conversationMissing)
+                missingSessionID = session
             case .integrationFailed, .launchPreparationFailed: break
             }
-            failLaunch(agent, generation: generation, problem: problem, sessionUnreadable: sessionUnreadable)
+            failLaunch(
+                agent, generation: generation, problem: problem,
+                sessionUnreadable: sessionUnreadable, missingSessionID: missingSessionID)
 
         case .success(let launch):
             guard reaches(agentID), agent.launchGeneration == launch.generation,
@@ -1177,11 +1191,15 @@ final class AgentBridge {
         _ agent: AgentInstance,
         generation: UUID,
         problem: AgentRecord.Problem,
-        sessionUnreadable: Bool = false
+        sessionUnreadable: Bool = false,
+        missingSessionID: String? = nil
     ) {
-        apply(
-            .launchFailed(generation: generation, problem: problem, sessionUnreadable: sessionUnreadable),
+        let effects = apply(
+            .launchFailed(
+                generation: generation, problem: problem,
+                sessionUnreadable: sessionUnreadable, missingSessionID: missingSessionID),
             to: agent)
+        if effects.contains(.sessionMissing) { recordMissingSession(of: agent) }
         launchTimers[agent.id]?.invalidate()
         launchTimers.removeValue(forKey: agent.id)
         pendingContinuations[agent.id] = nil
@@ -1469,15 +1487,7 @@ final class AgentBridge {
         if effects.contains(.sessionSaved), let sessionID = agent.sessionID {
             saveBinding(sessionID, of: agent)
         }
-        if effects.contains(.sessionMissing), let missing = agent.missingSessionID {
-            let statusDir = statusDir
-            store(
-                AgentSessionStore.sessionURL(id, statusDir),
-                "The missing session \(missing) of \(agent.name) could not be recorded, so after a restart its next start tries to resume it once more"
-            ) {
-                try AgentSessionStore.markMissing(missing, for: id, directory: statusDir)
-            }
-        }
+        if effects.contains(.sessionMissing) { recordMissingSession(of: agent) }
         if effects.contains(where: {
             if case .providerExited = $0 { return true }
             return false
@@ -1487,6 +1497,7 @@ final class AgentBridge {
             removeLaunchScript(for: id)
         }
         updateTurnStartTimer(for: agent)
+        updateSignInTimer(for: agent)
 
         if effects.contains(.completed) {
             alert(agent, .finished)
@@ -1518,6 +1529,20 @@ final class AgentBridge {
         }
         scheduleLimitReset(for: agent)
         updateWaitingCount()
+    }
+
+    /// The agent's binding records that its session is missing, so it offers
+    /// only Start Fresh, after a restart too.
+    private func recordMissingSession(of agent: AgentInstance) {
+        guard let missing = agent.missingSessionID else { return }
+        let id = agent.id
+        let statusDir = statusDir
+        store(
+            AgentSessionStore.sessionURL(id, statusDir),
+            "The missing session \(missing) of \(agent.name) could not be recorded, so after a restart its next start tries to resume it once more"
+        ) {
+            try AgentSessionStore.markMissing(missing, for: id, directory: statusDir)
+        }
     }
 
     /// A paused agent whose usage limit gave a reset time is reset then, or
@@ -1615,7 +1640,7 @@ final class AgentBridge {
         to agent: AgentInstance
     ) -> [AgentRuntimeEffect] {
         let before = agent.record.durable
-        let effects = agent.apply(event, at: scheduler.now)
+        let effects = agent.apply(event, rules: providers[agent.provider].reports, at: scheduler.now)
         if agent.record.durable != before { saveRecord(of: agent) }
         // A launch that waited its turn and was stopped meanwhile waits no
         // more.
@@ -1660,6 +1685,26 @@ final class AgentBridge {
             guard let self, let agent else { return }
             self.turnStartTimers.removeValue(forKey: id)
             self.perform(self.apply(.turnStartSettled(generation: generation), to: agent), of: agent)
+        }
+    }
+
+    /// A sign-in report that must stand (`AgentReportRules.signInStandTime`)
+    /// counts once it has stood that long, counted from its arrival; any
+    /// other report replaces it, and its time with it.
+    private func updateSignInTimer(for agent: AgentInstance) {
+        let id = agent.id
+        guard agent.runtime.pendingSignIn != nil, let generation = agent.launchGeneration else {
+            signInTimers.removeValue(forKey: id)?.invalidate()
+            return
+        }
+        guard signInTimers[id] == nil else { return }
+        signInTimers[id] = scheduler.timer(
+            interval: providers[agent.provider].reports.signInStandTime,
+            repeats: false
+        ) { [weak self, weak agent] in
+            guard let self, let agent else { return }
+            self.signInTimers.removeValue(forKey: id)
+            self.perform(self.apply(.signInSettled(generation: generation), to: agent), of: agent)
         }
     }
 
@@ -1780,6 +1825,7 @@ final class AgentBridge {
         launchTimers.removeValue(forKey: id)?.invalidate()
         holdTimers.removeValue(forKey: id)?.invalidate()
         turnStartTimers.removeValue(forKey: id)?.invalidate()
+        signInTimers.removeValue(forKey: id)?.invalidate()
     }
 
     /// The agent's terminal goes, `byUser` when the user stops it. A

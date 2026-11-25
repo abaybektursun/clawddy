@@ -40,9 +40,15 @@ enum AgentTail {
     /// of its rows "❯"; while it asks, its question and menu sit under its
     /// last rule (the tile's sentence says the question). Codex's composer is
     /// the last row starting with "›", with the blank row above it and its
-    /// footer under it.
+    /// footer under it. agy's box sits between its last two rules
+    /// (`antigravityBox`); while it asks, its menu's title row and rule
+    /// take the box's place.
     static func inputBoxTop(_ rows: [String], provider: AgentProviderID) -> Int? {
         switch provider {
+        case .antigravity:
+            if let box = antigravityBox(rows) { return box.lowerBound - 1 }
+            guard let rule = rows.lastIndex(where: isAntigravityRule) else { return nil }
+            return rule > 0 && !rows[rule - 1].isEmpty ? rule - 1 : rule
         case .claudeCode:
             let rules = rows.indices.filter { isRule(rows[$0]) }
             guard let last = rules.last else { return nil }
@@ -68,6 +74,27 @@ enum AgentTail {
         guard row.unicodeScalars.first == "─" || row.unicodeScalars.dropFirst().first == "─" else { return false }
         let rules = row.filter { $0 == "─" }.count
         return rules >= 20 && rules * 10 >= row.count * 9 - 40
+    }
+
+    /// The rows of agy's input box (cli-facts.md, agy 1.5.17, "Screens"):
+    /// between two rules of the same length, the second with at most the
+    /// footer under it, the first row starting with ">". Each prompt's echo
+    /// above is a rule too, of 60 cells, then "> " and the prompt, so the
+    /// box's top rule must match its bottom one, which spans the terminal;
+    /// a question or permission menu has one rule, with its options under
+    /// it. Nil when no such box is on screen.
+    static func antigravityBox(_ rows: [String]) -> Range<Int>? {
+        guard let bottom = rows.lastIndex(where: isAntigravityRule),
+              rows[(bottom + 1)...].filter({ !$0.isEmpty }).count <= 1,
+              let top = rows[..<bottom].lastIndex(where: { isAntigravityRule($0) && $0.count == rows[bottom].count }),
+              top + 1 < bottom, rows[top + 1].hasPrefix(">")
+        else { return nil }
+        return (top + 1)..<bottom
+    }
+
+    /// A row of agy's rule: nothing but "─".
+    private static func isAntigravityRule(_ row: String) -> Bool {
+        row.count >= 20 && row.allSatisfy { $0 == "─" }
     }
 
     /// The file that keeps an agent's last screen when its CLI ends, and at
