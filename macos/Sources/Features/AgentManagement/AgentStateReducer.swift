@@ -93,6 +93,24 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// in. It counts once it has stood that long, unless another report
     /// replaces it first (`signInSettled`).
     var pendingSignIn: Ghostty.Action.ProgramStatus?
+    /// The login problem was raised by a sign-in report that stood
+    /// (`signInSettled`): the next report that shows the CLI past its
+    /// sign-in clears it.
+    var signInRaisedProblem = false
+    /// What the record said before a dialog at start-up (a `blocked` report
+    /// before the CLI read its input, such as the folder-trust question)
+    /// made it ask; it says so again once the CLI reads its input.
+    var stateBeforeStartDialog: AgentRecord.State?
+    /// A turn its `working` started has not had its prompt's record yet
+    /// (`AgentReportRules.workingStartsTurn`): the next prompt record is
+    /// that turn's prompt, even after the turn has ended.
+    var turnAwaitsItsPrompt = false
+    /// A prompt record came before its turn's `working`
+    /// (`AgentReportRules.workingStartsTurn`).
+    var promptCameFirst = false
+    /// Prompts Clawddy sent while the turn worked, which the CLI holds
+    /// until the turn ends (`AgentReportRules.interruptReturnsQueuedMessages`).
+    var sentWhileWorking: [String] = []
     /// The provider's exit status, as its launch script reported it.
     var exitStatus: Int?
     /// The user stopped the agent: its provider exited with status 0, or
@@ -197,6 +215,9 @@ enum AgentRuntimeEffect: Equatable, Sendable {
     case inputReady
     /// Codex's first `idle` came before its start-up `working`: settle in 3 s.
     case inputSettling
+    /// The CLI has started and waits on the person (a dialog or its sign-in
+    /// at start-up): the start limit stops.
+    case startedAsking
 }
 
 /// The one reducer of an agent's state: its record's states and every
@@ -311,6 +332,8 @@ private struct Reduction {
             confirmProviderAlive()
             state.telemetryHealth = .live
             failSignIn(report)
+            state.signInRaisedProblem = record.problem?.kind == .loginExpired
+            if rules.askingAtStartIsStarted && !state.inputReady { effects.append(.startedAsking) }
 
         case .sent(let raw, let by):
             // Capped as the CLI's report of it is, so that report matches.
@@ -318,6 +341,7 @@ private struct Reduction {
             record.prompts.append(AgentRecord.Prompt(text: prompt, at: now, by: by))
             trimPrompts()
             state.promptsDue.append(prompt)
+            if rules.interruptReturnsQueuedMessages, case .active = state.turnState { state.sentWhileWorking.append(prompt) }
             state.promptAwaitsTurn = true
             if record.firstInstruction == nil {
                 record.firstInstruction = prompt
@@ -492,13 +516,18 @@ private struct Reduction {
             let underWay = state.turnState
             let endedEarly = state.endedBeforeItsPrompt
             state.endedBeforeItsPrompt = nil
-            // The prompt reads the turn before it.
-            if record.unread {
+            // The prompt of a turn its `working` started, which may have
+            // ended already: it is that turn's, and reads nothing.
+            let ownTurn = state.turnAwaitsItsPrompt
+            state.turnAwaitsItsPrompt = false
+            if rules.workingStartsTurn && !ownTurn && underWay == .inactive { state.promptCameFirst = true }
+            // Any other prompt reads the turn before it.
+            if record.unread && !ownTurn {
                 record.unread = false
                 effects.append(.unreadChanged)
             }
             if state.turnState == .starting || endedEarly != nil { startTurn(activity: .reasoning) }
-            if let text { recordPrompt(text, queued: underWay != .starting && underWay != .inactive) }
+            if let text { recordPrompt(text, queued: !ownTurn && underWay != .starting && underWay != .inactive) }
             if let endedEarly {
                 endTurn()
                 complete(endedEarly, isViewed: isViewed)
@@ -617,11 +646,24 @@ private struct Reduction {
     ) {
         if report.state != .done { state.endedBeforeItsPrompt = nil }
         provider = completion.provider
+        // A report past the sign-in clears the login problem a standing
+        // sign-in report raised.
+        if state.signInRaisedProblem {
+            state.signInRaisedProblem = false
+            if record.problem?.kind == .loginExpired {
+                change(to: .finished)
+                record.problem = nil
+            }
+        }
         noteReadiness(report.state)
         switch report.state {
         case .working:
             state.promptAwaitsTurn = false
             switch state.turnState {
+            case .inactive where rules.workingStartsTurn:
+                state.turnAwaitsItsPrompt = !state.promptCameFirst
+                state.promptCameFirst = false
+                startTurn(activity: .reasoning)
             case .inactive: state.turnState = .starting
             case .starting: break
             case .active, .compaction:
@@ -644,7 +686,12 @@ private struct Reduction {
                 failSignIn(report)
                 return
             }
-            if state.turnState == .inactive || state.turnState == .starting {
+            if !state.inputReady {
+                // A dialog at start-up, such as the folder-trust question:
+                // no turn. Answered, the agent is as it was.
+                if record.state != .asks { state.stateBeforeStartDialog = record.state }
+                if rules.askingAtStartIsStarted { effects.append(.startedAsking) }
+            } else if state.turnState == .inactive || state.turnState == .starting {
                 startTurn(activity: .executing)
             }
             // The hook's question, in full, wins over the report's.
@@ -696,6 +743,7 @@ private struct Reduction {
             endTurn()
             if wasUnderWay && record.state != .problem && record.state != .paused {
                 finish(interrupted: true)
+                forgetSendsGivenBack()
             } else {
                 leaveWorkingWithoutTurn()
             }
@@ -760,15 +808,31 @@ private struct Reduction {
             change(to: .finished)
             record.problem = nil
         }
+        if let before = state.stateBeforeStartDialog {
+            state.stateBeforeStartDialog = nil
+            if record.state == .asks {
+                change(to: before)
+                record.question = nil
+            }
+        }
     }
 
     /// A sign-in that no longer works stops the agent with the login
-    /// problem, as a failed turn.
+    /// problem. It starts no turn: a saved last reply stays, and a repeated
+    /// report changes nothing.
     private mutating func failSignIn(_ report: Ghostty.Action.ProgramStatus) {
-        if state.turnState == .inactive || state.turnState == .starting {
-            startTurn(activity: .executing)
-        }
         fail(AgentFailure(error: "authentication_failed", text: report.message))
+    }
+
+    /// An interrupt gave back, unsent, the messages Clawddy sent while the
+    /// turn worked: they are no prompts, and a later prompt with the same
+    /// words is the person's own.
+    private mutating func forgetSendsGivenBack() {
+        for prompt in state.sentWhileWorking {
+            if let due = state.promptsDue.lastIndex(of: prompt) { state.promptsDue.remove(at: due) }
+            if let sent = record.prompts.lastIndex(where: { $0.text == prompt }) { record.prompts.remove(at: sent) }
+        }
+        state.sentWhileWorking = []
     }
 
     /// The question in a `blocked` report's message, without Claude's
@@ -782,6 +846,8 @@ private struct Reduction {
     /// Starts a turn: the agent works, and what it asked, the problem it
     /// stopped with, its limit and its unread mark are behind it.
     private mutating func startTurn(turnID: String? = nil, activity: AgentActivityState) {
+        // What was sent while the turn before worked runs in this one.
+        state.sentWhileWorking = []
         state.turnState = .active(turnID: turnID)
         state.activityState = activity
         state.prompted = true

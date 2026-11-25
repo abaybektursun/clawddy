@@ -38,7 +38,9 @@ What it does
   (ESC[>5u), as the real one. A banner, the transcript, then the bottom area:
   spinner and queued messages while working, the input box between two
   full-width rules ("> " and the text; empty it shows the mode's hint until
-  anything was typed in this process, then a bare ">"), and the footer (left:
+  anything was typed in this process, then a bare ">"; a hint longer than
+  the terminal's width less 3 is cut to it and ends "...", as captured at 44
+  and 60 columns), and the footer (left:
   "? for shortcuts", "esc to cancel", "  Press up to edit queued messages",
   "press ctrl+c again to exit", or nothing while text is typed; right:
   "<mode> · <model> · <effort>", no mode in default mode). Each submitted
@@ -759,7 +761,10 @@ class Agy(base.StandIn):
                 box = self.editor_rows(cols - 2, ">", " ")[-room:]
                 box = [[(">" if n == 0 else " ", BLUE if n == 0 else ""), (" ", "")] + r[1:] for n, r in enumerate(box)]
             elif not self.typed and HINTS.get(self.agent_mode):
-                box = [[(">", BLUE), (" ", ""), (HINTS[self.agent_mode], GREY)]]
+                # Cut to the box with "..." when too long (captured at 44 and 60 columns).
+                hint = HINTS[self.agent_mode]
+                hint = hint if len(hint) <= cols - 3 else hint[:max(0, cols - 6)] + "..."
+                box = [[(">", BLUE), (" ", ""), (hint, GREY)]]
             else:
                 box = [[(">", BLUE)]]
             d += [[("─" * cols, RULE)]] + box + [[("─" * cols, RULE)]]

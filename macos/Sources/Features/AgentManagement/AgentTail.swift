@@ -42,12 +42,15 @@ enum AgentTail {
     /// the last row starting with "›", with the blank row above it and its
     /// footer under it. agy's box sits between its last two rules
     /// (`antigravityBox`); while it asks, its menu's title row and rule
-    /// take the box's place.
+    /// take the box's place. A prompt's echo is a rule too, with "> " and
+    /// the prompt under it: never a menu, so a stopped agy, whose screen
+    /// ends with its last turn and "Resume with -c", shows that turn.
     static func inputBoxTop(_ rows: [String], provider: AgentProviderID) -> Int? {
         switch provider {
         case .antigravity:
             if let box = antigravityBox(rows) { return box.lowerBound - 1 }
-            guard let rule = rows.lastIndex(where: isAntigravityRule) else { return nil }
+            guard let rule = rows.indices.last(where: { isAntigravityRule(rows[$0]) && !isEcho(rows, under: $0) })
+            else { return nil }
             return rule > 0 && !rows[rule - 1].isEmpty ? rule - 1 : rule
         case .claudeCode:
             let rules = rows.indices.filter { isRule(rows[$0]) }
@@ -85,6 +88,7 @@ enum AgentTail {
     /// it. Nil when no such box is on screen.
     static func antigravityBox(_ rows: [String]) -> Range<Int>? {
         guard let bottom = rows.lastIndex(where: isAntigravityRule),
+              !isEcho(rows, under: bottom),
               rows[(bottom + 1)...].filter({ !$0.isEmpty }).count <= 1,
               let top = rows[..<bottom].lastIndex(where: { isAntigravityRule($0) && $0.count == rows[bottom].count }),
               top + 1 < bottom, rows[top + 1].hasPrefix(">")
@@ -95,6 +99,12 @@ enum AgentTail {
     /// A row of agy's rule: nothing but "─".
     private static func isAntigravityRule(_ row: String) -> Bool {
         row.count >= 20 && row.allSatisfy { $0 == "─" }
+    }
+
+    /// The rule at `rule` is a prompt's echo: "> " and the prompt under it.
+    /// (A box's bottom rule has the footer under it, a menu's a blank row.)
+    private static func isEcho(_ rows: [String], under rule: Int) -> Bool {
+        rows.indices.contains(rule + 1) && rows[rule + 1].hasPrefix("> ")
     }
 
     /// The file that keeps an agent's last screen when its CLI ends, and at

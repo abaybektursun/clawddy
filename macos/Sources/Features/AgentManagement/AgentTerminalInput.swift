@@ -48,15 +48,21 @@ enum AgentInputLine: Equatable, Sendable {
     }
 
     /// agy's input box (`AgentTail.antigravityBox`). It is empty when the
-    /// text after ">" is, or is the mode's hint, which ends "(shift+tab to
-    /// cycle)". A question, a permission or the folder-trust dialog takes
-    /// the box's place: no box.
+    /// text after ">" is, or is the mode's hint: it ends "(shift+tab to
+    /// cycle)", or, in a terminal too narrow for it, it is cut to the box
+    /// and ends "..." ("Auto mode: edits & safe commands auto-...", probed
+    /// at 44 columns). A question, a permission or the folder-trust dialog
+    /// takes the box's place: no box.
     private static func antigravity(_ rows: [String]) -> AgentInputLine {
         guard let box = AgentTail.antigravityBox(rows) else { return .none }
         let text = ([String(rows[box.lowerBound].dropFirst())] + rows[(box.lowerBound + 1)..<box.upperBound])
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty || text.hasSuffix("(shift+tab to cycle)") { return .empty }
+        let flat = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        if flat.isEmpty || flat.hasSuffix("(shift+tab to cycle)")
+            || flat.range(of: #"^[A-Za-z-]+ mode: .*\.\.\.$"#, options: .regularExpression) != nil {
+            return .empty
+        }
         return .holdsText(text)
     }
 

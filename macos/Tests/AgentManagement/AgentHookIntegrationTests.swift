@@ -96,15 +96,22 @@ struct AgentHookIntegrationTests {
                 provider: provider,
                 agentID: agentID,
                 generation: UUID())
+            // Claude's field names and agy's (`hookEventName`,
+            // `conversationId`), the provider's own with the event and the
+            // other's with an event and a session no one records: a
+            // provider that reads the other's names records nothing right.
+            let agy = provider == .antigravity
             for event in candidates {
-                // Claude's field names, and agy's (`hookEventName`,
-                // `conversationId`): each provider reads its own.
-                #expect(try sandbox.runShell(
-                    command,
-                    environment: sandbox.plainEnvironment,
-                    payload: #"{"session_id":"session-1","hook_event_name":"\#(event)","conversationId":"session-1","hookEventName":"\#(event)"}"#) == 0)
+                let payload: [String: String] = [
+                    "hook_event_name": agy ? "Notification" : event, "session_id": agy ? "wrong" : "session-1",
+                    "hookEventName": agy ? event : "Notification", "conversationId": agy ? "session-1" : "wrong",
+                ]
+                let text = try #require(String(bytes: JSONSerialization.data(withJSONObject: payload), encoding: .utf8))
+                #expect(try sandbox.runShell(command, environment: sandbox.plainEnvironment, payload: text) == 0)
             }
-            #expect(try sandbox.events(agentID).map(\.hookEventName) == table[provider].hookEvents.keys.sorted())
+            let events = try sandbox.events(agentID)
+            #expect(events.map(\.hookEventName) == table[provider].hookEvents.keys.sorted())
+            #expect(events.allSatisfy { $0.sessionID == "session-1" })
         }
     }
 

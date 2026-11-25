@@ -29,6 +29,13 @@ enum AgentHookRuntime {
         [scriptURL(root: root).path, root.statusDir.path, provider.rawValue, agentID.uuidString, generation.uuidString]
     }
 
+    /// How much of each text a record keeps, in bytes: well above
+    /// `AgentRecord.textLimit` characters of any width, and far below the
+    /// system's limit on one argument.
+    static let textBytes = 256 << 10
+    /// How much of agy's transcript the script reads, from its end.
+    static let transcriptTailBytes = 8 << 20
+
     /// The record the script appends when it could not record an event.
     static let failureRecordName = "HookFailed"
 
@@ -45,12 +52,17 @@ enum AgentHookRuntime {
     /// appends records; the bridge writes the session binding from them. It
     /// records only the events of the provider's event table, each with the
     /// turn named by the payload field that table gives, and nothing for any
-    /// other event. For agy it prints `{}`, whatever happens.
+    /// other event. For agy it prints `{}`, whatever happens, an incomplete
+    /// identity included.
     ///
-    /// agy's last reply is not in its payload: the script reads the
-    /// transcript file the payload names (`~/` taken as the home folder),
-    /// one JSON object per line, from its end back to the turn's prompt
-    /// (`USER_INPUT`), and takes the last `PLANNER_RESPONSE` with content.
+    /// agy's last reply is not in its payload: the script reads the last
+    /// `transcriptTailBytes` of the transcript file the payload names (`~/`
+    /// taken as the home folder), one JSON object per line, from its end
+    /// back to the turn's prompt (`USER_INPUT`), and takes the last
+    /// `PLANNER_RESPONSE` with content. A line that is not complete JSON
+    /// (the file cut short, or the tail's first line) ends the search with
+    /// no text, so the report's message stands; a transcript named that
+    /// cannot be read is a hook failure.
     ///
     /// Text (a prompt, a message, an error's text, a question) goes into the
     /// record without the shell ever parsing it: `plutil` reads the raw value
@@ -58,7 +70,10 @@ enum AgentHookRuntime {
     /// property list, and `plutil` writes that list as JSON. The `x` after
     /// the value keeps its trailing newlines, which `$(...)` would drop; the
     /// one newline `raw` adds goes with the `x`. A payload without the field
-    /// records no text, never an empty one.
+    /// records no text, never an empty one. Each text is cut to
+    /// `textBytes` on a character boundary, so no argument nears the
+    /// system's limit, and the record reaches the event file through a file,
+    /// never an argument or the environment.
     ///
     /// A hook that has an identity but cannot record its event appends one
     /// line saying why to `hook-errors.log` in the status folder, and still
@@ -69,15 +84,15 @@ enum AgentHookRuntime {
         umask 077
         DIR="$1"
         PROVIDER=$(printf '%s' "$2" | /usr/bin/tr -cd '[:alnum:]')
+        case "$PROVIDER" in
+          \(AgentProviderID.antigravity.rawValue)) printf '%s\n' '\(AntigravityProvider.hookReply)' ;;
+        esac
         ID=$(printf '%s' "$3" | /usr/bin/tr -cd 'A-Fa-f0-9-')
         GENERATION=$(printf '%s' "$4" | /usr/bin/tr -cd 'A-Fa-f0-9-')
         if [ -z "$DIR" ] || [ -z "$PROVIDER" ] || [ -z "$ID" ] || [ -z "$GENERATION" ]; then
           cat >/dev/null
           exit 0
         fi
-        case "$PROVIDER" in
-          \(AgentProviderID.antigravity.rawValue)) printf '%s\n' '\(AntigravityProvider.hookReply)' ;;
-        esac
 
         if ! mkdir -p "$DIR" 2>/dev/null; then
           echo "clawddy-provider-hook.sh: cannot create $DIR" >&2
@@ -101,9 +116,9 @@ enum AgentHookRuntime {
 
         INPUT=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
         TEXTS=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
-        STEPS=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
-        STEP=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
-        trap 'rm -f "$INPUT" "$TEXTS" "$STEPS" "$STEP"' EXIT HUP INT TERM
+        TAIL=
+        STEPS=
+        trap 'rm -f "$INPUT" "$TEXTS" ${TAIL:+"$TAIL"} ${STEPS:+"$STEPS"}' EXIT HUP INT TERM
         if [ "${5:-}" = \(notifyMode) ]; then
           # Codex's notify program. The payload is the last argument; the
           # words between `notify` and it are the owner's own notify command,
@@ -137,12 +152,19 @@ enum AgentHookRuntime {
         sanitize() {
           printf '%s' "$1" | /usr/bin/tr -cd '[:alnum:]_.:/-'
         }
+        # VALUE cut to its first \(textBytes) bytes, on a character boundary.
+        bound() {
+          [ "${#VALUE}" -gt \(textBytes) ] || return 0
+          VALUE=$(printf '%s' "$VALUE" | /usr/bin/head -c \(textBytes) | /usr/bin/iconv -c -f UTF-8 -t UTF-8 2>/dev/null; printf x)
+          VALUE=${VALUE%x}
+        }
         # The field's raw text, trailing newlines kept, in VALUE; false when
-        # the payload (or the file given second) has no such field.
+        # the payload has no such field.
         text() {
-          VALUE=$(/usr/bin/plutil -extract "$1" raw -o - "${2:-$INPUT}" 2>/dev/null && printf x)
+          VALUE=$(/usr/bin/plutil -extract "$1" raw -o - "$INPUT" 2>/dev/null && printf x)
           [ -n "$VALUE" ] || return 1
           VALUE=${VALUE%?x}
+          bound
         }
         # The last reply in the transcript the field names, in VALUE; false
         # when the turn has none.
@@ -151,15 +173,26 @@ enum AgentHookRuntime {
           case "$TRANSCRIPT" in
             "~/"*) TRANSCRIPT="$HOME/${TRANSCRIPT#??}" ;;
           esac
-          [ -f "$TRANSCRIPT" ] || return 1
+          [ -n "$TRANSCRIPT" ] || return 1
+          [ -r "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ] || fail "could not read the transcript $TRANSCRIPT"
+          TAIL=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
+          STEPS=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
+          /usr/bin/tail -c \(transcriptTailBytes) "$TRANSCRIPT" > "$TAIL" || fail "could not read $TRANSCRIPT"
           # A last line without its newline would be joined to the one before.
-          { /bin/cat "$TRANSCRIPT" && { [ -z "$(/usr/bin/tail -c 1 "$TRANSCRIPT")" ] || echo; }; } \\
-            | /usr/bin/tail -r > "$STEPS" || fail "could not read $TRANSCRIPT"
-          while IFS= read -r LINE || [ -n "$LINE" ]; do
-            printf '%s' "$LINE" > "$STEP" || fail "could not write $STEP"
-            case "$(/usr/bin/plutil -extract type raw -o - "$STEP" 2>/dev/null)" in
+          [ -z "$(/usr/bin/tail -c 1 "$TAIL")" ] || echo >> "$TAIL"
+          /usr/bin/tail -r "$TAIL" > "$STEPS" || fail "could not read $TRANSCRIPT"
+          while IFS= read -r LINE; do
+            TYPE=$(printf '%s' "$LINE" | /usr/bin/plutil -extract type raw -o - - 2>/dev/null) || return 1
+            case "$TYPE" in
               USER_INPUT) return 1 ;;
-              PLANNER_RESPONSE) text content "$STEP" && [ -n "$VALUE" ] && return 0 ;;
+              PLANNER_RESPONSE)
+                VALUE=$(printf '%s' "$LINE" | /usr/bin/plutil -extract content raw -o - - 2>/dev/null && printf x)
+                VALUE=${VALUE%?x}
+                if [ -n "$VALUE" ]; then
+                  bound
+                  return 0
+                fi
+                ;;
             esac
           done < "$STEPS"
           return 1
@@ -223,9 +256,8 @@ enum AgentHookRuntime {
           esac
         fi
 
-        export EVENTS EVENT_LINE
-        /usr/bin/lockf -s -k "$LOCK" /bin/sh -c \
-          'printf "\n%s\n" "$EVENT_LINE" >> "$EVENTS"' 2>/dev/null \
+        printf '\n%s\n' "$EVENT_LINE" > "$TEXTS" || fail "could not write $TEXTS"
+        /usr/bin/lockf -s -k "$LOCK" /usr/bin/tee -a "$EVENTS" < "$TEXTS" > /dev/null 2>&1 \
           || fail "could not append to $EVENTS (status $?)"
         exit 0
         """

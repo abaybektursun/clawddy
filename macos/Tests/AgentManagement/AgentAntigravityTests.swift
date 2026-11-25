@@ -53,7 +53,7 @@ struct AgentAntigravityLaunchTests {
         let two = try sandbox.provider.prepareLaunch(second).get()
         #expect(one.arguments[0...1] == two.arguments[0...1])
         let folder = URL(fileURLWithPath: two.arguments[1])
-        #expect(folder == sandbox.root.url.appendingPathComponent("agy/\(first.agentID.uuidString)", isDirectory: true))
+        #expect(folder == sandbox.root.runtimeDir.appendingPathComponent("\(first.agentID.uuidString)/agy", isDirectory: true))
 
         let hooks = try #require(JSONSerialization.jsonObject(
             with: Data(contentsOf: folder.appendingPathComponent(".agents/hooks.json"))) as? [String: [String: Any]])
@@ -67,14 +67,21 @@ struct AgentAntigravityLaunchTests {
 
         try sandbox.provider.cleanup(agentID: first.agentID)
         #expect(!FileManager.default.fileExists(atPath: folder.path))
+
+        // It goes with the agent's other files.
+        _ = try sandbox.provider.prepareLaunch(first).get()
+        try FileManager.default.createDirectory(at: sandbox.root.statusDir, withIntermediateDirectories: true)
+        try sandbox.root.removeFiles(ofAgent: first.agentID)
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
     }
 
     /// A launch whose hook folder cannot be written fails, saying where.
     @Test func anUnwritableHookFolderFailsTheLaunch() throws {
         let sandbox = try AgySandbox()
         defer { sandbox.remove() }
-        try Data().write(to: sandbox.root.url.appendingPathComponent("agy"))
         let request = sandbox.request()
+        try FileManager.default.createDirectory(at: sandbox.root.runtimeDir, withIntermediateDirectories: true)
+        try Data().write(to: sandbox.root.runtimeDir.appendingPathComponent(request.agentID.uuidString))
         guard case .failure(let issue) = sandbox.provider.prepareLaunch(request) else {
             Issue.record("A launch ran without its hooks.")
             return
@@ -204,8 +211,10 @@ struct AgentAntigravityHookScriptTests {
 
     /// The reply is the last `PLANNER_RESPONSE` with content since the
     /// turn's prompt, exactly, from a transcript named with `~/`; a turn
-    /// with none records no text, never the turn before's. An event agy's
-    /// table has not, and a record without an identity, still print `{}`.
+    /// with none records no text, never the turn before's. A last line
+    /// that is not complete JSON gives no text, never an earlier step's. An
+    /// event agy's table has not, and a record without a complete identity,
+    /// still print `{}`.
     @Test func stopRecordsTheReplyFromTheTranscript() throws {
         let sandbox = try AgySandbox()
         defer { sandbox.remove() }
@@ -238,9 +247,77 @@ struct AgentAntigravityHookScriptTests {
         let none = try #require(try sandbox.hook(stop).records.first)
         #expect(none.text == nil && none.hookEventName == "Stop")
 
+        // A turn that called a tool with a preamble, its last line cut short.
+        let cut = String(try step("PLANNER_RESPONSE", ["content": "Final answer"]).dropLast(8))
+        try Data(([turn[0], try step("PLANNER_RESPONSE", ["content": "Let me check.", "tool_calls": [["name": "x"]]]), cut])
+            .joined(separator: "\n").utf8).write(to: transcript)
+        let partial = try #require(try sandbox.hook(stop).records.first)
+        #expect(partial.text == nil && partial.hookEventName == "Stop")
+
         let skipped = try sandbox.hook(["hookEventName": "PostInvocation", "conversationId": "c-1", "invocationNum": 0])
         #expect(skipped.output == "{}\n" && skipped.records.isEmpty)
         #expect(!FileManager.default.fileExists(atPath: sandbox.root.statusDir.appendingPathComponent("hook-errors.log").path))
+        #expect(try sandbox.hook(stop, identity: false).output == "{}\n")
+    }
+
+    /// Review 3: a reply of 2 MB full of quotes, newlines and backslashes
+    /// records its beginning, cut on a character boundary, and the hook
+    /// succeeds; so does a prompt as long.
+    @Test func aHugeTextRecordsItsBeginning() throws {
+        let sandbox = try AgySandbox()
+        defer { sandbox.remove() }
+        let unit = "a \"quoted\" \\ line é🧪\n"
+        let huge = String(repeating: unit, count: 2_000_000 / unit.utf8.count)
+        let transcript = try sandbox.transcript([
+            ["type": "USER_INPUT", "content": "go"], ["type": "PLANNER_RESPONSE", "content": huge],
+        ])
+        let stop = try #require(try sandbox.hook(["hookEventName": "Stop", "conversationId": "c-1", "transcriptPath": transcript]).records.first)
+        let text = try #require(stop.text)
+        #expect(text.utf8.count <= AgentHookRuntime.textBytes && text.utf8.count > AgentHookRuntime.textBytes - 4)
+        #expect(huge.hasPrefix(text))
+        let prompt = try #require(try sandbox.hook(["hookEventName": "PreInvocation", "conversationId": "c-1", "invocationNum": 0,
+                                                     "lastUserInput": huge]).records.first)
+        #expect(prompt.text.map { huge.hasPrefix($0) && $0.utf8.count <= AgentHookRuntime.textBytes } == true)
+        #expect(!FileManager.default.fileExists(atPath: sandbox.root.statusDir.appendingPathComponent("hook-errors.log").path))
+    }
+
+    /// Review 3: a transcript that cannot be read is a recorded hook
+    /// failure, not a silent loss of the reply.
+    @Test func anUnreadableTranscriptIsAFailure() throws {
+        let sandbox = try AgySandbox()
+        defer { sandbox.remove() }
+        let transcript = try sandbox.transcript([["type": "PLANNER_RESPONSE", "content": "Reply."]])
+        let file = sandbox.home.appendingPathComponent(String(transcript.dropFirst(2)))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
+        let records = try sandbox.hook(["hookEventName": "Stop", "conversationId": "c-1", "transcriptPath": transcript]).records
+        #expect(records.map(\.hookEventName) == [AgentHookRuntime.failureRecordName])
+        #expect(records.first?.text?.hasPrefix("Stop: could not read the transcript") == true)
+    }
+
+    /// Review 3: the script reads only the last `transcriptTailBytes` of
+    /// the transcript: a reply further back than that is not found, and the
+    /// report's message stands.
+    @Test func onlyTheTranscriptsTailIsRead() throws {
+        let sandbox = try AgySandbox()
+        defer { sandbox.remove() }
+        let output = String(repeating: "x", count: 1 << 20)
+        let tools = (0...AgentHookRuntime.transcriptTailBytes >> 20).map { _ in ["type": "GENERIC", "content": output] }
+        let transcript = try sandbox.transcript([["type": "USER_INPUT", "content": "go"], ["type": "PLANNER_RESPONSE", "content": "Far back."]] + tools)
+        let stop = try #require(try sandbox.hook(["hookEventName": "Stop", "conversationId": "c-1", "transcriptPath": transcript]).records.first)
+        #expect(stop.hookEventName == "Stop" && stop.text == nil)
+    }
+
+    /// Review 3: a Claude or Codex hook makes its two temporary files and no
+    /// more; the transcript's are made only where the reply is read.
+    @Test func onlyTheReplyMakesMoreTemporaryFiles() throws {
+        let script = AgentHookRuntime.script
+        let reply = try #require(script.range(of: "\nreply() {"))
+        let end = try #require(script.range(of: "\n}\n", range: reply.upperBound..<script.endIndex))
+        #expect(script[..<reply.lowerBound].components(separatedBy: "/usr/bin/mktemp").count - 1 == 2)
+        #expect(script[reply.lowerBound..<end.upperBound].components(separatedBy: "/usr/bin/mktemp").count - 1 == 2)
+        #expect(script[end.upperBound...].components(separatedBy: "/usr/bin/mktemp").count - 1 == 0)
+        #expect(!script.contains("export EVENTS EVENT_LINE"))
     }
 }
 
@@ -251,9 +328,74 @@ struct AgentAntigravityReducerTests {
         root: AgentDataRoot(url: URL(fileURLWithPath: "/nonexistent")), dataFolder: URL(fileURLWithPath: "/nonexistent")).entry.reports
 
     @Test func theTableValues() {
-        #expect(Self.rules == AgentReportRules(doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false))
-        #expect(ClaudeCodeProvider(root: AgentDataRoot(url: URL(fileURLWithPath: "/nonexistent"))).entry.reports == .standard)
-        #expect(AgentReportRules.standard == AgentReportRules(doneWithMessageCompletes: false, signInStandTime: 0, workingMessageIsActivity: true))
+        let nowhere = URL(fileURLWithPath: "/nonexistent")
+        #expect(Self.rules == AgentReportRules(
+            doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false,
+            workingStartsTurn: true, askingAtStartIsStarted: true, interruptReturnsQueuedMessages: true))
+        #expect(ClaudeCodeProvider(root: AgentDataRoot(url: nowhere)).entry.reports == .standard)
+        #expect(CodexProvider(root: AgentDataRoot(url: nowhere), configFile: nowhere).entry.reports == .standard)
+        #expect(AgentReportRules.standard == AgentReportRules(
+            doneWithMessageCompletes: false, signInStandTime: 0, workingMessageIsActivity: true,
+            workingStartsTurn: false, askingAtStartIsStarted: false, interruptReturnsQueuedMessages: false))
+    }
+
+    /// Review 2 (i): a sign-in failure starts no turn. A saved last reply
+    /// stays, and a repeated sign-in report changes nothing and notifies
+    /// nobody.
+    @Test func aSignInFailureStartsNoTurn() throws {
+        let auth = "state=blocked:kind=auth:app=antigravity:msg=\(b64("Sign in required"))"
+        let done = try Turn.start(rules: Self.rules).working().prompt("go").report("state=done:app=antigravity:msg=\(b64("Reply."))")
+        let failed = try done.report(auth).apply(.signInSettled(generation: done.generation))
+        #expect(failed.state.record.problem?.kind == .loginExpired && failed.state.record.lastMessage == "Reply.")
+        let again = try failed.report(auth).apply(.signInSettled(generation: done.generation))
+        #expect(again.state.record == failed.state.record && !again.effects.contains(.failed))
+        // Claude's sign-in report, counted at once, keeps the reply too.
+        let claude = try Turn.start(rules: .standard).working().prompt("go").report("state=done:app=antigravity")
+            .provider(.messageReported("Reply.")).report(auth)
+        #expect(claude.state.record.problem?.kind == .loginExpired && claude.state.record.lastMessage == "Reply.")
+    }
+
+    /// Review 2 (ii): the next report past the sign-in clears the login
+    /// problem a standing sign-in report raised, never one a failed turn
+    /// raised (Claude's StopFailure, then its `idle`).
+    @Test func aReportPastTheSignInClearsItsProblem() throws {
+        let auth = "state=blocked:kind=auth:app=antigravity:msg=\(b64("Sign in required"))"
+        let launched = try Turn.start(rules: Self.rules, ready: false).report(auth)
+        let failed = launched.apply(.signInSettled(generation: launched.generation))
+        #expect(failed.state.record.problem?.kind == .loginExpired && failed.effects.contains(.startedAsking))
+        let signedIn = try failed.report("state=idle:app=antigravity")
+        #expect(signedIn.state.record.problem == nil && signedIn.state.record.state == .finished && signedIn.state.inputReady)
+        let claude = try Turn.start(rules: .standard).working().prompt("go")
+            .provider(.turnFailed(AgentFailure(error: "authentication_failed", text: "OAuth token expired")))
+            .report("state=idle:app=antigravity")
+        #expect(claude.state.record.problem?.kind == .loginExpired)
+    }
+
+    /// Review 1: a turn's state does not depend on whether its `working` or
+    /// its prompt's record comes first, nor on its length. Each order ends
+    /// finished, unread, with the full reply, the prompt recorded once and
+    /// never as queued.
+    @Test func theTurnDoesNotDependOnWhichComesFirst() throws {
+        let done = "state=done:app=antigravity:msg=\(b64("Reply."))"
+        let full = AgentDomainEvent.messageReported("Reply.\nAll of it.")
+        func finished(_ turn: Turn) -> Bool {
+            turn.state.record.state == .finished && turn.state.record.unread
+                && turn.state.record.lastMessage == "Reply.\nAll of it." && turn.state.record.queued == nil
+                && turn.state.record.prompts.map(\.text) == ["go"] && turn.state.lastAppliedCompletion != nil
+        }
+        let start = try Turn.start(rules: Self.rules)
+        // (a) The prompt's record, then `working`; a short turn.
+        #expect(finished(try start.prompt("go").working().provider(full).report(done)))
+        // (b) `working`, `done`, then the prompt's record and the Stop record.
+        #expect(finished(try start.working().report(done).prompt("go").provider(full)))
+        // (c) `working`, the prompt's record much later.
+        let late = try start.working()
+        #expect(late.state.record.state == .working && late.state.turnState != .starting)
+        #expect(finished(try late.prompt("go").provider(full).report(done)))
+        // (d) As (b), with a key typed (`idle`) before the records come.
+        #expect(finished(try start.working().report(done).report("state=idle:app=antigravity").prompt("go").provider(full)))
+        // Claude's `working` still waits for its delay.
+        #expect(try Turn.start(rules: .standard).working().state.turnState == .starting)
     }
 
     /// Trap 1: every agy turn ends in a `done` with the reply's first line.
@@ -362,6 +504,64 @@ struct AgentAntigravityBridgeTests {
         h.scheduler.advance(by: 5)
         #expect(try h.agent(brief).record.problem == nil && h.agent(brief).record.state == .finished)
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(stuck.uuidString).error"])
+        // It has started: the start limit cannot replace the login problem.
+        h.scheduler.advance(by: AgentBridge.startLimit)
+        #expect(agent.record.problem?.kind == .loginExpired)
+        // Signed in at last: its `idle` clears the problem.
+        try h.osc(stuck, "state=idle:app=antigravity")
+        #expect(agent.record.problem == nil && agent.record.state == .finished && agent.runtime.inputReady)
+    }
+
+    /// Review 2 (iv): keys typed while it starts are not delivered into its
+    /// sign-in screen; they end as when an agent asks.
+    @Test func heldKeysDoNotGoIntoTheSignIn() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent", provider: .antigravity)
+        h.start()
+        var delivered: [UUID] = []
+        var dropped: [UUID] = []
+        h.bridge.onKeysReady = { delivered.append($0) }
+        h.bridge.onKeysNotHeld = { dropped.append($0) }
+        try h.activate(id)
+        try h.osc(id, "state=blocked:kind=auth:app=antigravity:msg=\(b64("Sign in required"))")
+        #expect(h.bridge.holdsKeys(for: id))
+        h.scheduler.advance(by: 2.01)
+        #expect(delivered.isEmpty && dropped == [id] && !h.bridge.holdsKeys(for: id))
+    }
+
+    /// Review 4: agy's folder-trust dialog at start-up is no turn. Answered,
+    /// a new agent is a new agent with no output, and a launch with a first
+    /// prompt goes on to that prompt's turn; waiting past the start limit
+    /// keeps the question.
+    @Test func theTrustDialogAtStartIsNoTurn() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent", provider: .antigravity)
+        h.start()
+        let trust = "state=blocked:kind=permission:app=antigravity:msg=\(b64("Trust this folder?"))"
+        try h.activate(id)
+        try h.osc(id, trust)
+        let agent = try h.agent(id)
+        #expect(agent.record.state == .asks && agent.record.question == "Trust this folder?")
+        h.scheduler.advance(by: AgentBridge.startLimit + 1)
+        #expect(agent.record.state == .asks && agent.record.problem == nil)
+        try h.osc(id, "state=idle:app=antigravity")
+        #expect(agent.record.state == .finished && !agent.record.interrupted && agent.record.lastMessage == nil)
+        #expect(agent.record.sentence(cli: "Antigravity") == .app("No output yet"))
+
+        let project = try #require(h.config.projects.first)
+        let entry = try #require(h.bridge.startAgent(
+            task: "fix the tide chart", provider: .antigravity, launchProfile: AgentLaunchProfile(),
+            config: h.config, project: project, host: h.host))
+        try h.osc(entry.id, trust)
+        try h.osc(entry.id, "state=idle:app=antigravity")
+        let started = try h.agent(entry.id)
+        #expect(started.record.state == .working && !started.record.interrupted)
+        try h.osc(entry.id, "state=working:app=antigravity")
+        try agyHook(h, entry.id, "PreInvocation", session: "c-1", invocation: "0", text: "fix the tide chart")
+        try h.osc(entry.id, "state=done:app=antigravity:msg=\(b64("Done."))")
+        #expect(started.record.state == .finished && started.record.lastMessage == "Done.")
     }
 
     /// A turn from a first prompt: its prompt from the first PreInvocation
@@ -379,10 +579,13 @@ struct AgentAntigravityBridgeTests {
         let id = entry.id
         try h.osc(id, "state=idle:app=antigravity")
         #expect(try h.agent(id).record.state == .working)
+        // The first prompt's records come up to 1.24 s after its `working`.
         try h.osc(id, "state=working:app=antigravity")
+        h.scheduler.advance(by: 1.24)
         try agyHook(h, id, "SessionStart", session: "c-1", text: nil)
         try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", text: "fix the tide chart")
         #expect(try h.binding(id).sessionID == "c-1")
+        #expect(try h.agent(id).record.queued == nil && h.agent(id).record.state == .working)
         try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "1", text: "fix the tide chart")
         let cut = String(repeating: "word ", count: 39) + "wor…"
         try h.osc(id, "state=done:app=antigravity:msg=\(b64(cut))")
@@ -393,17 +596,46 @@ struct AgentAntigravityBridgeTests {
         try agyHook(h, id, "Stop", session: "c-1", text: full)
         #expect(agent.record.lastMessage == full)
 
-        // `/clear`: a new id at the next prompt, which the agent resumes.
+        // A new id with no SessionStart (an id agy did not know, or a
+        // resumed conversation's): the PreInvocation binds it.
         h.view(id)
         try h.osc(id, "state=working:app=antigravity")
-        try agyHook(h, id, "SessionStart", session: "c-2", text: nil)
         try agyHook(h, id, "PreInvocation", session: "c-2", invocation: "0", text: "start over")
         #expect(try h.binding(id).sessionID == "c-2")
-        // The full reply first, then the `done`: the full reply stays.
-        try agyHook(h, id, "Stop", session: "c-2", text: "All done.\nTwo lines.")
+        // The full reply first, then the `done`: the full reply stays. The
+        // Stop record alone binds too.
+        try agyHook(h, id, "Stop", session: "c-3", text: "All done.\nTwo lines.")
+        #expect(try h.binding(id).sessionID == "c-3")
         try h.osc(id, "state=done:app=antigravity:msg=\(b64("All done."))")
         #expect(agent.record.lastMessage == "All done.\nTwo lines.")
         #expect(agent.record.prompts.map(\.text) == ["fix the tide chart", "start over"])
+
+        // After a restart its next launch resumes the last id.
+        try h.providerQuit(id, status: 0)
+        try h.restart()
+        try h.activate(id)
+        #expect(h.providers.launchRequests.last?.session?.sessionID == "c-3")
+    }
+
+    /// Review 7: the binding is written only when it changes, though agy
+    /// names its conversation in every record.
+    @Test func theBindingIsWrittenOnlyWhenItChanges() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent", provider: .antigravity)
+        h.start()
+        try agyLaunch(h, id)
+        try h.osc(id, "state=working:app=antigravity")
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", text: "go")
+        h.io.release()
+        let file = h.statusFile(id, "session.json")
+        #expect(h.exists(file))
+        try FileManager.default.removeItem(at: file)
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "1", text: "go")
+        try agyHook(h, id, "Stop", session: "c-1", text: "Done.")
+        #expect(!h.exists(file))
+        try agyHook(h, id, "PreInvocation", session: "c-2", invocation: "0", text: "go on")
+        #expect(try h.binding(id).sessionID == "c-2")
     }
 
     /// A question and a permission: the agent asks, with the report's
@@ -482,11 +714,40 @@ struct AgentAntigravityBridgeTests {
         h.scheduler.advance(by: 1)
         #expect(result == .sent)
         // A plain send while it works: agy queues it.
+        h.host.screens[id] = AgyScreens.working
+        try h.osc(id, "state=working:app=antigravity")
+        #expect(try h.agent(id).record.state == .working)
         result = nil
         h.bridge.send("one more", to: id, by: .app) { result = $0 }
         #expect(result == .sent)
         #expect(h.host.inputs[id] == [.escape, .escape, .paste("again"), .enter, .paste("one more"), .enter])
         #expect(h.host.inputs[id]?.contains(.interrupt) == false)
+    }
+
+    /// Review 8: a message Clawddy sent while agy worked, given back by an
+    /// interrupt, was never submitted: it is no prompt, and the same words
+    /// typed and submitted later are the person's own prompt.
+    @Test func aSendGivenBackByAnInterruptIsNoPrompt() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent", provider: .antigravity)
+        h.start()
+        try agyLaunch(h, id)
+        h.host.screens[id] = AgyScreens.working
+        try h.osc(id, "state=working:app=antigravity")
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", text: "count slowly")
+        var result: AgentSendResult?
+        h.bridge.send("queued words", to: id, by: .app) { result = $0 }
+        #expect(result == .sent)
+        let agent = try h.agent(id)
+        #expect(agent.record.prompts.map(\.text) == ["count slowly", "queued words"])
+        try h.osc(id, "state=idle:app=antigravity")
+        #expect(agent.record.prompts.map(\.text) == ["count slowly"] && agent.record.interrupted)
+        // The person submits those words themselves.
+        try h.osc(id, "state=working:app=antigravity")
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", text: "queued words")
+        #expect(agent.record.prompts.map(\.text) == ["count slowly", "queued words"])
+        #expect(agent.record.prompts.map(\.by) == [.person, .person])
     }
 
     /// A saved conversation that is gone follows the flow of Claude's
@@ -516,6 +777,9 @@ struct AgentAntigravityBridgeTests {
         #expect(flock(holder, LOCK_EX | LOCK_NB) == 0)
         h.start()
 
+        func hooks(_ id: UUID) -> URL {
+            AntigravityProvider.hookFolder(root: h.root, agentID: id).appendingPathComponent(".agents/hooks.json")
+        }
         try h.activate(gone)
         #expect(try h.agent(gone).record.problem?.kind == .conversationMissing)
         #expect(try h.agent(gone).canOnlyStartFresh)
@@ -523,9 +787,16 @@ struct AgentAntigravityBridgeTests {
         try h.activate(elsewhere)
         #expect(try h.agent(elsewhere).record.problem?.kind == .openElsewhere)
         #expect(try !h.agent(elsewhere).canOnlyStartFresh)
+        // Neither refused launch wrote hooks for its conversation.
+        #expect(!h.exists(hooks(gone)) && !h.exists(hooks(elsewhere)))
 
         try h.restart()
         #expect(try h.agent(gone).canOnlyStartFresh)
+        let project = try #require(h.config.project(forAgent: gone))
+        h.bridge.startFresh(id: gone, host: h.host, project: project)
+        #expect(h.providers.launchRequests.last?.session == nil)
+        #expect(try h.agent(gone).record.problem == nil && !h.agent(gone).canOnlyStartFresh)
+        #expect(h.exists(hooks(gone)))
     }
 
     /// One agy hook record, as the hook script writes it.
@@ -575,6 +846,17 @@ struct AgentAntigravityScreenTests {
                      "Accept-edits mode: file edits auto-approved (shift+tab to cycle)"] {
             #expect(read(AgyScreens.box("> " + hint)) == .empty)
         }
+        // A hint too long for the terminal is cut and ends "..." (probed at
+        // 44 columns); a wrapped one reads the same.
+        #expect(read(AgyScreens.box("> Auto mode: edits & safe commands auto-...")) == .empty)
+        #expect(read(AgyScreens.box("> Auto mode: edits & safe commands auto-approved (shift+tab to\n  cycle)")) == .empty)
+        #expect(read(AgyScreens.box("> fix the chart...")) == .holdsText("fix the chart..."))
+        // A 60-column terminal: the echoes' rules span it, and the screen
+        // between a prompt's submission and the box's return is no box.
+        let rule60 = String(repeating: "─", count: 60)
+        #expect(read([rule60, "> first prompt", "  ok", rule60, "> second prompt"].joined(separator: "\n")) == .none)
+        #expect(read([rule60, "> first prompt", "  ok", rule60, ">", rule60, "? for shortcuts      example-model · high"]
+            .joined(separator: "\n")) == .empty)
         // A terminal no wider than the echo's rule: the echo's rule spans
         // it too, and the menu still reads as one.
         let narrow = AgyScreens.question.components(separatedBy: "\n").map { row in
@@ -591,6 +873,12 @@ struct AgentAntigravityScreenTests {
         #expect(question.last == "? Which palette, the harbour one or the dune one?")
         let queued = AgentTail.lines(AgyScreens.workingQueued, provider: .antigravity)
         #expect(queued.last == "▸ queued words (alt+m to send immediately)")
+        // A stopped agy: its last turn, then how to resume it.
+        let stopped = AgentTail.lines(AgyScreens.exited, provider: .antigravity)
+        #expect(Array(stopped.suffix(5)) == [
+            "> fix the tide chart", "  First line.", "  Second line.", "Resume with -c (or command below):",
+            "agy --conversation=0b9e2c1a-7d4f-4e3b-9a52-1c0ffee00000",
+        ])
     }
 }
 
@@ -652,6 +940,11 @@ enum AgyScreens {
         "  ⎿  Interrupted · What should Antigravity CLI do instead?", "", rule, "> queued wordsfirst line", "  second line",
         rule, typingFooter,
     ]).joined(separator: "\n")
+    /// After Control-D twice: the box gone, then how to resume
+    /// (cli-facts.md, agy, "At exit").
+    static let exited = (banner + firstTurn + [
+        "", "Resume with -c (or command below):", "agy --conversation=0b9e2c1a-7d4f-4e3b-9a52-1c0ffee00000",
+    ]).joined(separator: "\n")
     static let trust = (banner + [
         "Accessing workspace:", "/work/harbour", "Do you trust the contents of this project?",
         "Antigravity CLI requires permission to read, edit, and execute files here.", "> Yes, I trust this folder",
@@ -705,13 +998,15 @@ final class AgySandbox {
     }
 
     /// Runs the installed hook script as agy runs a hook, with `payload` on
-    /// its input: what it printed, and the records it appended.
-    func hook(_ payload: [String: Any]) throws -> (output: String, records: [AgentRawProviderEvent]) {
+    /// its input: what it printed, and the records it appended. Without
+    /// `identity` it is given only the status folder and the provider.
+    func hook(_ payload: [String: Any], identity: Bool = true) throws -> (output: String, records: [AgentRawProviderEvent]) {
         try AgentHookRuntime.install(root: root)
         let agentID = UUID()
+        let arguments = AgentHookRuntime.arguments(root: root, provider: .antigravity, agentID: agentID, generation: UUID())
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", AgentHookRuntime.command(root: root, provider: .antigravity, agentID: agentID, generation: UUID())]
+        process.arguments = ["-c", (identity ? arguments : Array(arguments.prefix(3))).map(AgentHookRuntime.shellQuote).joined(separator: " ")]
         process.environment = ["HOME": home.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": folder.path]
         let input = Pipe()
         let output = Pipe()
@@ -724,6 +1019,21 @@ final class AgySandbox {
         process.waitUntilExit()
         #expect(process.terminationStatus == 0)
         return (try #require(String(bytes: printed, encoding: .utf8)), try events(agentID))
+    }
+
+    /// A transcript of `steps`, one JSON object per line, under the
+    /// sandbox's home; its path as agy names it, starting "~/".
+    func transcript(_ steps: [[String: Any]]) throws -> String {
+        let relative = ".gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl"
+        let file = home.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var data = Data()
+        for step in steps {
+            data += try JSONSerialization.data(withJSONObject: step, options: .sortedKeys)
+            data += Data("\n".utf8)
+        }
+        try data.write(to: file)
+        return "~/" + relative
     }
 
     func events(_ agentID: UUID) throws -> [AgentRawProviderEvent] {

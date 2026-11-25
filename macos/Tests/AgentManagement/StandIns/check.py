@@ -883,7 +883,7 @@ def check_agy(tmp):
 
 
 def check_agy_screens(tmp):
-    """agy: mode hints and Shift+Tab, the trust dialog, an unknown conversation id, a failure, skipped permissions."""
+    """agy: mode hints and Shift+Tab, a hint cut at 44 columns, the trust dialog, an unknown conversation id, a failure, skipped permissions."""
     run = Run(os.path.join(tmp, "plan"), "agy", ["--mode", "plan"])
     try:
         run.wait("the plan hint", lambda: box(run) == ["> Plan mode: research & plan only (shift+tab to cycle)"])
@@ -892,6 +892,11 @@ def check_agy_screens(tmp):
         run.wait("default mode: a bare box", lambda: box(run) == [">"] and footer(run).endswith("  example-model · high"))
         run.key("shift-tab")
         run.wait("accept-edits", lambda: box(run) == ["> Accept-edits mode: file edits auto-approved (shift+tab to cycle)"])
+    finally:
+        run.close()
+    run = Run(os.path.join(tmp, "narrow"), "agy", [], cols=44)
+    try:
+        run.wait("the hint cut to the box", lambda: box(run) == ["> Auto mode: edits & safe commands auto-..."])
     finally:
         run.close()
     run = Run(os.path.join(tmp, "default"), "agy", ["--settings", '{"agentMode": ""}'])

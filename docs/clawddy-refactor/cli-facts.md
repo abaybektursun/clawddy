@@ -1252,11 +1252,17 @@ No PostInvocation, **no Stop**, and nothing more in the transcript after the pro
 - **The transcript at Stop:** in every turn seen (four) the file named by `transcriptPath` already held the turn's last `PLANNER_RESPONSE` line, full text included ("alpha\nbeta"), when Stop ran; it was there at PostInvocation already. The file grows next only at the next prompt.
 - **Transcript lines** (one JSON object per step, `json.dumps` spacing): `{"step_index", "source": "USER_EXPLICIT", "type": "USER_INPUT", "status": "DONE", "created_at", "content": "<USER_REQUEST>\n<prompt>\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: <time>.\n</ADDITIONAL_METADATA>"}` (the first prompt also carries a `<USER_SETTINGS_CHANGE>` block); `{"step_index", "source": "MODEL", "type": "PLANNER_RESPONSE", "status", "created_at", "model", "input_tokens", "cache_read_tokens", "output_tokens", "thinking"?, "content"?, "tool_calls"?}`; `{"type": "GENERIC", "content": "Created At: …\nCompleted At: …\n<result>"}` for a tool result (an answer is "A1: yes"). A `PLANNER_RESPONSE` that calls a tool has `tool_calls` and empty or no `content`; the reply is the last one with `content`.
 
+### Resuming by hand
+
+- **A conversation keeps the folders it was made with**, so one Clawddy made runs the agent's hooks (`<data root>/runtime/<agent id>/agy/.agents/hooks.json`) when the person resumes it by hand in another terminal while that folder exists. Clawddy removes the folder when the agent's terminal closes (and with the agent), and keeps it after a quit. Records from such a hand run carry the generation of the agent's last launch: the app takes them only while that launch runs (they then count as its own: binding, prompts, replies; the two would share one conversation, which agy allows); otherwise they are a stale launch's and change nothing but the agent's last-active time.
+- **A remembered folder that no longer exists is skipped without a word**: a conversation made with `--add-dir <folder>`, the folder deleted, then `--conversation <id>` with no folder: no message on screen, agy's log says "loaded 0 named hooks from 0 hooks.json file(s)", and a prompt runs as usual (probe `stage2/gone-a`, `gone-b`, two model turns).
+
 ### The presence lock
 
 - `~/.gemini/antigravity-cli/presence/<id>.lock`, 0 bytes, open read-write by the process and held with an exclusive `flock` (a non-blocking `flock` from another process fails while agy runs, succeeds after).
 - Taken when the conversation is made (the first prompt), at start on a resume, and moved to the new id at `/clear`. Before the first prompt only the `presence` folder is open. The file stays after exit, free.
 - Conversations are stored as `~/.gemini/antigravity-cli/conversations/<id>.db`.
+- **Clawddy checks the lock, then agy takes it** when its terminal starts, a fraction of a second later. A second process opening the same conversation in that window is not refused (agy answers in a conversation open elsewhere). Claude Code and Codex leave the same window between Clawddy's check and their own start; it is accepted.
 
 ### Screens
 
@@ -1268,6 +1274,7 @@ No PostInvocation, **no Stop**, and nothing more in the transcript after the pro
   - auto (no `--mode`, no `agentMode` in the settings): "> Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
   - `--mode plan`: "> Plan mode: research & plan only (shift+tab to cycle)".
   The hint shows only until the box has held text in this process (the first-prompt argument does not count): after a typed prompt was sent, or after typed text was emptied, the empty box is a bare `>`.
+  - **A hint too long for the terminal is cut, never wrapped**: the row is at most the width less 3 cells, ending `...` (three full stops). At 44 columns: `> Auto mode: edits & safe commands auto-...`; at 60: `> Auto mode: edits & safe commands auto-approved (shift+...` (probes `stage2/narrow-44`, `narrow-60`, 2026-11-25, no model turn).
 - **Footer:** on the left "? for shortcuts" (empty box), nothing (text in the box), "esc to cancel" (working, or a menu showing), "  Press up to edit queued messages" (a message queued), "press ctrl+c again to exit" / "press ctrl+d again to exit"; on the right, right-aligned, "<mode> · <model> · <effort>" ("auto · <model> · high"); default mode leaves out the mode.
 - **Echo of a prompt:** a rule of 60 cells, then `> <prompt>` in bold blue, wrapped rows indented two spaces. The reply follows indented two spaces. This is the trap of plan item 4: only the box's rules span the terminal.
 - **Working:** a braille spinner and "Generating..." or "Loading..." (grey with a moving highlight) above the box; tool lines `● Ran (echo chosen) (ctrl+o to expand)`; thinking lines `▸ Thought for 3s, 150 tokens`.

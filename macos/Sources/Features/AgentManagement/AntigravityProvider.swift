@@ -55,17 +55,21 @@ struct AntigravityProvider: Sendable {
     /// tool, which is why there is none.
     static let hookReply = "{}"
 
-    /// agy's entry in the provider table. Its `working` comes 10 to 20 ms
-    /// after Return, and the first prompt's PreInvocation up to 1.24 s after
-    /// it in a new conversation (cli-facts.md, agy timelines): a `working`
-    /// starts a turn by itself only past that. Every `done` carries the
-    /// reply's first line; a sign-in report stood 0.5 s in two of thirteen
-    /// signed-in starts, so it counts only once it has stood 2 s; and a
-    /// resumed conversation's `working` carries its title, not a step.
+    /// agy's entry in the provider table (cli-facts.md, agy): every `done`
+    /// carries the reply's first line; a sign-in report stood 0.5 s in two
+    /// of thirteen signed-in starts, so it counts only once it has stood
+    /// 2 s; a resumed conversation's `working` carries its title, not a
+    /// step; no `working` is anything but a turn (`/clear` and exit report
+    /// none), and its prompt's record can come before it or up to 1.24 s
+    /// after; its trust dialog and sign-in wait on the person once it has
+    /// started; and an interrupt gives queued messages back. Its `working`
+    /// never waits, so `turnStartDelay` is never used.
     var entry: AgentProviderEntry {
         AgentProviderEntry(
-            turnStartDelay: 3,
-            reports: AgentReportRules(doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false),
+            turnStartDelay: 0,
+            reports: AgentReportRules(
+                doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false,
+                workingStartsTurn: true, askingAtStartIsStarted: true, interruptReturnsQueuedMessages: true),
             hookEvents: Self.hookEvents,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },
@@ -85,12 +89,13 @@ struct AntigravityProvider: Sendable {
     }
 
     /// The agent's hook folder, added to each of its launches with
-    /// `--add-dir`. Its path never changes: a resumed conversation runs the
-    /// hooks of every folder it was made with, so a new path would run
-    /// both sets.
+    /// `--add-dir`: inside its runtime folder, which goes with the agent's
+    /// other files (`AgentDataRoot.removeFiles`). Its path never changes: a
+    /// resumed conversation runs the hooks of every folder it was made with,
+    /// so a new path would run both sets.
     static func hookFolder(root: AgentDataRoot, agentID: UUID) -> URL {
-        root.url.appendingPathComponent("agy", isDirectory: true)
-            .appendingPathComponent(agentID.uuidString, isDirectory: true)
+        root.runtimeDir.appendingPathComponent(agentID.uuidString, isDirectory: true)
+            .appendingPathComponent("agy", isDirectory: true)
     }
 
     /// The hooks file agy loads from a folder given with `--add-dir`: each
@@ -105,6 +110,23 @@ struct AntigravityProvider: Sendable {
     func prepareLaunch(_ request: AgentLaunchRequest) -> Result<AgentPreparedLaunch, AgentProviderIssue> {
         guard let executable = AgentExecutableLocator.locate(id.executableName, path: request.environmentPath)
         else { return .failure(.executableMissing(id)) }
+
+        // Checked before anything is written: a refused launch leaves no hooks
+        // behind for a conversation another terminal runs. agy takes an id it
+        // does not know as a new conversation without a word, and answers in
+        // one already open in another terminal.
+        var conversation: String?
+        if let session = request.session, session.provider == id {
+            let stored = dataFolder.appendingPathComponent("conversations/\(session.sessionID).db")
+            guard FileManager.default.fileExists(atPath: stored.path) else {
+                return .failure(.sessionMissing(id, session.sessionID))
+            }
+            switch Self.isHeld(dataFolder.appendingPathComponent("presence/\(session.sessionID).lock")) {
+            case .success(true): return .failure(.sessionOpenElsewhere(id, session.sessionID))
+            case .success(false): conversation = session.sessionID
+            case .failure(let issue): return .failure(issue)
+            }
+        }
 
         let folder = Self.hookFolder(root: root, agentID: request.agentID)
         let hooksFile = folder.appendingPathComponent(".agents/hooks.json")
@@ -132,19 +154,7 @@ struct AntigravityProvider: Sendable {
         if let effort = request.launchProfile.reasoningEffort?.trimmingCharacters(in: .whitespacesAndNewlines), !effort.isEmpty {
             arguments += ["--effort", effort]
         }
-        if let session = request.session, session.provider == id {
-            // agy takes an id it does not know as a new conversation without
-            // a word, and answers in one already open in another terminal.
-            let conversation = session.sessionID
-            let stored = dataFolder.appendingPathComponent("conversations/\(conversation).db")
-            guard FileManager.default.fileExists(atPath: stored.path) else {
-                return .failure(.sessionMissing(id, conversation))
-            }
-            switch Self.isHeld(dataFolder.appendingPathComponent("presence/\(conversation).lock")) {
-            case .success(true): return .failure(.sessionOpenElsewhere(id, conversation))
-            case .success(false): break
-            case .failure(let issue): return .failure(issue)
-            }
+        if let conversation {
             arguments += ["--conversation", conversation]
         }
         // One argument: a prompt that starts with "-" is taken as text

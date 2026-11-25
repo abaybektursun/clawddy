@@ -31,6 +31,8 @@ final class AgentInstance: Identifiable {
     var lastActive: Date?
     /// Its terminal's title shows Codex's working spinner.
     @ObservationIgnored var titleSpins = false
+    /// The session binding this run last wrote for it.
+    @ObservationIgnored var savedBinding: AgentSessionBinding?
     /// Its terminal's text when its CLI last ended or the app last quit:
     /// what its tile and its terminal area show while it does not run.
     var savedScreen = ""
@@ -1514,14 +1516,15 @@ final class AgentBridge {
                 self.perform(self.apply(.inputSettled(generation: generation), to: agent), of: agent)
             }
         }
-        if effects.contains(.inputReady) {
+        if effects.contains(.inputReady) || effects.contains(.startedAsking) {
             launchTimers.removeValue(forKey: id)?.invalidate()
         }
         // Keys held for its start: delivered at its first report, unless it
-        // asks something, which the person must answer themselves.
+        // asks something or shows its sign-in, which the person must answer
+        // themselves.
         if effects.contains(.becameAlive) || effects.contains(.waitingForUser) {
             holdTimers.removeValue(forKey: id)?.invalidate()
-            if agent.record.state == .asks {
+            if agent.record.state == .asks || agent.record.problem?.kind == .loginExpired {
                 endHold(id)
             } else if effects.contains(.becameAlive) {
                 onKeysReady?(id)
@@ -1617,8 +1620,13 @@ final class AgentBridge {
             launchGeneration: generation)
         let agentID = agent.id
         let statusDir = statusDir
+        let file = AgentSessionStore.sessionURL(agentID, statusDir)
+        // agy names its conversation in every record: written once, and
+        // again only when it changes or its last write failed.
+        guard binding != agent.savedBinding || storageErrors[file] != nil else { return }
+        agent.savedBinding = binding
         store(
-            AgentSessionStore.sessionURL(agentID, statusDir),
+            file,
             "Session \(sessionID) of \(agent.name) could not be saved, so its next launch may not resume it"
         ) {
             try AgentSessionStore.write(binding, for: agentID, directory: statusDir)

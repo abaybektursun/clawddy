@@ -346,10 +346,26 @@ struct AgentReportRules: Equatable, Sendable {
     /// A `working` report's message names the step under way, which the
     /// agent shows as its activity.
     var workingMessageIsActivity: Bool
+    /// Every `working` is a turn, so it starts one at once, and the first
+    /// prompt record of a turn that started without one is that turn's
+    /// prompt, whichever comes first. agy reports no `working` for a command
+    /// that submits nothing; Claude and Codex do, so theirs must stand for
+    /// `turnStartDelay` first.
+    var workingStartsTurn: Bool
+    /// A dialog or a standing sign-in report at start-up shows that the CLI
+    /// has started: the start limit (`AgentBridge.startLimit`) stops, and
+    /// cannot replace what it asks with "did not start". Claude Code still
+    /// on its trust dialog after 30 s says it did not start.
+    var askingAtStartIsStarted: Bool
+    /// An interrupt gives back, unsent, the messages queued while the turn
+    /// worked (agy); Claude folds a queued message into the running turn.
+    /// The ones Clawddy sent are then no prompts.
+    var interruptReturnsQueuedMessages: Bool
 
-    /// Claude Code's and Codex's: a `done` with a message completes nothing,
-    /// a sign-in report counts at once, and `working` names the step.
-    static let standard = Self(doneWithMessageCompletes: false, signInStandTime: 0, workingMessageIsActivity: true)
+    /// Claude Code's and Codex's.
+    static let standard = Self(
+        doneWithMessageCompletes: false, signInStandTime: 0, workingMessageIsActivity: true,
+        workingStartsTurn: false, askingAtStartIsStarted: false, interruptReturnsQueuedMessages: false)
 }
 
 /// One provider's entry in the provider table: how long its `working` must
