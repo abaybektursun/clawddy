@@ -82,6 +82,22 @@ struct AgentHarnessTests {
         #expect(record.cutOff && record.continuedInARow == 2 && record.prompts.count == 1)
     }
 
+    /// An agy agent with a session resumes that conversation: its file is in
+    /// the stand-in's data folder, where the provider looks before a resume
+    /// (without it every such agent read "cannot find this conversation").
+    @Test func anAgyAgentsSessionExistsForTheStandIn() throws {
+        let scene = """
+            {"projects": [{"name": "alpha", "agents": [
+              {"name": "One", "provider": "antigravity", "session": "c-1"},
+              {"name": "Two", "provider": "claudeCode", "session": "c-2"}]}]}
+            """
+        let directory = try temporaryDirectory()
+        defer { remove(directory) }
+        try AgentHarness.write(scene: Data(scene.utf8), into: directory)
+        let conversations = directory.appendingPathComponent("agy-data/conversations")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: conversations.path) == ["c-1.db"])
+    }
+
     /// The checked-in scene is one the writer takes.
     @Test func twoCatsSceneWritesTwoRunningAgents() throws {
         let scene = URL(fileURLWithPath: #filePath).deletingLastPathComponent()

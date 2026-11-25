@@ -1319,6 +1319,16 @@ esc to cancel                                                <model> · high
 - **Control-U** empties the line before the cursor. Typing `y` on the permission menu did nothing (`run3`); digits on the menus were not tried.
 - A message sent while working is queued and does not interrupt; Escape gives it back into the box.
 
+### Under the app (agy 1.5.17, 2026-11-25, Clawddy's real-CLI harness run)
+
+Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turns). Launches after the first carried `--settings '{"trustedWorkspaces":[…the harness folder…]}'` from a wrapper of the harness's own, so the trust dialog's "Yes" (which adds the folder to the owner's `trustedWorkspaces`; docs: "The CLI adds entries for you") was never chosen.
+- **A first prompt runs behind the trust dialog.** Launched with `--prompt-interactive=<text>` in a folder nobody trusted, agy showed the trust dialog (`blocked kind=permission` "Trust this folder?") and ran the prompt's turn anyway while the dialog stayed on screen: SessionStart, PreInvocation (invocation 0, the prompt), Stop (the reply) all arrived within 8 s, and the conversation's `.db` was written. Declining the dialog then ended agy; Clawddy recorded the agent as stopped with no exit status (its launch script's exit report did not arrive). Declined with no prompt, in a terminal of the probe's own, agy exited with status 0.
+- **Auto mode approves more than `echo`.** With no start-mode flag and the owner's default mode (auto), "Run the shell command: echo chosen" and "…: rm -f no-such-file.txt" both ran without asking. After Shift+Tab twice (auto → plan → default) `echo chosen` asked: `blocked kind=permission` "Approve Bash: echo chosen", menu as under "Screens".
+- **A long command runs in the background and wakes the agent later.** "Run the shell command: sleep 20, then reply…" ran `sleep 20` in the background ("Command duration exceeds the synchronous execution window…", "Waiting for sleep 20 to finish."), and the turn ended with a Stop. A message queued meanwhile then ran as its own turn (PreInvocation 0 with its words, Stop with its reply). When the command ended, agy woke itself: a `SYSTEM_MESSAGE` step in the transcript, then **PreInvocation with `invocationNum` 0 and `lastUserInput` still the previous prompt**, then Stop with the new reply. Nothing in that record but the transcript's last step tells it from a prompt.
+- **A queued message reports nothing until it runs.** Sent while agy works, it shows as `▸ <text> (alt+m to send immediately)` and no hook runs for it; its PreInvocation comes only when agy starts it, as the next turn.
+- **Resuming** (`--conversation <id>`, after Clawddy quit and reopened) redraws the conversation's earlier turns; the next prompt's records carry the same id.
+- **Control-D twice** on an empty box ended agy with status 0; Clawddy recorded it finished, with no problem.
+
 ### Not seen
 
 `done` without a msg; `terminationReason` other than "NO_TOOL_CALL"; a Stop record with `error` set; what Escape does on the question or permission menu; what agy reports after start-up when signed out; the usage limit.

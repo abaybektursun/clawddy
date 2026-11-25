@@ -63,7 +63,35 @@ How it was proven: unit tests (`AgentAntigravityTests.swift` and the per-CLI tes
 stand-in checks, and a harness scene with one agent of each CLI in one project taken through working, a question
 and done, pictured at home and inside (`/Volumes/Xcode/GhosttyBuilds/ghostty/harness/agy-stage4/shots/`).
 
-Not proven yet: the real `agy` under the app (stage 5 of the plan).
+Proven with the real `agy` 1.5.17 under the harness (`--real`, 13 short model turns, 2026-11-25; one row per
+proof, with pictures, in the stage notes outside the repo): a new agent from the line with a first prompt starting
+with `-` (finished and unread, the full four-line reply recorded exactly as in agy's transcript); a question
+(tile lit, answered in the terminal, turn continued); a permission request (waiting on the person); a message sent
+while it works (queued by agy, shown as "You sent: …"); interrupt-and-send with a queued message (the message
+stays in agy's input, nothing recorded as sent, the status line says "its terminal holds text you typed"); quit
+and reopen (resumed with `--conversation`, last reply shown, the next prompt in the same conversation); a
+conversation held open by another agy (refused, "Open in another terminal…", opened after it exited); a saved
+conversation agy does not have ("Antigravity cannot find this conversation…"); settle and undo, rename, the walk.
+The trust dialog shows on the tile as waiting on the person ("Trust this folder?"). A soak of 200 switches with
+2,290 keys over Claude Code, Codex and agy stand-ins mixed: 0 lost or misrouted keys, 0 activations; idle main
+thread with 40 mixed agents 0.21 % (0.16 % recorded above for Claude only).
+
+Fixed by the real run: a message sent while agy works is now shown as queued (agy reports it only when its turn
+starts, so the app marks it at the send, for every CLI); scenes give an agy agent's saved conversation its file in
+the stand-in's data folder.
+
+Not proven, or open:
+- Answering the trust dialog "Yes" with the real agy: agy saves that answer into the owner's trusted folders, which
+  the rules forbid; later launches were trusted for their session only (`--settings`, from a harness wrapper). The
+  answer is proven against the stand-in.
+- With a first prompt, agy runs the prompt's turn behind the trust dialog before it is answered (cli-facts, "Under
+  the app"). Declining the dialog then showed "Antigravity stopped." without an exit status.
+- After agy runs a long command in the background, it wakes itself later and reports the previous prompt again as a
+  new turn's prompt (PreInvocation, invocation 0); Clawddy records that prompt a second time. The transcript's last
+  step (`SYSTEM_MESSAGE`, not `USER_INPUT`) is the only thing that tells them apart. Not fixed.
+- In standard start mode agy runs in the owner's default mode (auto), which approves safe commands without asking;
+  a permission request needs default mode (Shift+Tab in agy's terminal).
+- Sign-in after start-up, failures (`state=error`) and usage limits from the real agy: not seen.
 
 ## Build
 

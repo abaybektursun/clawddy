@@ -725,6 +725,32 @@ struct AgentAntigravityBridgeTests {
         #expect(h.host.inputs[id]?.contains(.interrupt) == false)
     }
 
+    /// Stage 5, real agy: a message sent while agy works waits in agy, which
+    /// reports it only when its own turn starts. The send is the sign it
+    /// waits: the sentence is the running turn's instruction, then "You
+    /// sent: …", until that message's turn starts.
+    @Test func aMessageSentWhileItWorksShowsAsQueued() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent", provider: .antigravity)
+        h.start()
+        try agyLaunch(h, id)
+        h.host.screens[id] = AgyScreens.working
+        try h.osc(id, "state=working:app=antigravity")
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", text: "count slowly")
+        h.bridge.send("queued words", to: id, by: .person) { _ in }
+        let agent = try h.agent(id)
+        #expect(agent.record.queued == "queued words")
+        #expect(agent.record.sentence(cli: .antigravity) == .cli("count slowly You sent: queued words"))
+        try agyHook(h, id, "Stop", session: "c-1", text: "Counted.")
+        try h.osc(id, "state=done:app=antigravity:msg=\(b64("Counted."))")
+        try h.osc(id, "state=working:app=antigravity")
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", text: "queued words")
+        #expect(agent.record.state == .working && agent.record.queued == nil)
+        #expect(agent.record.sentence(cli: .antigravity) == .cli("queued words"))
+        #expect(agent.record.prompts.map(\.text) == ["count slowly", "queued words"])
+    }
+
     /// Review 8: a message Clawddy sent while agy worked, given back by an
     /// interrupt, was never submitted: it is no prompt, and the same words
     /// typed and submitted later are the person's own prompt.
@@ -742,8 +768,10 @@ struct AgentAntigravityBridgeTests {
         #expect(result == .sent)
         let agent = try h.agent(id)
         #expect(agent.record.prompts.map(\.text) == ["count slowly", "queued words"])
+        #expect(agent.record.queued == "queued words")
         try h.osc(id, "state=idle:app=antigravity")
         #expect(agent.record.prompts.map(\.text) == ["count slowly"] && agent.record.interrupted)
+        #expect(agent.record.queued == nil)
         // The person submits those words themselves.
         try h.osc(id, "state=working:app=antigravity")
         try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", text: "queued words")

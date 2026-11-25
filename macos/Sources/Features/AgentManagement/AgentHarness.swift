@@ -385,6 +385,14 @@ final class AgentHarness {
                         AgentSessionBinding(provider: entry.provider, sessionID: session, launchGeneration: nil),
                         for: entry.id,
                         directory: root.statusDir)
+                    // agy's saved conversation exists for the provider's
+                    // check before a resume: its file in the stand-in's data
+                    // folder (`agyDataFolder`).
+                    if entry.provider == .antigravity {
+                        let conversations = directory.appendingPathComponent("agy-data/conversations", isDirectory: true)
+                        try fm.createDirectory(at: conversations, withIntermediateDirectories: true)
+                        try Data().write(to: conversations.appendingPathComponent("\(session).db"))
+                    }
                 }
                 try AgentRecord.save(agent.startingRecord(now: now), for: entry.id, in: root.statusDir)
             }

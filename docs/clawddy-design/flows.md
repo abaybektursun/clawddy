@@ -490,8 +490,9 @@ delivered: a stray key must never choose an option.
   reported as a permission request: the agent waits on the person (its tile
   lights and says "Trust this folder?"), it has started (the 30 s limit no
   longer applies), and keys held for it are not sent into the dialog.
-  Answering it in the terminal leaves a new agent as it was ("No output yet"),
-  or goes on to the first instruction's turn.
+  Answering it in the terminal leaves a new agent as it was ("No output yet").
+  agy runs a first instruction's turn behind the dialog without waiting for
+  the answer (agy 1.5.17), so its reply can already be recorded.
 
 ### 4.6 Sending text into a CLI
 

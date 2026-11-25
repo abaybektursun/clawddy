@@ -341,7 +341,13 @@ private struct Reduction {
             record.prompts.append(AgentRecord.Prompt(text: prompt, at: now, by: by))
             trimPrompts()
             state.promptsDue.append(prompt)
-            if rules.interruptReturnsQueuedMessages, case .active = state.turnState { state.sentWhileWorking.append(prompt) }
+            if case .active = state.turnState {
+                // Sent into a working CLI, which queues it until the turn
+                // ends (flows.md 4.6). agy reports it only when its own turn
+                // starts, so the send is the only sign it waits.
+                record.queued = prompt
+                if rules.interruptReturnsQueuedMessages { state.sentWhileWorking.append(prompt) }
+            }
             state.promptAwaitsTurn = true
             if record.firstInstruction == nil {
                 record.firstInstruction = prompt
