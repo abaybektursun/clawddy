@@ -18,7 +18,7 @@ struct AgentBridgeConfigTests {
 
         let agent = try h.agent(added.id)
         #expect(agent.provider == .codex)
-        #expect(agent.displayState == .inactive)
+        #expect(agent.terminal == .notRunning)
         #expect(h.bridge.agents.count == 2)
     }
 
@@ -53,10 +53,11 @@ struct AgentBridgeConfigTests {
         try h.editConfigExternally { $0[0] = AgentEntry(id: id, name: "Agent", provider: .codex) }
 
         #expect(h.config.allAgentEntries.first?.provider == .claudeCode)
+        h.config.waitForWrites()
         let saved = try JSONDecoder().decode(
             AgentConfigFile.self,
             from: Data(contentsOf: h.root.agentsFile))
-        #expect(saved.projects.first?.tasks.first?.agents.first?.provider == .claudeCode)
+        #expect(saved.projects.first?.agents.first?.provider == .claudeCode)
         #expect(try h.agent(id) === agent)
         #expect(agent.provider == .claudeCode)
         #expect(!h.diagnostics.messages.contains { $0.hasPrefix("rejected provider change") })
@@ -76,10 +77,11 @@ struct AgentBridgeConfigTests {
         #expect(h.diagnostics.messages.contains(
             "rejected provider change for bound or active agent \(id)"))
         #expect(h.config.allAgentEntries.first?.provider == .claudeCode)
+        h.config.waitForWrites()
         let saved = try JSONDecoder().decode(
             AgentConfigFile.self,
             from: Data(contentsOf: h.root.agentsFile))
-        #expect(saved.projects.first?.tasks.first?.agents.first?.provider == .claudeCode)
+        #expect(saved.projects.first?.agents.first?.provider == .claudeCode)
         #expect(try h.agent(id).provider == .claudeCode)
     }
 
@@ -105,14 +107,50 @@ struct AgentBridgeConfigTests {
         h.start()
         try h.launch(id)
         try h.completeTurn(id)
-        let unread = try #require(try h.agent(id).unreadCompletion)
 
         try h.restart()
 
         let agent = try h.agent(id)
-        #expect(agent.unreadCompletion == unread)
-        #expect(agent.lastAppliedCompletion == unread)
+        #expect(agent.record.unread)
         #expect(agent.surfaceState == .inactive)
-        #expect(agent.displayState == .finished)
+        #expect(agent.shownState == .finishedUnread)
+    }
+
+    /// A run whose configuration does not load, being of a newer schema or
+    /// unreadable, knows no agents, so it writes nothing under the data
+    /// root, at quit neither: the unread marks stay as the last run saved
+    /// them. Once the configuration loads, each agent has its mark back.
+    @Test func aConfigurationThatDoesNotLoadKeepsTheUnreadMarks() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.launch(id)
+        try h.completeTurn(id)
+        let record = AgentRecord.url(id, h.root.statusDir)
+        h.config.waitForWrites()
+        let readable = try Data(contentsOf: h.root.agentsFile)
+        let newer = try #require(String(data: readable, encoding: .utf8))
+            .replacingOccurrences(of: #""schemaVersion" : 6"#, with: #""schemaVersion" : 7"#)
+        try #require(newer.contains(#""schemaVersion" : 7"#))
+
+        for unreadable in [newer, "{"] {
+            try h.restart { try Data(unreadable.utf8).write(to: h.root.agentsFile) }
+            #expect(!h.config.isLoaded)
+            #expect(h.bridge.agents.isEmpty)
+            let state = try Data(contentsOf: record)
+            let dates = try FileManager.default.attributesOfItem(atPath: record.path)[.modificationDate] as? Date
+            h.bridge.shutdown()
+            #expect(try Data(contentsOf: record) == state)
+            #expect(try FileManager.default.attributesOfItem(atPath: record.path)[.modificationDate] as? Date == dates)
+            #expect(try AgentRecord.load(id, from: h.root.statusDir)?.unread == true)
+        }
+
+        try h.restart { try Data("{".utf8).write(to: h.root.agentsFile) }
+        try readable.write(to: h.root.agentsFile)
+        h.config.load()
+        #expect(try h.agent(id).record.unread)
+        #expect(try h.agent(id).shownState == .finishedUnread)
+        #expect(try h.recordedUnread() == [id])
     }
 }

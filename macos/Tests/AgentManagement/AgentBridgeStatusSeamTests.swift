@@ -41,19 +41,21 @@ struct AgentBridgeStatusSeamTests {
         let fromFile = try h.addAgent("From File", provider: .codex)
         let direct = try h.addAgent("Direct", provider: .codex)
         h.start()
-        try h.activate(fromFile)
-        try h.activate(direct)
+        try h.launch(fromFile)
+        try h.launch(direct)
+        try h.startTurn(fromFile)
+        try h.startTurn(direct)
         func summary(_ id: UUID) throws -> String {
             let agent = try h.agent(id)
             let notifications = h.notifier.posted
                 .filter { $0.content.threadIdentifier == id.uuidString }
                 .map { $0.identifier.replacingOccurrences(of: id.uuidString, with: "agent") }
-            return "\(agent.displayState) \(agent.surfaceState) \(agent.processState) "
-                + "\(agent.activityState) \(agent.interactionState) \(agent.turnState) "
+            return "\(agent.shownState) \(agent.terminal) \(agent.surfaceState) \(agent.processState) "
+                + "\(agent.activityState) \(agent.record.state) \(agent.turnState) "
                 + "\(agent.telemetryHealth) \(agent.sessionID ?? "-") \(agent.isUnread) \(notifications)"
         }
 
-        for event in ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "Stop"] {
+        for event in ["Padding", "agent-turn-complete"] {
             try h.append(fromFile, h.record(event, generation: try h.generation(fromFile), provider: .codex, eventID: event))
             h.poll()
             let line = h.record(event, generation: try h.generation(direct), provider: .codex, eventID: event)
@@ -64,8 +66,8 @@ struct AgentBridgeStatusSeamTests {
                 event: .hook(try JSONDecoder().decode(AgentRawProviderEvent.self, from: Data(line.utf8)))))
             #expect(try summary(direct) == summary(fromFile), "\(event)")
         }
-        #expect(try h.agent(direct).displayState == .finished)
-        #expect(h.notifier.posted.count == 4)
+        #expect(try h.agent(direct).shownState == .finishedUnread)
+        #expect(h.notifier.posted.count == 2)
 
         let surface = try #require(h.host.surfaces[fromFile])
         NotificationCenter.default.post(
@@ -87,9 +89,8 @@ struct AgentBridgeStatusSeamTests {
     /// A hook record reaches the agent's state only when its provider's table
     /// allows that event from the event file. Codex subscribes to neither
     /// `StopFailure` nor `SessionEnd`, and Claude, whose terminal reports its
-    /// turns, not to `Notification`, `UserPromptSubmit` or `Stop`: those
-    /// records change nothing and say why, where the same `StopFailure`
-    /// fails a Claude turn.
+    /// turns, not to `Notification` or `PreToolUse`: those records change
+    /// nothing and say why, where the same `StopFailure` fails a Claude turn.
     @Test func ingestDropsEventItsProviderTableDoesNotAllow() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -99,7 +100,7 @@ struct AgentBridgeStatusSeamTests {
         try h.launch(claude)
         try h.startTurn(claude)
         try h.launch(codex)
-        try h.hook(codex, "UserPromptSubmit")
+        try h.startTurn(codex)
         func ingest(_ id: UUID, _ event: String) throws {
             let generation = try h.generation(id)
             let line = h.record(event, generation: generation, provider: try h.agent(id).provider)
@@ -114,16 +115,16 @@ struct AgentBridgeStatusSeamTests {
             try ingest(codex, event)
             #expect(h.diagnostics.messages.last == "ignored \(event) for \(codex): not in the Codex table")
         }
-        for event in ["Notification", "UserPromptSubmit", "Stop"] {
+        for event in ["Notification", "PreToolUse"] {
             try ingest(claude, event)
             #expect(h.diagnostics.messages.last == "ignored \(event) for \(claude): not in the Claude Code table")
         }
-        #expect(try h.agent(codex).displayState == .thinking)
-        #expect(try h.agent(claude).displayState == .working)
+        #expect(try h.agent(codex).activityState == .executing)
+        #expect(try h.agent(claude).activityState == .executing)
         #expect(h.notifier.posted.isEmpty)
 
         try ingest(claude, "StopFailure")
-        #expect(try h.agent(claude).displayState == .error)
+        #expect(try h.agent(claude).shownState == .problem)
     }
 
     /// A real watcher on a temporary folder: an append to an event file that

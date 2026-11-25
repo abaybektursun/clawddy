@@ -45,15 +45,6 @@ final class AgentTerminalEnvironmentPolicyTests: XCTestCase {
         XCTAssertFalse(names.contains { $0.hasPrefix("GHOSTTY_AGENT_CRON_") })
     }
 
-    func testShellPreludeUnsetsVariablesThatCannotBeRemovedBySurfaceOverlay() {
-        let expectedUnset = "unset " + AgentTerminalEnvironmentPolicy
-            .inheritedAutomationVariables
-            .joined(separator: " ")
-        XCTAssertEqual(
-            AgentTerminalEnvironmentPolicy.shellPrelude,
-            "\(expectedUnset)\nexport CLICOLOR='1'")
-    }
-
     func testProviderEntrypointRemovesInheritedOptOutAndParentAgentMarkersAtExecutionBoundary() throws {
         let command = AgentTerminalEnvironmentPolicy.interactiveCommand(
             executableURL: URL(fileURLWithPath: "/usr/bin/env"),

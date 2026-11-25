@@ -10,7 +10,7 @@ import os
 @MainActor
 final class AgentInstance: Identifiable {
     let id: UUID
-    var name: String
+    var name: String { didSet { if name != oldValue { searchVersion += 1 } } }
     let provider: AgentProviderID
     var launchProfile: AgentLaunchProfile
     /// The agent's runtime state. Only `apply` assigns it, once per event and
@@ -21,86 +21,119 @@ final class AgentInstance: Identifiable {
     /// When the source of the agent's turn activity (its provider table's
     /// `turnActivity`) last reported in this launch; nil until it first does.
     @ObservationIgnored var lastActivityReport: Date?
-    /// Monotonic presentation evidence used only when the user deliberately
-    /// asks the workspace to choose among equally urgent agents. It never
-    /// changes list order or steals focus as runtime state evolves.
-    @ObservationIgnored var lastAuthoritativeChange: Date?
+    /// When this run created the agent; nil for an agent it read from the
+    /// configuration, which keeps no creation date.
+    let createdAt: Date?
+    /// When the agent was last active: when its event file last changed, as
+    /// the bridge reads it at start, then when a record of it last reached
+    /// the bridge; nil while it has never run. Kept here, so the sidebar
+    /// never reads the disk for it.
+    var lastActive: Date?
+    /// Its terminal's title shows Codex's working spinner.
+    @ObservationIgnored var titleSpins = false
+    /// Its terminal's text when its CLI last ended or the app last quit:
+    /// what its tile and its terminal area show while it does not run.
+    var savedScreen = ""
+    /// Its launch waits its turn: as many CLIs as start at once are
+    /// starting (`AgentBridge.startConcurrency`).
+    var waitsToStart = false
+    /// Its record says it is settled, and that it waits on the person: kept
+    /// apart from `runtime`, so what follows only these (the list of the
+    /// project's agents, the waiting counts) is not woken by every report
+    /// of every agent.
+    private(set) var isSettled = false
+    private(set) var isWaiting = false
+    /// Where it stands among the agents waiting on the person (its state's
+    /// rank, then when it began to wait), nil while it does not wait. Set
+    /// only by a transition, never by a report of activity, so the waiting
+    /// order is not woken by every step of every agent.
+    private(set) var waitingKey: AgentWaitingKey?
+    /// Runs when it begins or stops waiting on the person: the bridge keeps
+    /// its count of waiting agents from these transitions alone.
+    @ObservationIgnored var onWaitingChanged: ((AgentInstance) -> Void)?
 
     var surfaceState: AgentSurfaceState { runtime.surfaceState }
     var processState: AgentProcessState { runtime.processState }
     var activityState: AgentActivityState { runtime.activityState }
-    var interactionState: AgentInteractionState { runtime.interactionState }
     var telemetryHealth: AgentTelemetryHealth { runtime.telemetryHealth }
-    var unreadCompletion: AgentCompletionID? { runtime.unreadCompletion }
     var lastAppliedCompletion: AgentCompletionID? { runtime.lastAppliedCompletion }
-    var failureMessage: String? { runtime.failureMessage }
-    var runtimeErrorMessage: String? { runtime.runtimeErrorMessage }
     var launchGeneration: UUID? { runtime.launchGeneration }
     var sessionID: String? { runtime.sessionID }
     var turnState: AgentTurnState { runtime.turnState }
     var missingSessionID: String? { runtime.missingSessionID }
+    /// The agent's stored record (`AgentRecord`).
+    var record: AgentRecord { runtime.record }
+    /// Its name is Clawddy's or its CLI's, which a conversation's title may
+    /// replace; a name the person gave never is (`flows.md` 4.3).
+    var autoNamed: Bool { record.nameSource != .person }
 
-    /// `runtime` is the state the agent starts from: its persisted
-    /// completions, or its provider's sign-in state.
-    init(entry: AgentEntry, runtime: AgentRuntimeSnapshot = AgentRuntimeSnapshot()) {
+    /// `runtime` is the state the agent starts from: its record, and its
+    /// provider's sign-in state.
+    init(entry: AgentEntry, runtime: AgentRuntimeSnapshot = AgentRuntimeSnapshot(), createdAt: Date? = nil) {
         id = entry.id
         name = entry.name
         provider = entry.provider
         launchProfile = entry.launchProfile
         self.runtime = runtime
+        self.createdAt = createdAt
+        isSettled = runtime.record.settledAt != nil
+        isWaiting = runtime.record.isWaitingOnYou
+        waitingKey = AgentWaitingKey(runtime.record)
     }
 
-    var isUnread: Bool { unreadCompletion != nil }
+    /// Bumped whenever what find reads of it (its record's words, its
+    /// name, when it last changed, whether it is settled) may have changed,
+    /// so find folds its words again only then and never copies its record
+    /// to find out.
+    @ObservationIgnored private(set) var searchVersion = 0
+
+    /// A finished turn the person has not opened, or a turn a quit or crash
+    /// cut off.
+    var isUnread: Bool { record.unread || record.cutOff }
+    /// Its provider runs in its terminal: quitting or removing it stops it.
+    var isRunning: Bool { surfaceState == .open && processState != .exited }
     /// The saved session is missing or unreadable, so the agent can only
     /// start a new one.
     var canOnlyStartFresh: Bool { missingSessionID != nil || runtime.sessionUnreadable }
-    var isStarting: Bool {
-        surfaceState == .opening && processState == .launching
-    }
 
-    /// The one way the runtime state changes: one reducer application is at
-    /// most one observable mutation, and none when it changes nothing.
+    /// The one way the state changes: one reducer application is at most one
+    /// observable mutation, and none when it changes nothing.
     @discardableResult
     func apply(_ event: AgentRuntimeEvent, at now: Date) -> [AgentRuntimeEffect] {
-        let result = AgentStateReducer.reduce(runtime, event: event)
+        let result = AgentStateReducer.reduce(runtime, event: event, at: now)
         guard result.state != runtime else { return result.effects }
-        let oldDisplayState = displayState
+        let wasWaiting = record.isWaitingOnYou
+        let before = record
         runtime = result.state
-        if displayState != oldDisplayState {
-            lastAuthoritativeChange = now
+        let waits = record.isWaitingOnYou
+        if waits != wasWaiting {
+            isWaiting = waits
+            onWaitingChanged?(self)
         }
+        if (record.settledAt != nil) != isSettled { isSettled = record.settledAt != nil }
+        let key = AgentWaitingKey(record)
+        if key != waitingKey { waitingKey = key }
+        if !AgentRecord.findsSame(result.state.record, before) { searchVersion += 1 }
         return result.effects
     }
 }
 
-// MARK: - Aggregate State
-
-enum AggregateState: Equatable {
-    case idle
-    case running(Int)
-    case attention
+/// A send to an agent whose CLI starts, waiting for its input.
+struct AgentPendingSend {
+    var text: String
+    var sender: AgentRecord.Prompt.Sender
+    var interrupting: Bool
+    var done: @MainActor (AgentSendResult) -> Void
 }
 
-// MARK: - Persisted Bridge State
-
-/// `state.json`. Files the app wrote before P3.4 also hold
-/// `lastAppliedCompletions` and `eventOffsets`, and before P3.6
-/// `pendingRenames`; none of them is read any more.
-private struct PersistedState: Codable {
-    var unreadCompletions: [UUID: AgentCompletionID] = [:]
-
-    private enum CodingKeys: String, CodingKey {
-        case unreadCompletions
-    }
-
-    init() {}
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        unreadCompletions = try container.decodeIfPresent(
-            [UUID: AgentCompletionID].self,
-            forKey: .unreadCompletions) ?? [:]
-    }
+/// A launch asked for that waits its turn to start.
+struct AgentPendingLaunch {
+    var id: UUID
+    var generation: UUID
+    var project: AgentProject
+    var discardingSession: Bool
+    var firstPrompt: String?
+    var notice: String?
 }
 
 // MARK: - Agent Bridge
@@ -114,7 +147,9 @@ final class AgentBridge {
             ($0, AgentProviderHealth())
         })
 
-    var onAggregateStateChanged: ((AggregateState) -> Void)?
+    /// Fires with the number of agents waiting for the user when it
+    /// changes, and once at `start`: the menu bar item and the dock badge.
+    var onWaitingCountChanged: ((Int) -> Void)?
     var onSurfaceDeath: ((UUID) -> Void)?
     /// Fires when the set of presented agent surfaces changes, after the
     /// presentation and after death teardown. The workspace owner decides
@@ -126,6 +161,22 @@ final class AgentBridge {
     /// arrives while its agent is viewed leaves no unread mark, and nothing
     /// is notified about a viewed agent.
     var isViewed: (UUID) -> Bool = { _ in false }
+    /// "Notify when an agent is waiting" is on (flows.md 6.11).
+    var notifies: () -> Bool = { true }
+    /// The agent's project: its folder for a launch, its name for its
+    /// notifications.
+    var project: (UUID) -> AgentProject? = { _ in nil }
+    /// Fires with a name for an agent whose name is Clawddy's, from the title
+    /// its provider gave the conversation; the owner saves it
+    /// (`AgentWorkspaceTransactions.adoptTitle`).
+    var onConversationTitle: ((UUID, String) -> Void)?
+    /// Fires at an agent's CLI's first status report: the keys held for it
+    /// go now, in order.
+    var onKeysReady: ((UUID) -> Void)?
+    /// Fires when the keys held for an agent's start must not be sent: its
+    /// launch failed or ran out of time, it asks something, or it shows a
+    /// screen with no report past `holdLimit` (a trust or update dialog).
+    var onKeysNotHeld: ((UUID) -> Void)?
 
     /// Files of the data root that could not be read, saved or removed,
     /// each with what went wrong; the workspace shows them with the
@@ -133,19 +184,50 @@ final class AgentBridge {
     /// saved or removed. The key of an agent's whole set of status files is
     /// `<status folder>/<agent id>`.
     private(set) var storageErrors: [URL: String] = [:]
+    /// Files whose last write failed: what the agent holds in memory is
+    /// newer, stays the truth, and is written again with the next change
+    /// and at quit; the top bar says so until it is written (last review
+    /// ruling 1).
+    private(set) var unsavedFiles: Set<URL> = []
+    /// The backups folder an unreadable `state.json` of an older build was
+    /// moved to at this start, if it was.
+    private(set) var movedStateFile: URL?
 
-    private var lastAggregateState: AggregateState?
+    private var lastWaitingCount: Int?
+    /// The agents waiting on the person, kept from their transitions
+    /// (`AgentInstance.onWaitingChanged`), so counting them costs nothing
+    /// per report.
+    @ObservationIgnored private var waiting: Set<UUID> = []
     private var isTerminating = false
-    /// Set when `state.json` could not be read at start. The file is then
-    /// kept as it is, and nothing is saved over it until it is removed.
-    private var stateFileUnreadable = false
+    /// Agents whose record could not be read at start: the file is kept as
+    /// it is, and nothing is saved over it until it is removed.
+    private var unreadableRecords: Set<UUID> = []
+    /// The agents whose turn the last quit or crash cut off, not yet
+    /// continued (`continueCutOffAgents`), in the configuration's order.
+    private var restorePending: [UUID] = []
+    /// Launches asked for and waiting their turn, first to start first
+    /// (`startWaitingLaunches`).
+    private var waitingLaunches: [AgentPendingLaunch] = []
+    /// The agents whose launch has begun and whose CLI does not read its
+    /// input yet: at most `startConcurrency`.
+    private var starting: Set<UUID> = []
+    /// The running conversations listed once for the launches of one burst
+    /// (`AgentLiveSessions`); a new burst takes a new listing.
+    private var liveSessions = AgentLiveSessions()
+    /// When a paused agent's usage limit resets.
+    private var limitTimers: [UUID: any AgentTimer] = [:]
+    /// Sends waiting for their agent's `idle` after an interrupt; called with
+    /// whether it came.
+    /// Called with nil when the `idle` came, else with how the send ended.
+    private var pendingInterrupts: [UUID: (token: UUID, resume: @MainActor (AgentSendResult?) -> Void)] = [:]
+    /// Sends to agents whose CLI was starting, waiting for its input to be
+    /// ready; given up when its start fails.
+    private var pendingSends: [UUID: [AgentPendingSend]] = [:]
 
     /// Brings the hook records to `ingest`, from `start` on.
     @ObservationIgnored private(set) var journal: AgentHookJournalSource?
     private var healthRefreshGenerations: [AgentProviderID: UUID] = [:]
-    private var compactingTimers: [UUID: any AgentTimer] = [:]
     private var turnStartTimers: [UUID: any AgentTimer] = [:]
-    private var telemetryDelayTimers: [UUID: any AgentTimer] = [:]
     private var launchScripts: [UUID: URL] = [:]
     let root: AgentDataRoot
     private let providers: AgentProviderTable
@@ -161,22 +243,37 @@ final class AgentBridge {
         }
     }
 
-    /// Compacting is provably bounded (~5-15s). If no PostCompact arrives
-    /// within this window, the state is stale (e.g., user cancelled).
-    private static let compactingTimeout: TimeInterval = 30
-    /// An active turn with no provider fact for this long shows as delayed.
-    private static let telemetryDelay: TimeInterval = 120
-    /// How long a `working` report with no turn under way must stand before
-    /// the turn starts. The `working` blips of `/clear`, `/exit` and the
-    /// `/exit` confirmation end within 14 to 63 ms; a turn's failure can come
-    /// 106 ms after its `working`, and starts the turn at once.
-    static let turnStartDelay: TimeInterval = 0.25
+    /// How many CLIs start at once: a burst of starts, a restart's
+    /// continuations and the person's opens all wait their turn beyond it,
+    /// so none starves the others of the machine and none runs out of time.
+    static let startConcurrency = 3
+    /// How long a CLI has to come to read its input (flows.md 4.5).
+    static let startLimit: TimeInterval = 30
+    /// How long keys typed into a starting CLI that has drawn a screen wait
+    /// for its first report: about twice the slowest normal start (Codex,
+    /// 1.44 s; Claude, 0.83 s; probes.md P5), at least 3 s.
+    static let holdLimit: TimeInterval = 3
+    /// How long a new agent's start can be cancelled (flows.md 6.3).
+    static let cancelLimit: TimeInterval = 6
+    /// The message the app sends to continue a turn a restart cut off.
+    static let restartLabel = "[Sent by Clawddy after a restart, not typed by you]"
+    static let continueMessage = restartLabel + " Continue where you left off. Your last turn was cut short."
+    /// What the terminal shows before the CLI resumes the conversation.
+    static let continueNotice = "── Clawddy restarted and resumed this conversation ──"
 
     /// The host of the last activation. The surfaces are its own; the bridge
     /// keeps only this weak reference, to present launches that finish
     /// preparing and to have closes confirmed.
     @ObservationIgnored private weak var surfaceHost: (any AgentSurfaceHost)?
     private var launchTimers: [UUID: any AgentTimer] = [:]
+    /// Watches each starting CLI for a screen with no report (`holdLimit`).
+    private var holdTimers: [UUID: any AgentTimer] = [:]
+    /// Agents whose start showed a screen with no report: keys go straight
+    /// to their terminal, so the person can answer it.
+    private var keysPassThrough: Set<UUID> = []
+    /// The continuation each restarted agent's launch carries, recorded once
+    /// its terminal runs it.
+    private var pendingContinuations: [UUID: String] = [:]
 
     private var statusDir: URL { root.statusDir }
 
@@ -185,7 +282,7 @@ final class AgentBridge {
         providers: AgentProviderTable,
         scheduler: any AgentScheduler = AgentRunLoopScheduler(),
         io: any AgentIOExecutor = AgentDispatchIO(),
-        notifier: any AgentNotifier = AgentUserNotificationCenter(),
+        notifier: any AgentNotifier,
         diagnose: @escaping AgentDiagnosticsSink = AgentDiagnostics.unifiedLog
     ) {
         self.root = root
@@ -204,32 +301,29 @@ final class AgentBridge {
         } catch {
             fatalError("Could not reset \(root.launchDir.path): \(error)")
         }
-        let persisted = loadPersistedState()
-
-        // Reconstruct agents from config. No terminal outlives the app, so
-        // every agent starts not running; only an unread completion stays,
-        // and a saved session found missing or unreadable, which only Start
-        // Fresh replaces.
-        for entry in config.allAgentEntries {
-            let unread = persisted.unreadCompletions[entry.id]
-            var runtime = AgentRuntimeSnapshot(
-                unreadCompletion: unread,
-                lastAppliedCompletion: unread)
+        // The marks an older build kept in `state.json` become records once.
+        // A `state.json` that cannot be read is moved to the backups and the
+        // person is told (last review ruling 2); a record that cannot be
+        // read stops only its own agent (`addAgent`).
+        if config.isLoaded {
             do {
-                if let missing = try AgentSessionStore.missingSession(for: entry.id, directory: statusDir) {
-                    runtime.missingSessionID = missing
-                    runtime.failureMessage = AgentStateReducer.missingSessionMessage(
-                        provider: entry.provider,
-                        sessionID: missing)
-                }
+                movedStateFile = try AgentStateFold.fold(
+                    root: root,
+                    agents: config.allAgentEntries.map(\.id),
+                    lastActive: { [weak self] in self?.lastRecordDate(of: $0) },
+                    now: scheduler.now)
             } catch {
-                runtime.sessionUnreadable = true
-                runtime.failureMessage = AgentProviderIssue.unreadableSession(
-                    entry.provider,
-                    error.localizedDescription).localizedDescription
+                fatalError(error.localizedDescription)
             }
-            agents[entry.id] = AgentInstance(entry: entry, runtime: runtime)
         }
+
+        // No terminal outlives the app, so every agent starts not running,
+        // from its record; those whose turn was cut off continue.
+        for entry in config.allAgentEntries {
+            addAgent(entry)
+        }
+        for agent in agents.values { apply(.appStarted, to: agent) }
+        restorePending = config.allAgentEntries.map(\.id).filter { agents[$0]?.record.cutOff == true }
 
         refreshProviderHealth()
 
@@ -248,17 +342,81 @@ final class AgentBridge {
 
         // The restored state, unread completions included, reaches the
         // observers, which the owner attaches before calling `start`.
-        updateAggregate()
+        updateWaitingCount()
 
-        diagnose(.info, "started — \(agents.count) agents")
+        diagnose(.info, "started — \(agents.count) agents, \(restorePending.count) cut off by the last run")
     }
 
+    /// Each record was written with its last change, so a turn under way
+    /// stays working in it, and the next start finds it cut off, as after a
+    /// crash.
     func shutdown() {
         isTerminating = true
+        // A record or last screen whose write failed is written once more
+        // from memory (last review ruling 1); the wait below covers it.
+        for agent in agents.values {
+            if unsavedFiles.contains(AgentRecord.url(agent.id, statusDir)) { saveRecord(of: agent) }
+            if unsavedFiles.contains(AgentTail.savedScreenURL(agent.id, statusDir)) { storeScreen(agent.savedScreen, of: agent) }
+        }
         journal?.stop()
         for id in agents.keys { invalidateTimers(for: id) }
+        limitTimers.values.forEach { $0.invalidate() }
+        settleTimers.values.forEach { $0.invalidate() }
         removeAllLaunchScripts(synchronously: true)
-        persistState(synchronously: true)
+    }
+
+    /// Brings in an agent of the configuration from its record, or a new
+    /// record dated from its last activity. A saved session found missing
+    /// or unreadable, which only Start Fresh replaces, comes back with it.
+    private func addAgent(_ entry: AgentEntry, createdAt: Date? = nil, record initial: AgentRecord? = nil) {
+        var runtime = AgentRuntimeSnapshot()
+        let lastActive = lastRecordDate(of: entry.id)
+        if let initial {
+            runtime.record = initial
+        } else {
+            do {
+                if let record = try AgentRecord.load(entry.id, from: statusDir) {
+                    runtime.record = record
+                } else {
+                    runtime.record.changedAt = lastActive ?? scheduler.now
+                }
+            } catch {
+                // That agent alone stops, naming the file; it runs nothing on
+                // a record made up of defaults (`reaches`).
+                unreadableRecords.insert(entry.id)
+                let file = AgentRecord.url(entry.id, statusDir)
+                let reason = AgentConfig.describeLoadFailure(error)
+                runtime.record.state = .problem
+                runtime.record.problem = AgentRecord.Problem(
+                    kind: .launch,
+                    text: "Its record \(file.path) could not be read (\(reason)). The file is kept as it is; repair or remove it and open Clawddy again.")
+                reportStorageError(
+                    file,
+                    "The record of \(entry.name) could not be read (\(reason)). The file is kept as it is, and nothing is saved over it until it is removed.")
+            }
+        }
+        do {
+            if let missing = try AgentSessionStore.missingSession(for: entry.id, directory: statusDir) {
+                runtime.missingSessionID = missing
+            }
+        } catch {
+            runtime.sessionUnreadable = true
+            runtime.record.state = .problem
+            runtime.record.problem = AgentRecord.Problem(
+                kind: .launch,
+                text: AgentProviderIssue.unreadableSession(entry.provider, error.localizedDescription).localizedDescription)
+        }
+        let agent = AgentInstance(entry: entry, runtime: runtime, createdAt: createdAt)
+        agent.lastActive = lastActive
+        agent.savedScreen = loadScreen(of: entry)
+        agents[entry.id] = agent
+        if agent.isWaiting { waiting.insert(agent.id) }
+        agent.onWaitingChanged = { [weak self] agent in
+            if agent.isWaiting { self?.waiting.insert(agent.id) } else { self?.waiting.remove(agent.id) }
+            self?.updateWaitingCount()
+        }
+        if initial != nil { saveRecord(of: agent) }
+        if agent.record.state == .paused { scheduleLimitReset(for: agent) }
     }
 
     private var effectiveEnvironmentPath: String {
@@ -287,33 +445,9 @@ final class AgentBridge {
                         health.integrationIssue = issue
                     }
                     self.providerHealth[provider] = health
-                    self.reconcileInactiveAuthentication(
-                        provider: provider,
-                        authentication: health.authentication)
                 }
             }
         }
-    }
-
-    private func reconcileInactiveAuthentication(
-        provider: AgentProviderID,
-        authentication: AgentProviderAuthState
-    ) {
-        var changed = false
-        for agent in agents.values where agent.provider == provider {
-            let old = agent.runtime
-            apply(.providerAuthentication(authentication), to: agent)
-            changed = changed || agent.runtime != old
-        }
-        if changed { updateAggregate() }
-    }
-
-    /// The runtime of an agent that has never launched: it shows its
-    /// provider's sign-in state.
-    private func neverLaunchedRuntime(_ provider: AgentProviderID) -> AgentRuntimeSnapshot {
-        AgentRuntimeSnapshot(
-            interactionState: providerHealth[provider]?.authentication == .signedOut
-                ? .authentication : .none)
     }
 
     // MARK: - Reconciliation (call after config.load())
@@ -322,9 +456,9 @@ final class AgentBridge {
         let allEntries = config.allAgentEntries
         let configIds = Set(allEntries.map(\.id))
 
-        // Add instances for new entries
+        // Add instances for new entries, from their records.
         for entry in allEntries where agents[entry.id] == nil {
-            agents[entry.id] = AgentInstance(entry: entry, runtime: neverLaunchedRuntime(entry.provider))
+            addAgent(entry)
         }
 
         // Remove instances for deleted entries
@@ -356,16 +490,11 @@ final class AgentBridge {
                 case .unchanged:
                     break
                 case .replaceInactiveRuntime:
-                    var runtime = neverLaunchedRuntime(entry.provider)
-                    if agent.unreadCompletion?.provider == entry.provider {
-                        runtime.unreadCompletion = agent.unreadCompletion
-                    }
-                    if agent.lastAppliedCompletion?.provider == entry.provider {
-                        runtime.lastAppliedCompletion = agent.lastAppliedCompletion
-                    }
-                    // The old provider's files go with its runtime.
+                    // The old provider's files go with its runtime; the
+                    // record stays the agent's.
+                    let record = agent.record
                     removeAgent(id: entry.id)
-                    agents[entry.id] = AgentInstance(entry: entry, runtime: runtime)
+                    addAgent(entry, record: record)
                     continue
                 case .preserveRuntimeAndRestoreConfig:
                     diagnose(
@@ -379,8 +508,7 @@ final class AgentBridge {
                 agent.launchProfile = entry.launchProfile
             }
         }
-        updateAggregate()
-        persistState()
+        updateWaitingCount()
     }
 
     // MARK: - Agent Creation (sync with config)
@@ -391,82 +519,410 @@ final class AgentBridge {
         launchProfile: AgentLaunchProfile = AgentLaunchProfile(),
         config: AgentConfig,
         project: String,
-        task: String
+        after previous: UUID? = nil,
+        nameSource: AgentRecord.NameSource = .person
     ) -> AgentEntry? {
         guard let entry = config.addAgent(
             project: project,
-            task: task,
             name: name,
             provider: provider,
-            launchProfile: launchProfile)
+            launchProfile: launchProfile,
+            after: previous)
         else { return nil }
-        agents[entry.id] = AgentInstance(entry: entry, runtime: neverLaunchedRuntime(provider))
+        var record = AgentRecord()
+        record.changedAt = scheduler.now
+        record.nameSource = nameSource
+        addAgent(entry, createdAt: scheduler.now, record: record)
         return entry
     }
 
     // MARK: - Activation
 
-    /// Starts or reveals an agent. This never declares the agent viewed:
-    /// viewing requires a presented live surface and a key workspace window,
-    /// which only the workspace owner can judge.
+    /// Starts an agent, or shows its terminal when it has one. It never
+    /// selects the agent, which is the workspace owner's to do, nor declares
+    /// it viewed: viewing requires a presented live surface and a key
+    /// workspace window, which only the workspace owner can judge.
     func activateAgent(id: UUID, host: any AgentSurfaceHost, project: AgentProject) {
-        activate(id: id, host: host, project: project, discardingSession: false)
+        activate(id: id, host: host, project: project, discardingSession: false, first: true)
+    }
+
+    /// Continues, once, the agents whose turn the last quit or crash cut
+    /// off (flows.md 6.14): `selected` first when it is one, then the rest in
+    /// the configuration's order, waiting their turn to start
+    /// (`startConcurrency`). Each CLI resumes its conversation with
+    /// `continueMessage` as its first prompt, marked as the app's, after a
+    /// dim `continueNotice`; a fourth continuation in a row is not sent, and
+    /// the agent stops with a problem. Agents in any other state start
+    /// nothing until opened. None of this changes the selection.
+    /// Returns how many it continues: the status line's "Restarted.
+    /// Resuming N interrupted agents."
+    @discardableResult
+    func continueCutOffAgents(selected: UUID?, host: any AgentSurfaceHost) -> Int {
+        surfaceHost = host
+        // One the person opened, or a scene started, is on its way.
+        restorePending.removeAll { id in
+            guard let agent = agents[id] else { return true }
+            return agent.surfaceState == .opening || agent.isRunning
+        }
+        let count = restorePending.count
+        if let selected, let at = restorePending.firstIndex(of: selected) {
+            restorePending.insert(restorePending.remove(at: at), at: 0)
+        }
+        let pending = restorePending
+        restorePending = []
+        for id in pending { continueCutOff(id, host: host) }
+        return count
+    }
+
+    /// Asks for the launch that continues one cut-off agent.
+    private func continueCutOff(_ id: UUID, host: any AgentSurfaceHost) {
+        guard let agent = agents[id], let project = project(id) else { return }
+        // The fourth in a row is not sent: the reducer stops it instead.
+        guard agent.record.mayContinue else {
+            apply(.continuedByApp(prompt: Self.continueMessage), to: agent)
+            return
+        }
+        // Cut off before its CLI had a conversation (Codex binds one at its
+        // first turn's end): it starts again from its first instruction,
+        // labelled as the app's.
+        let prompt: String
+        if agent.sessionID != nil || hasSavedSession(agent) {
+            prompt = Self.continueMessage
+        } else if let instruction = agent.record.firstInstruction {
+            prompt = Self.restartLabel + " " + instruction
+        } else {
+            apply(.notContinued, to: agent)
+            return
+        }
+        // Recorded when its terminal runs the launch, not before.
+        pendingContinuations[id] = prompt
+        activate(
+            id: id, host: host, project: project, discardingSession: false,
+            firstPrompt: prompt, notice: Self.continueNotice)
+        if agent.surfaceState != .opening && !agent.isRunning { pendingContinuations[id] = nil }
+    }
+
+    /// The agent has a saved conversation to resume. One that cannot be read
+    /// counts: its launch says so (`AgentProviderIssue.unreadableSession`).
+    private func hasSavedSession(_ agent: AgentInstance) -> Bool {
+        do {
+            return try AgentSessionStore.session(for: agent.id, provider: agent.provider, directory: statusDir) != nil
+        } catch {
+            return true
+        }
+    }
+
+    /// Its launch is under way: its CLI does not yet read its input, and has
+    /// not failed or gone.
+    private func isComingUp(_ id: UUID) -> Bool {
+        guard let agent = agents[id], agent.record.problem == nil, !agent.runtime.inputReady else { return false }
+        return agent.surfaceState == .opening || agent.isRunning
+    }
+
+    /// How long a settled agent's CLI keeps running, so that undo is
+    /// instant (flows.md 6.7); the harness shortens it for its tests.
+    var settledCLIEnd: TimeInterval = 60
+    private var settleTimers: [UUID: any AgentTimer] = [:]
+
+    /// Settles the agent (flows.md 6.7): off home and the list, findable,
+    /// its record and session kept. A working agent only when
+    /// `includingWorking` (its project removed). Its CLI ends
+    /// `settledCLIEnd` later; a working turn it cuts is recorded as
+    /// interrupted, and a working settled agent is never continued after a
+    /// restart. False when it was not settled.
+    @discardableResult
+    func settle(id: UUID, includingWorking: Bool = false) -> Bool {
+        guard let agent = agents[id], agent.record.settledAt == nil else { return false }
+        apply(.settled(includingWorking: includingWorking), to: agent)
+        guard agent.record.settledAt != nil else { return false }
+        stopEverythingPending(for: agent)
+        settleTimers.removeValue(forKey: id)?.invalidate()
+        // Settled, it is silent: no limit reset fires for it (ruling 2).
+        limitTimers.removeValue(forKey: id)?.invalidate()
+        settleTimers[id] = scheduler.timer(interval: settledCLIEnd, repeats: false) { [weak self] in
+            self?.endSettledCLI(id)
+        }
+        updateWaitingCount()
+        return true
+    }
+
+    /// Settled means stopped (last review ruling 5): its launch waiting its
+    /// turn is taken off the queue, a launch being prepared ends unopened
+    /// (`finishSurfaceLaunch` asks `reaches`), and no restart continuation,
+    /// interrupt-and-send or send held for its start is left to reach it.
+    private func stopEverythingPending(for agent: AgentInstance) {
+        let id = agent.id
+        pendingContinuations[id] = nil
+        restorePending.removeAll { $0 == id }
+        pendingInterrupts.removeValue(forKey: id)?.resume(.notReady)
+        for send in pendingSends.removeValue(forKey: id) ?? [] { send.done(.notReady) }
+        let queued = waitingLaunches.contains { $0.id == id }
+        waitingLaunches.removeAll { $0.id == id }
+        // A launch that has not opened a terminal yet is called off.
+        if agent.processState == .launching, agent.surfaceState == .opening, queued || starting.contains(id) {
+            agent.waitsToStart = false
+            starting.remove(id)
+            apply(.surfaceDied(generation: agent.launchGeneration, byUser: true), to: agent)
+            startWaitingLaunches()
+        }
+    }
+
+    /// Whether anything may launch, send to or type into the agent: never
+    /// a settled one, nor one whose record could not be read, which would
+    /// run on defaults (last review rulings 2 and 5). Every launch and send
+    /// path asks this one question.
+    func reaches(_ id: UUID) -> Bool {
+        guard let agent = agents[id] else { return false }
+        return agent.record.settledAt == nil && !unreadableRecords.contains(id)
+    }
+
+    /// Brings a settled agent back, in the state it had (undo, or opening it
+    /// from find): its CLI runs on if it still does, else it resumes when
+    /// next opened.
+    func unsettle(id: UUID) {
+        guard let agent = agents[id], agent.record.settledAt != nil else { return }
+        settleTimers.removeValue(forKey: id)?.invalidate()
+        apply(.unsettled, to: agent)
+        scheduleLimitReset(for: agent)
+        updateWaitingCount()
+    }
+
+    private func endSettledCLI(_ id: UUID) {
+        settleTimers[id] = nil
+        guard let agent = agents[id], agent.record.settledAt != nil,
+              agent.isRunning || agent.surfaceState == .opening
+        else { return }
+        destroySurface(id: id, byUser: true)
+    }
+
+    /// Mark as unread (flows.md 6.12): a finished agent becomes finished,
+    /// unread, and waits on the person. False for any other state.
+    @discardableResult
+    func markUnread(id: UUID) -> Bool {
+        guard let agent = agents[id], agent.record.state == .finished, agent.record.settledAt == nil else { return false }
+        apply(.markedUnread, to: agent)
+        updateWaitingCount()
+        return agent.record.unread
     }
 
     /// Starts a new session for an agent whose saved session is missing or
     /// unreadable: the launch forgets the saved session before it reads it.
     func startFresh(id: UUID, host: any AgentSurfaceHost, project: AgentProject) {
         guard agents[id]?.canOnlyStartFresh == true else { return }
-        activate(id: id, host: host, project: project, discardingSession: true)
+        activate(id: id, host: host, project: project, discardingSession: true, first: true)
     }
 
+    // MARK: - Starting and typing
+
+    /// Starts a new agent in `project` with `task` as its first instruction,
+    /// which its CLI takes on the command line (probes.md, P5): it exists at
+    /// once, working, named from the task until its CLI titles it
+    /// (flows.md 6.3, 4.3).
+    func startAgent(
+        task: String,
+        provider: AgentProviderID,
+        launchProfile: AgentLaunchProfile,
+        config: AgentConfig,
+        project: AgentProject,
+        host: any AgentSurfaceHost
+    ) -> AgentEntry? {
+        let name = AgentNames.free(
+            AgentRecord.name(fromInstruction: task), among: project.agents)
+        var record = AgentRecord()
+        record.state = .working
+        record.changedAt = scheduler.now
+        record.nameSource = .firstInstruction
+        guard let entry = config.addAgent(
+            project: project.name, name: name, provider: provider, launchProfile: launchProfile)
+        else { return nil }
+        addAgent(entry, createdAt: scheduler.now, record: record)
+        activate(id: entry.id, host: host, project: project, discardingSession: false, firstPrompt: task)
+        if let agent = agents[entry.id] { apply(.sent(prompt: task, by: .person), to: agent) }
+        return entry
+    }
+
+    /// Cancels a start within `cancelLimit` of it, while the agent still
+    /// works: the agent goes, its CLI with it. False when it is too late.
+    @discardableResult
+    func cancelStart(id: UUID, config: AgentConfig) -> Bool {
+        guard let agent = agents[id], let created = agent.createdAt,
+              scheduler.now.timeIntervalSince(created) <= Self.cancelLimit,
+              agent.record.state == .working
+        else { return false }
+        return deleteAgents([id], config: config)
+    }
+
+    /// The one way text goes into an agent's CLI: pasted into its input line
+    /// and submitted with Return at once (probes.md, P2), then recorded as
+    /// sent by `sender`. Nothing is typed before the CLI reads its input, on
+    /// top of text the person left in that line, or into a question or menu.
+    /// `interrupting` stops a working agent first: Escape, its `idle`, and the
+    /// line cleared of what the interrupt gave back (Claude: Escape twice;
+    /// Codex: Control-C), then the text starts a turn at once. A working CLI
+    /// sent to without interrupting queues the text itself.
+    func send(
+        _ text: String,
+        to id: UUID,
+        by sender: AgentRecord.Prompt.Sender,
+        interrupting: Bool = false,
+        done: @escaping @MainActor (AgentSendResult) -> Void
+    ) {
+        guard let agent = agents[id], reaches(id) else { return done(.notReady) }
+        // No CLI runs: it starts with the text as its first prompt, as a new
+        // agent does (flows.md 6.5 step 3).
+        if let host = surfaceHost, !host.hasSurface(id: id) || agent.processState == .exited, agent.surfaceState != .opening,
+           !agent.isRunning, agent.record.state != .asks, !agent.canOnlyStartFresh, let project = project(id) {
+            activate(id: id, host: host, project: project, discardingSession: false, firstPrompt: text)
+            guard agent.processState == .launching else { return done(.notReady) }
+            apply(.sent(prompt: text, by: sender), to: agent)
+            return done(.sent)
+        }
+        // Its CLI starts: the text waits for its input to be ready.
+        if agent.processState == .launching, agent.record.state != .asks, agent.record.problem == nil {
+            pendingSends[id, default: []].append(AgentPendingSend(text: text, sender: sender, interrupting: interrupting, done: done))
+            return
+        }
+        if let refusal = refusal(id, checkingLine: !interrupting) { return done(refusal) }
+        guard let host = surfaceHost else { return done(.notReady) }
+        // What the person typed into its input is never interrupted away:
+        // the agent is skipped before any Escape reaches it (S7 review
+        // ruling 1). A line that cannot be read while it works is read
+        // again after the interrupt.
+        if interrupting, case .holdsText = inputLine(of: agent, in: host) { return done(.holdsText) }
+        guard interrupting, agent.record.state == .working else {
+            if let refusal = refusal(id, checkingLine: true) { return done(refusal) }
+            submit(text, to: agent, in: host, by: sender)
+            return done(.sent)
+        }
+        // One wait per agent: a later interrupting send takes its place.
+        pendingInterrupts.removeValue(forKey: id)?.resume(.replaced)
+        host.input(.escape, to: id)
+        let token = UUID()
+        pendingInterrupts[id] = (token, { [weak self] ended in
+            guard let self else { return }
+            if let ended { return done(ended) }
+            // The given-back prompt is drawn with the `idle`.
+            self.scheduler.after(0.1) { [weak self] in
+                guard let self else { return }
+                if let refusal = self.refusal(id, checkingLine: false) { return done(refusal) }
+                self.clearInputLine(of: id, in: host) { [weak self] in
+                    guard let self else { return }
+                    // Everything a plain send checks, again: nothing is pasted
+                    // on a guess.
+                    if let refusal = self.refusal(id, checkingLine: true) { return done(refusal) }
+                    guard let agent = self.agents[id] else { return done(.notReady) }
+                    self.submit(text, to: agent, in: host, by: sender)
+                    done(.sent)
+                }
+            }
+        })
+        scheduler.after(2) { [weak self] in
+            guard let self, self.pendingInterrupts[id]?.token == token else { return }
+            self.pendingInterrupts.removeValue(forKey: id)?.resume(.notReady)
+        }
+    }
+
+    private func deliverPendingSends(of id: UUID) {
+        guard let pending = pendingSends.removeValue(forKey: id) else { return }
+        for send in pending {
+            if agents[id]?.runtime.inputReady == true {
+                self.send(send.text, to: id, by: send.sender, interrupting: send.interrupting, done: send.done)
+            } else {
+                send.done(agents[id]?.record.state == .asks ? .menu : .notReady)
+            }
+        }
+    }
+
+    /// Why text cannot go into the agent's CLI now, or nil when it can: its
+    /// CLI runs, has a terminal, reads its input, asks nothing, and (with
+    /// `checkingLine`) shows an empty input line. A line that cannot be read
+    /// is a menu or a dialog.
+    private func refusal(_ id: UUID, checkingLine: Bool) -> AgentSendResult? {
+        guard let agent = agents[id], reaches(id), let host = surfaceHost, host.hasSurface(id: id),
+              agent.runtime.inputReady, agent.processState == .running
+        else { return .notReady }
+        guard agent.record.state != .asks else { return .menu }
+        guard checkingLine else { return nil }
+        switch inputLine(of: agent, in: host) {
+        case .none: return .menu
+        case .holdsText: return .holdsText
+        case .empty: return nil
+        }
+    }
+
+    /// An interrupting send waiting for its agent's `idle` ends, refused, when
+    /// the agent asks or its CLI goes.
+    private func endInterruptWait(of agent: AgentInstance) {
+        guard pendingInterrupts[agent.id] != nil else { return }
+        if agent.record.state == .asks {
+            pendingInterrupts.removeValue(forKey: agent.id)?.resume(.menu)
+        } else if agent.processState == .exited || !agent.isRunning {
+            pendingInterrupts.removeValue(forKey: agent.id)?.resume(.notReady)
+        }
+    }
+
+    private func submit(_ text: String, to agent: AgentInstance, in host: any AgentSurfaceHost, by sender: AgentRecord.Prompt.Sender) {
+        host.input(.paste(text), to: agent.id)
+        host.input(.enter, to: agent.id)
+        apply(.sent(prompt: text, by: sender), to: agent)
+    }
+
+    private func inputLine(of agent: AgentInstance, in host: any AgentSurfaceHost) -> AgentInputLine {
+        AgentInputLine.read(host.screen(id: agent.id) ?? "", provider: agent.provider, prompted: agent.runtime.prompted)
+    }
+
+    /// Empties the input line after an interrupt gave a prompt back: Claude
+    /// clears on Escape twice within half a second (never on an empty line,
+    /// where it rewinds), Codex on Control-C (probes.md, P2).
+    private func clearInputLine(of id: UUID, in host: any AgentSurfaceHost, done: @escaping @MainActor () -> Void) {
+        guard let agent = agents[id], case .holdsText = inputLine(of: agent, in: host) else { return done() }
+        switch agent.provider {
+        case .claudeCode:
+            host.input(.escape, to: id)
+            scheduler.after(0.1) { host.input(.escape, to: id) }
+        case .codex:
+            host.input(.interrupt, to: id)
+        }
+        scheduler.after(0.3) { done() }
+    }
+
+    /// Asks for the agent's launch, or shows its terminal when it has one.
+    /// The launch waits its turn (`startWaitingLaunches`); `first` puts it
+    /// ahead of those waiting: the person opened it.
     private func activate(
         id: UUID,
         host: any AgentSurfaceHost,
         project: AgentProject,
-        discardingSession: Bool
+        discardingSession: Bool,
+        firstPrompt: String? = nil,
+        notice: String? = nil,
+        first: Bool = false
     ) {
-        guard let agent = agents[id] else { return }
+        guard let agent = agents[id], reaches(id) else { return }
         surfaceHost = host
 
         // A missing or unreadable saved session can only be replaced, which
         // Start Fresh does. Any other activation, from the list, the palette
-        // or a notification, shows the agent, with its terminal if it has
-        // one, where the header offers Start Fresh; it launches nothing.
+        // or a notification, shows the agent's terminal if it has one; the
+        // terminal area offers Start fresh. It launches nothing.
         if agent.canOnlyStartFresh && !discardingSession {
             if host.hasSurface(id: id) {
                 _ = host.showOrSwitch(
-                    projectName: project.name,
                     agent: agent,
                     focusTerminal: true,
                     select: true,
                     createConfig: { nil })
-            } else {
-                host.selectAgent(agent, projectName: project.name)
             }
             return
         }
 
+        // The provider has exited and its terminal is about to close.
         if host.hasSurface(id: id), agent.processState == .exited {
-            // Restart replaces the terminal that the provider's exit left on
-            // the login shell, and with it whatever the user started there,
-            // so a running process is asked about first, as for Cmd-W.
-            if host.closeNeedsConfirmation(id: id) {
-                host.confirmClose(id: id) { [weak self, weak host] in
-                    guard let self, let host, let agent = self.agents[id],
-                          agent.processState == .exited
-                    else { return }
-                    self.discardSurfaceForRestart(id: id, host: host, provider: agent.provider)
-                    self.activate(id: id, host: host, project: project, discardingSession: discardingSession)
-                }
-                return
-            }
             discardSurfaceForRestart(id: id, host: host, provider: agent.provider)
         }
 
         if host.hasSurface(id: id) {
             _ = host.showOrSwitch(
-                projectName: project.name,
                 agent: agent,
                 focusTerminal: true,
                 select: true,
@@ -474,24 +930,55 @@ final class AgentBridge {
             return
         }
 
-        // A second activation while background preparation is in flight only
-        // reveals the existing launch state; it never creates a competing run.
+        // A second activation while its launch waits or is prepared never
+        // creates a competing run; the person's open moves it to the front.
         if agent.surfaceState == .opening, agent.processState == .launching {
-            host.selectAgent(agent, projectName: project.name)
+            if first, let at = waitingLaunches.firstIndex(where: { $0.id == id }), at > 0 {
+                waitingLaunches.insert(waitingLaunches.remove(at: at), at: 0)
+            }
             return
         }
 
         let generation = UUID()
-        apply(.launchRequested(generation: generation), to: agent)
-        if providerHealth[agent.provider]?.authentication == .signedOut {
-            apply(
-                .interactionRequired(
-                    generation: generation,
-                    interaction: .authentication),
-                to: agent)
-        }
+        apply(.launchRequested(generation: generation, prompted: firstPrompt != nil), to: agent)
+        keysPassThrough.remove(id)
         agent.lastActivityReport = nil
-        host.selectAgent(agent, projectName: project.name)
+        // Nothing waits or starts: a new burst, which lists the running
+        // conversations afresh.
+        starting = starting.filter(isComingUp)
+        if waitingLaunches.isEmpty, starting.isEmpty { liveSessions = AgentLiveSessions() }
+        let launch = AgentPendingLaunch(
+            id: id, generation: generation, project: project,
+            discardingSession: discardingSession, firstPrompt: firstPrompt, notice: notice)
+        if first { waitingLaunches.insert(launch, at: 0) } else { waitingLaunches.append(launch) }
+        agent.waitsToStart = true
+        startWaitingLaunches()
+    }
+
+    /// Begins the launches waiting their turn, first come first, while
+    /// fewer than `startConcurrency` CLIs are starting; each one that comes
+    /// up, fails or goes lets the next begin (`apply`).
+    private func startWaitingLaunches() {
+        guard !isTerminating else { return }
+        starting = starting.filter(isComingUp)
+        while starting.count < Self.startConcurrency, !waitingLaunches.isEmpty {
+            let launch = waitingLaunches.removeFirst()
+            guard let agent = agents[launch.id], reaches(launch.id), agent.launchGeneration == launch.generation,
+                  agent.processState == .launching, agent.surfaceState == .opening
+            else { continue }
+            agent.waitsToStart = false
+            starting.insert(launch.id)
+            begin(launch, of: agent)
+        }
+    }
+
+    /// Prepares the launch off the main thread and opens its terminal. Its
+    /// time to start (`startLimit`) runs from here, not from the wait.
+    private func begin(_ launch: AgentPendingLaunch, of agent: AgentInstance) {
+        let id = launch.id
+        let generation = launch.generation
+        let project = launch.project
+        let discardingSession = launch.discardingSession
         scheduleLaunchTimeout(agentID: id, generation: generation)
 
         let provider = agent.provider
@@ -499,7 +986,6 @@ final class AgentBridge {
         let profile = agent.launchProfile
         let path = effectiveEnvironmentPath
         let workingDirectory = project.workingDirectory
-        let projectName = project.name
         let launchCoordinator = AgentLaunchCoordinator(
             providers: providers,
             root: root)
@@ -512,7 +998,10 @@ final class AgentBridge {
             environmentPath: path,
             launchGeneration: generation,
             session: nil,
-            pendingFork: nil)
+            namedByUser: !agent.autoNamed,
+            firstPrompt: launch.firstPrompt,
+            notice: launch.notice,
+            liveSessions: liveSessions)
         let io = self.io
         let diagnose = self.diagnose
         io.async { [weak self] in
@@ -529,34 +1018,76 @@ final class AgentBridge {
                 self.finishSurfaceLaunch(
                     outcome,
                     agentID: id,
-                    projectName: projectName,
                     workingDirectory: workingDirectory,
                     host: host)
             }
         }
     }
 
-    /// A launch whose source of turn activity has not reported within 10 s
-    /// shows that its status is unavailable, as while Claude waits at its
-    /// folder trust dialog, before which it reports nothing.
+    /// Whether keys typed into the agent's terminal are held now: its CLI
+    /// starts, has not reported yet, asks nothing, and has not shown a screen
+    /// past `holdLimit`.
+    func holdsKeys(for id: UUID) -> Bool {
+        guard let agent = agents[id], !keysPassThrough.contains(id) else { return false }
+        return agent.processState == .launching
+            && (agent.surfaceState == .opening || agent.surfaceState == .open)
+            && agent.record.state != .asks
+    }
+
+    /// The keys held for the agent's start are not sent, and from now on
+    /// keys reach its terminal.
+    private func endHold(_ id: UUID) {
+        holdTimers.removeValue(forKey: id)?.invalidate()
+        guard keysPassThrough.insert(id).inserted else { return }
+        onKeysNotHeld?(id)
+    }
+
+    /// A starting CLI that has drawn a screen but sent no report within
+    /// `holdLimit` shows something only the person can answer.
+    private func scheduleHoldLimit(agentID: UUID, generation: UUID) {
+        holdTimers.removeValue(forKey: agentID)?.invalidate()
+        let opened = scheduler.now
+        holdTimers[agentID] = scheduler.timer(interval: 0.5, repeats: true) { [weak self] in
+            guard let self else { return }
+            guard let agent = self.agents[agentID], agent.launchGeneration == generation,
+                  agent.processState == .launching
+            else {
+                self.holdTimers.removeValue(forKey: agentID)?.invalidate()
+                return
+            }
+            guard self.scheduler.now.timeIntervalSince(opened) >= Self.holdLimit - 0.01,
+                  let screen = self.surfaceHost?.screen(id: agentID),
+                  !screen.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return }
+            self.diagnose(.info, "\(agentID) shows a screen with no report after \(Self.holdLimit) s: keys go to it")
+            self.endHold(agentID)
+        }
+    }
+
+    /// A launch whose CLI has not come to read its input within
+    /// `startLimit` stops with a problem. One stuck with nothing on its
+    /// screen for the person has its terminal closed, so the agent is truly
+    /// stopped and typing or opening it starts it afresh (final review
+    /// ruling 11); one showing a screen the person must answer (a trust or
+    /// update dialog, keys passing to it) keeps it, and its first report
+    /// still makes it ready.
     private func scheduleLaunchTimeout(agentID: UUID, generation: UUID) {
         launchTimers[agentID]?.invalidate()
-        launchTimers[agentID] = scheduler.timer(interval: 10, repeats: false) { [weak self] in
-            guard let self, let agent = self.agents[agentID],
-                  agent.processState == .launching,
-                  agent.launchGeneration == generation,
-                  agent.lastActivityReport == nil
-            else { return }
-            self.apply(.launchTimedOut(generation: generation), to: agent)
+        launchTimers[agentID] = scheduler.timer(interval: Self.startLimit, repeats: false) { [weak self] in
+            guard let self, let agent = self.agents[agentID], agent.launchGeneration == generation else { return }
             self.launchTimers.removeValue(forKey: agentID)
-            self.updateAggregate()
+            let showsSomething = self.keysPassThrough.contains(agentID)
+            let effects = self.apply(.launchTimedOut(generation: generation), to: agent)
+            guard effects.contains(.failed) else { return self.perform(effects, of: agent) }
+            self.endHold(agentID)
+            self.perform(effects, of: agent)
+            if !showsSomething { self.destroySurface(id: agentID, byUser: true) }
         }
     }
 
     private func finishSurfaceLaunch(
         _ outcome: AgentSurfaceLaunchOutcome,
         agentID: UUID,
-        projectName: String,
         workingDirectory: String?,
         host: any AgentSurfaceHost
     ) {
@@ -583,15 +1114,17 @@ final class AgentBridge {
                   agent.provider == provider
             else { return }
             var sessionUnreadable = false
-            if case .unreadableSession = issue { sessionUnreadable = true }
-            failLaunch(
-                agent,
-                generation: generation,
-                message: issue.localizedDescription,
-                sessionUnreadable: sessionUnreadable)
+            var problem = AgentRecord.Problem(kind: .launch, text: issue.localizedDescription)
+            switch issue {
+            case .unreadableSession: sessionUnreadable = true
+            case .executableMissing: problem = AgentRecord.Problem(kind: .notInstalled)
+            case .sessionOpenElsewhere: problem = AgentRecord.Problem(kind: .openElsewhere)
+            case .integrationFailed, .launchPreparationFailed: break
+            }
+            failLaunch(agent, generation: generation, problem: problem, sessionUnreadable: sessionUnreadable)
 
         case .success(let launch):
-            guard agent.launchGeneration == launch.generation,
+            guard reaches(agentID), agent.launchGeneration == launch.generation,
                   agent.provider == launch.provider,
                   agent.processState == .launching
             else {
@@ -601,10 +1134,13 @@ final class AgentBridge {
             agent.metadataAvailability = launch.integrationIssue.map {
                 .unavailable($0)
             } ?? launch.metadataAvailability
+            // No view says why the header will show no model or context.
+            if case .unavailable(let reason) = agent.metadataAvailability {
+                diagnose(.default, "\(agentID) reports no model or context: \(reason)")
+            }
             removeLaunchScript(for: agentID)
             launchScripts[agentID] = launch.scriptURL
             let isNew = host.presentPreparedSurface(
-                projectName: projectName,
                 agent: agent
             ) {
                 var surfaceConfig = Ghostty.SurfaceConfiguration()
@@ -619,7 +1155,7 @@ final class AgentBridge {
                 failLaunch(
                     agent,
                     generation: launch.generation,
-                    message: "The agent's terminal could not be opened.")
+                    problem: AgentRecord.Problem(kind: .launch, text: "Its terminal could not be opened."))
                 return
             }
             apply(
@@ -628,6 +1164,11 @@ final class AgentBridge {
                     resumedSessionID: launch.resumedSessionID,
                     newSessionID: launch.newSessionID),
                 to: agent)
+            // The continuation is on its CLI's command line: sent now.
+            if let prompt = pendingContinuations.removeValue(forKey: agentID) {
+                apply(.continuedByApp(prompt: prompt), to: agent)
+            }
+            scheduleHoldLimit(agentID: agentID, generation: launch.generation)
             onSurfacePresentationChanged?(agentID)
         }
     }
@@ -635,92 +1176,75 @@ final class AgentBridge {
     private func failLaunch(
         _ agent: AgentInstance,
         generation: UUID,
-        message: String,
+        problem: AgentRecord.Problem,
         sessionUnreadable: Bool = false
     ) {
         apply(
-            .launchFailed(generation: generation, message: message, sessionUnreadable: sessionUnreadable),
+            .launchFailed(generation: generation, problem: problem, sessionUnreadable: sessionUnreadable),
             to: agent)
         launchTimers[agent.id]?.invalidate()
         launchTimers.removeValue(forKey: agent.id)
-        updateAggregate()
-    }
-
-    // MARK: - Fork
-
-    func forkAgent(sourceId: UUID, config: AgentConfig, project: String, task: String) -> AgentEntry? {
-        guard let source = agents[sourceId] else { return nil }
-
-        // Read source session — abort if none
-        let sourceSession: AgentSessionBinding
-        do {
-            guard let session = try AgentSessionStore.session(
-                for: sourceId,
-                provider: source.provider,
-                directory: statusDir)
-            else {
-                diagnose(.error, "fork: no session for source \(sourceId)")
-                return nil
-            }
-            sourceSession = session
-        } catch {
-            reportStorageError(
-                AgentSessionStore.sessionURL(sourceId, statusDir),
-                "\(source.name) could not be forked: \(error.localizedDescription)")
-            return nil
-        }
-
-        // Generate unique name
-        let existingNames = Set(config.allAgentEntries.map(\.name))
-        var forkName = "\(source.name)-fork"
-        var suffix = 2
-        while existingNames.contains(forkName) {
-            forkName = "\(source.name)-fork-\(suffix)"
-            suffix += 1
-        }
-
-        // Create agent (sync config + bridge)
-        guard let entry = createAgent(
-            name: forkName,
-            provider: source.provider,
-            launchProfile: source.launchProfile,
-            config: config,
-            project: project,
-            task: task)
-        else {
-            return nil
-        }
-
-        let pending = AgentPendingFork(
-            provider: source.provider,
-            sourceSessionID: sourceSession.sessionID)
-        do {
-            try AgentSessionStore.write(pending, for: entry.id, directory: statusDir)
-        } catch {
-            deleteAgent(id: entry.id, config: config)
-            reportStorageError(
-                AgentSessionStore.forkURL(entry.id, statusDir),
-                "\(source.name) could not be forked: \(error.localizedDescription)")
-            return nil
-        }
-
-        return entry
+        pendingContinuations[agent.id] = nil
+        endHold(agent.id)
+        updateWaitingCount()
     }
 
     // MARK: - Rename
 
-    /// Changes the agent's label at once, as `AgentConfig.renameAgent` stores
-    /// it. Nothing reaches a running terminal: Claude takes the label as
-    /// `--name` at its next launch, and Codex sessions are not renamed.
+    /// The name the user gave the agent, as `AgentConfig.renameAgent` stores
+    /// it: shown at once, and never replaced by a conversation's title.
+    /// Nothing reaches a running terminal: Claude takes the name as `--name`
+    /// at its next launch, which names its conversation for good, and Codex
+    /// sessions are not renamed.
     func renameAgent(id: UUID, newName: String) {
-        agents[id]?.name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let agent = agents[id] else { return }
+        agent.name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        apply(.named(by: .person), to: agent)
+    }
+
+    /// Shows a name Clawddy gave the agent, as `AgentConfig` stores it: a
+    /// conversation's title (`source` `.cli`), or a name a move numbered,
+    /// whose source does not change.
+    func showName(id: UUID, name: String, source: AgentRecord.NameSource? = nil) {
+        guard let agent = agents[id] else { return }
+        agent.name = name
+        if let source { apply(.named(by: source), to: agent) }
+    }
+
+    /// The title the program in an agent's terminal set, for the launch the
+    /// terminal was made for. While the agent's name is Clawddy's and its
+    /// provider runs, a title that names the conversation
+    /// (`AgentConversationTitle`) is offered as its name.
+    func surfaceTitle(id: UUID, generation: UUID?, title: String) {
+        if let agent = agents[id], agent.launchGeneration == generation { noteCodexTitle(title, of: agent) }
+        guard let agent = agents[id], agent.autoNamed, agent.isRunning,
+              agent.launchGeneration == generation,
+              let name = AgentConversationTitle.name(from: title, folder: project(id)?.workingDirectory),
+              name != agent.name
+        else { return }
+        onConversationTitle?(id, name)
+    }
+
+    /// Codex spins a braille frame before its title while it works
+    /// (probes.md, P2: `⠙ <folder>`); the spinning stopping during a turn is
+    /// the turn's end, as a bare `done` would say. Its notify, when it comes,
+    /// then ends nothing (`turnsEndedWithoutNotify`).
+    private func noteCodexTitle(_ title: String, of agent: AgentInstance) {
+        guard agent.provider == .codex, let generation = agent.launchGeneration else { return }
+        let spinning = title.unicodeScalars.first.map { (0x2800...0x28FF).contains($0.value) } ?? false
+        defer { agent.titleSpins = spinning }
+        guard agent.titleSpins, !spinning, case .active = agent.turnState else { return }
+        let done = Ghostty.Action.ProgramStatus(
+            state: .done, kind: nil, progress: nil, id: nil, app: "codex", title: nil, message: nil)
+        perform(apply(.provider(
+            generation: generation, provider: .codex, eventID: UUID().uuidString,
+            event: .programStatus(done), isViewed: isViewed(agent.id)), to: agent), of: agent)
     }
 
     private func acknowledgeCompletion(id: UUID) {
-        guard let agent = agents[id], agent.isUnread else { return }
-        apply(.completionViewed, to: agent)
-        updateAggregate()
-        persistState()
+        guard let agent = agents[id], agent.record.unread else { return }
+        apply(.opened, to: agent)
+        updateWaitingCount()
     }
 
     /// The workspace owner reports that the user now looks at the agent:
@@ -732,51 +1256,32 @@ final class AgentBridge {
 
     // MARK: - Deletion
 
+    /// Deletes agents for good, in one save of the configuration: a start
+    /// cancelled within its time. Nothing else deletes an agent; settling
+    /// and removing a project keep everything.
     @discardableResult
-    func deleteAgent(id: UUID, config: AgentConfig) -> Bool {
-        guard config.removeAgent(id: id) else { return false }
-        removeAgent(id: id)
-        updateAggregate()
-        persistState()
-        return true
-    }
-
-    /// Deletes the project and every agent in it.
-    @discardableResult
-    func deleteProject(id: UUID, config: AgentConfig) -> Bool {
-        guard let project = config.projects.first(where: { $0.id == id }) else { return false }
-        let ids = project.tasks.flatMap(\.agents).map(\.id)
-        guard config.removeProject(id: id) else { return false }
-        removeAgents(ids)
-        return true
-    }
-
-    /// Deletes the task and every agent in it.
-    @discardableResult
-    func deleteTask(projectID: UUID, taskID: UUID, config: AgentConfig) -> Bool {
-        guard let task = config.projects.first(where: { $0.id == projectID })?
-            .tasks.first(where: { $0.id == taskID })
-        else { return false }
-        let ids = task.agents.map(\.id)
-        guard config.removeTask(projectId: projectID, taskId: taskID) else { return false }
+    func deleteAgents(_ ids: [UUID], config: AgentConfig) -> Bool {
+        guard config.removeAgents(Set(ids)) else { return false }
         removeAgents(ids)
         return true
     }
 
     private func removeAgents(_ ids: [UUID]) {
         for id in ids { removeAgent(id: id) }
-        updateAggregate()
-        persistState()
+        updateWaitingCount()
     }
 
-    /// The one way an agent goes, whatever removed it: Delete, deleting its
-    /// project or task, an edit of `agents.json` that drops it, or a provider
+    /// The one way an agent goes, whatever removed it: a cancelled start, an
+    /// edit of `agents.json` that drops it, or a provider
     /// change that replaces its runtime. Its terminal closes, its runtime is
     /// dropped, and every `<agent id>.*` file in the status folder and its
     /// runtime folder are deleted. No other agent's file is touched.
     private func removeAgent(id: UUID) {
-        destroySurface(id: id)
+        settleTimers.removeValue(forKey: id)?.invalidate()
+        destroySurface(id: id, byUser: true)
+        limitTimers.removeValue(forKey: id)?.invalidate()
         agents.removeValue(forKey: id)
+        waiting.remove(id)
         let kept = storageErrors.filter { !$0.key.lastPathComponent.hasPrefix(id.uuidString) }
         if kept.count != storageErrors.count { storageErrors = kept }
         let root = root
@@ -800,6 +1305,13 @@ final class AgentBridge {
     func ingest(_ observation: AgentStatusObservation) {
         guard !isTerminating else { return }
         let id = observation.agentID
+        // A record in its event file: the agent was active.
+        if case .hook = observation.event { agents[id]?.lastActive = scheduler.now }
+        // What its CLI reported was lost: say so, whatever the launch.
+        if case .unreadableRecord = observation.event, let agent = agents[id] {
+            perform(apply(.reportFailed, to: agent), of: agent)
+            return
+        }
         guard let agent = agents[id],
               let generation = agent.launchGeneration,
               observation.generation == generation
@@ -808,6 +1320,7 @@ final class AgentBridge {
             case .hook: diagnose(.debug, "ignored stale launch event for \(id)")
             case .surfaceClosed: diagnose(.debug, "ignored close of an earlier surface of \(id)")
             case .programStatus: diagnose(.debug, "ignored program status for \(id)")
+            case .unreadableRecord: break
             }
             return
         }
@@ -818,6 +1331,8 @@ final class AgentBridge {
             closeSurface(of: agent, generation: generation, processAlive: processAlive)
         case .programStatus(let report):
             ingestProgramStatus(report, agent: agent, generation: generation)
+        case .unreadableRecord:
+            break
         }
     }
 
@@ -832,11 +1347,6 @@ final class AgentBridge {
         // Every launch script reports its provider's exit, Codex's included.
         if report.id == AgentLaunchCoordinator.exitReportID {
             ingestExitReport(report, agent: agent, generation: generation)
-            return
-        }
-        guard providers[agent.provider].turnActivity == .surface else {
-            // Codex reports too, but its turn activity comes from its hooks.
-            diagnose(.debug, "ignored program status for \(id): the \(agent.provider.displayName) table names its hooks")
             return
         }
         // Only the program's own record counts. A record beneath it never
@@ -854,6 +1364,7 @@ final class AgentBridge {
                 isViewed: isViewed(id)),
             to: agent)
         perform(effects, of: agent)
+        if report.state == .idle { pendingInterrupts.removeValue(forKey: id)?.resume(nil) }
     }
 
     /// The report the launch script prints once the provider has returned:
@@ -904,6 +1415,12 @@ final class AgentBridge {
                 "ignored unsupported event schema for \(id): \(record.schemaVersion ?? -1)")
             return
         }
+        // The hook script could not record an event of the agent's.
+        if record.hookEventName == AgentHookRuntime.failureRecordName {
+            diagnose(.error, "hook of \(id) failed: \(record.text ?? "")")
+            perform(apply(.reportFailed, to: agent), of: agent)
+            return
+        }
         let entry = providers[record.provider]
         guard let meaning = entry.meaning(ofRecord: record.hookEventName) else {
             diagnose(
@@ -917,7 +1434,13 @@ final class AgentBridge {
         // the record.
         let eventID = record.eventID ?? UUID().uuidString
         var effects: [AgentRuntimeEffect] = []
-        for (index, domainEvent) in domainEvents.enumerated() {
+        for (index, meant) in domainEvents.enumerated() {
+            // A usage limit's reset time is in the status line, not the hook.
+            var domainEvent = meant
+            if case .turnFailed(var failure) = meant, failure.isUsageLimit {
+                failure.resetsAt = agent.metadata?.limitResetsAt
+                domainEvent = .turnFailed(failure)
+            }
             effects += apply(
                 .provider(
                     generation: generation,
@@ -928,13 +1451,7 @@ final class AgentBridge {
                 to: agent)
             applyMetadata(record, domainEvent: domainEvent, provider: record.provider, to: agent)
         }
-        if entry.turnActivity == .hookJournal {
-            agent.lastActivityReport = scheduler.now
-        }
         perform(effects, of: agent)
-        if entry.turnActivity == .hookJournal {
-            scheduleTelemetryDelay(for: agent)
-        }
     }
 
     /// What provider facts set in motion once applied: the launch's cleanup
@@ -943,27 +1460,14 @@ final class AgentBridge {
     private func perform(_ effects: [AgentRuntimeEffect], of agent: AgentInstance) {
         let id = agent.id
         if effects.contains(.becameAlive) {
-            launchTimers[id]?.invalidate()
-            launchTimers.removeValue(forKey: id)
+            // The start limit runs until its input is ready (`.inputReady`).
             removeLaunchScript(for: id)
             let provider = agent.provider
             integrationIssues[provider] = nil
-            // A launch that created its session keeps its fork marker until
-            // the session is saved.
-            if !agent.runtime.sessionUnsaved {
-                clearForkMarker(of: agent)
-            }
-            if provider == .codex {
-                let root = root
-                store(root.codexHookReviewMarker, "The Codex hook review notice could not be cleared") {
-                    try CodexProvider.clearHookReviewRequired(root: root)
-                }
-            }
             refreshProviderHealth(provider)
         }
         if effects.contains(.sessionSaved), let sessionID = agent.sessionID {
             saveBinding(sessionID, of: agent)
-            clearForkMarker(of: agent)
         }
         if effects.contains(.sessionMissing), let missing = agent.missingSessionID {
             let statusDir = statusDir
@@ -982,41 +1486,53 @@ final class AgentBridge {
             launchTimers.removeValue(forKey: id)
             removeLaunchScript(for: id)
         }
-        updateCompactingTimer(for: agent)
         updateTurnStartTimer(for: agent)
 
         if effects.contains(.completed) {
-            alert(agent, .finished, title: "Agent completed", body: "\(agent.name) is ready for review")
+            alert(agent, .finished)
         }
         if effects.contains(.waitingForUser) {
-            alert(agent, .permission, title: "Agent is waiting for you", body: "\(agent.name) needs your response")
+            alert(agent, .permission)
         }
         if effects.contains(.failed) {
-            alert(agent, .error, title: "Agent needs attention", body: "\(agent.name) encountered an error")
+            alert(agent, .error)
         }
-
-        if effects.contains(.unreadChanged) {
-            persistState()
+        if effects.contains(.inputSettling), let generation = agent.launchGeneration {
+            scheduler.after(3) { [weak self, weak agent] in
+                guard let self, let agent else { return }
+                self.perform(self.apply(.inputSettled(generation: generation), to: agent), of: agent)
+            }
         }
-        updateAggregate()
+        if effects.contains(.inputReady) {
+            launchTimers.removeValue(forKey: id)?.invalidate()
+        }
+        // Keys held for its start: delivered at its first report, unless it
+        // asks something, which the person must answer themselves.
+        if effects.contains(.becameAlive) || effects.contains(.waitingForUser) {
+            holdTimers.removeValue(forKey: id)?.invalidate()
+            if agent.record.state == .asks {
+                endHold(id)
+            } else if effects.contains(.becameAlive) {
+                onKeysReady?(id)
+            }
+        }
+        scheduleLimitReset(for: agent)
+        updateWaitingCount()
     }
 
-    /// An active turn that goes `telemetryDelay` without a fact from the
-    /// source of its turn activity shows as delayed until the next one. Each
-    /// fact starts the wait again.
-    private func scheduleTelemetryDelay(for agent: AgentInstance) {
-        telemetryDelayTimers.removeValue(forKey: agent.id)?.invalidate()
-        guard case .active = agent.turnState,
-              let generation = agent.launchGeneration
-        else { return }
-        telemetryDelayTimers[agent.id] = scheduler.timer(
-            interval: Self.telemetryDelay,
+    /// A paused agent whose usage limit gave a reset time is reset then, or
+    /// at once when that time has passed.
+    private func scheduleLimitReset(for agent: AgentInstance) {
+        let id = agent.id
+        limitTimers.removeValue(forKey: id)?.invalidate()
+        guard agent.record.settledAt == nil, agent.record.state == .paused, let resetsAt = agent.record.limit?.resetsAt else { return }
+        limitTimers[id] = scheduler.timer(
+            interval: max(0, resetsAt.timeIntervalSince(scheduler.now)),
             repeats: false
         ) { [weak self, weak agent] in
             guard let self, let agent else { return }
-            self.telemetryDelayTimers.removeValue(forKey: agent.id)
-            self.apply(.telemetryDelayed(generation: generation), to: agent)
-            self.updateAggregate()
+            self.limitTimers.removeValue(forKey: id)
+            self.perform(self.apply(.usageLimitReset, to: agent), of: agent)
         }
     }
 
@@ -1037,16 +1553,12 @@ final class AgentBridge {
     ) {
         // The binding follows the provider: every `SessionStart` of the
         // current launch, whatever its source (startup, resume, clear,
-        // compact, fork), names the session the next launch resumes. After
+        // compact), names the session the next launch resumes. After
         // `/clear` that is the new session, not the one launched. A session
         // the launch created is not on disk before its first turn, which
         // saves the binding then (`perform`).
         let sessionID: String?
-        switch domainEvent {
-        case .sessionStarted(let started, _, _): sessionID = started
-        case .sessionBound(let bound): sessionID = bound
-        default: sessionID = nil
-        }
+        if case .sessionBound(let bound) = domainEvent { sessionID = bound } else { sessionID = nil }
         if let sessionID, !agent.runtime.sessionUnsaved {
             saveBinding(sessionID, of: agent)
         }
@@ -1088,17 +1600,6 @@ final class AgentBridge {
         }
     }
 
-    private func clearForkMarker(of agent: AgentInstance) {
-        let id = agent.id
-        let statusDir = statusDir
-        store(
-            AgentSessionStore.forkURL(id, statusDir),
-            "The fork marker of \(agent.name) could not be removed, so its next launch forks again"
-        ) {
-            try AgentSessionStore.clearPendingFork(for: id, directory: statusDir)
-        }
-    }
-
     private func runtimeVersion(for provider: AgentProviderID) -> String? {
         guard case .ready(_, let version) = providerHealth[provider]?.installation else {
             return nil
@@ -1106,43 +1607,43 @@ final class AgentBridge {
         return version
     }
 
+    /// Applies `event` to the agent; an agent being brought back that is
+    /// now up, or has failed, lets the next one start.
     @discardableResult
     private func apply(
         _ event: AgentRuntimeEvent,
         to agent: AgentInstance
     ) -> [AgentRuntimeEffect] {
-        agent.apply(event, at: scheduler.now)
-    }
-
-    /// A compaction the event file reports ends after 30 s at most, since its
-    /// `PostCompact` may never come. A program that reports its own activity
-    /// ends it with its next report.
-    private func updateCompactingTimer(for agent: AgentInstance) {
-        compactingTimers[agent.id]?.invalidate()
-        compactingTimers.removeValue(forKey: agent.id)
-        guard agent.activityState == .compacting,
-              providers[agent.provider].turnActivity == .hookJournal,
-              let generation = agent.launchGeneration
-        else { return }
-
-        compactingTimers[agent.id] = scheduler.timer(
-            interval: Self.compactingTimeout,
-            repeats: false
-        ) { [weak self, weak agent] in
-            guard let self, let agent,
-                  agent.activityState == .compacting,
-                  agent.launchGeneration == generation
-            else { return }
-            self.apply(.compactionExpired(generation: generation), to: agent)
-            self.compactingTimers.removeValue(forKey: agent.id)
-            self.updateAggregate()
-            self.persistState()
+        let before = agent.record.durable
+        let effects = agent.apply(event, at: scheduler.now)
+        if agent.record.durable != before { saveRecord(of: agent) }
+        // A launch that waited its turn and was stopped meanwhile waits no
+        // more.
+        if agent.waitsToStart, agent.processState != .launching {
+            agent.waitsToStart = false
+            waitingLaunches.removeAll { $0.id == agent.id }
         }
+        endInterruptWait(of: agent)
+        if starting.contains(agent.id), !isComingUp(agent.id) {
+            scheduler.after(0) { [weak self] in self?.startWaitingLaunches() }
+        }
+        // Sends waiting for its start: delivered once it reads its input,
+        // given up when the start fails or it asks.
+        if pendingSends[agent.id] != nil, agent.runtime.inputReady || !isComingUp(agent.id) || agent.record.state == .asks {
+            let id = agent.id
+            scheduler.after(0) { [weak self] in self?.deliverPendingSends(of: id) }
+        }
+        return effects
     }
 
     /// While a `working` report may still prove a blip, its turn waits; it
-    /// starts when the report has stood for `turnStartDelay`, counted from
-    /// the first `working`. Waiting this way, rather than starting the turn
+    /// starts when the report has stood for the provider's
+    /// `turnStartDelay`, counted from the first `working`. A prompt starts it
+    /// at once (its `UserPromptSubmit` record), as do a request and a
+    /// failure, which can come 106 ms after its `working`. Commands that
+    /// submit no prompt report a `working` too: `/clear`, `/exit` and the
+    /// `/exit` confirmation for 14 to 63 ms, `/resume` with its argument for
+    /// 280 to 434 ms (`cli-facts.md`, flows capture), and Codex at start-up. Waiting this way, rather than starting the turn
     /// and undoing it, leaves the screen, the unread mark and the
     /// notifications untouched by a blip.
     private func updateTurnStartTimer(for agent: AgentInstance) {
@@ -1153,7 +1654,7 @@ final class AgentBridge {
         }
         guard turnStartTimers[id] == nil else { return }
         turnStartTimers[id] = scheduler.timer(
-            interval: Self.turnStartDelay,
+            interval: providers[agent.provider].turnStartDelay,
             repeats: false
         ) { [weak self, weak agent] in
             guard let self, let agent else { return }
@@ -1164,26 +1665,46 @@ final class AgentBridge {
 
     // MARK: - Aggregate
 
-    var aggregateState: AggregateState {
-        let states = agents.values.map(\.displayState)
-        let activeCount = states.filter(\.isActive).count
-        let needsAttention = states.contains(where: \.needsAttention)
-        if needsAttention { return .attention }
-        if activeCount > 0 { return .running(activeCount) }
-        return .idle
+    /// When the agent was last active (`AgentInstance.lastActive`).
+    func lastActive(of id: UUID) -> Date? {
+        agents[id]?.lastActive
     }
+
+    /// When the agent's event file last changed; nil when it has never run,
+    /// and when the file's date cannot be read, which is logged.
+    private func lastRecordDate(of id: UUID) -> Date? {
+        do {
+            return try AgentHookJournalSource.lastRecordDate(of: id, in: statusDir)
+        } catch {
+            diagnose(.error, "last activity of \(id) unreadable: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Agents waiting for the user: the count of the menu bar item and the
+    /// dock badge. Only a waiting agent asks for attention: Done is unread,
+    /// not a request, and a problem has its own mark.
+    var waitingAgentCount: Int { waiting.count }
 
     /// Agents whose provider is starting or running in a terminal; quitting
     /// stops them.
     var runningAgentCount: Int {
-        agents.values.filter { $0.surfaceState == .open && $0.processState != .exited }.count
+        agents.values.filter(\.isRunning).count
     }
 
-    private func updateAggregate() {
-        let current = aggregateState
-        if lastAggregateState != current {
-            lastAggregateState = current
-            onAggregateStateChanged?(current)
+    /// What quitting does to the running agents, in one sentence; nil when
+    /// none runs (`AgentQuitConfirmation`).
+    var quitNotice: String? {
+        let working = agents.values.filter { $0.record.state == .working && $0.record.settledAt == nil }
+        let waiting = agents.values.filter { $0.waitsToStart && $0.record.state != .working && $0.record.settledAt == nil }
+        return AgentQuitConfirmation.notice(working: working.count, waitingToStart: waiting.count)
+    }
+
+    private func updateWaitingCount() {
+        let current = waitingAgentCount
+        if lastWaitingCount != current {
+            lastWaitingCount = current
+            onWaitingCountChanged?(current)
         }
     }
 
@@ -1211,20 +1732,25 @@ final class AgentBridge {
             event: .programStatus(report)))
     }
 
+    /// A close the user asks for, while the provider runs, is confirmed and
+    /// stops the agent on purpose. Any other close takes a terminal whose
+    /// provider has exited, or that died under it.
     private func closeSurface(of agent: AgentInstance, generation: UUID, processAlive: Bool) {
         // A surface closes once, however many reports of it arrive.
         guard agent.surfaceState == .open else { return }
         let id = agent.id
         if processAlive, let surfaceHost {
             surfaceHost.confirmClose(id: id) { [weak self] in
-                // Agreed, so nothing is left to ask; the launch may have
-                // changed while the question was open.
-                self?.surfaceClosed(id: id, generation: generation, processAlive: false)
+                // The launch may have changed while the question was open.
+                guard let self, let agent = self.agents[id],
+                      agent.launchGeneration == generation, agent.surfaceState == .open
+                else { return }
+                self.destroySurface(id: id, byUser: true)
             }
             return
         }
         diagnose(.info, "surface death: \(id)")
-        destroySurface(id: id)
+        destroySurface(id: id, byUser: false)
     }
 
     private func discardSurfaceForRestart(
@@ -1252,25 +1778,26 @@ final class AgentBridge {
 
     private func invalidateTimers(for id: UUID) {
         launchTimers.removeValue(forKey: id)?.invalidate()
-        compactingTimers.removeValue(forKey: id)?.invalidate()
+        holdTimers.removeValue(forKey: id)?.invalidate()
         turnStartTimers.removeValue(forKey: id)?.invalidate()
-        telemetryDelayTimers.removeValue(forKey: id)?.invalidate()
     }
 
-    private func destroySurface(id: UUID) {
+    /// The agent's terminal goes, `byUser` when the user stops it. A
+    /// provider that went without the user stops with a problem; it is not
+    /// started again by itself (`docs/clawddy-design/flows.md` 2.2).
+    private func destroySurface(id: UUID, byUser: Bool) {
         invalidateTimers(for: id)
         removeLaunchScript(for: id)
         if let provider = agents[id]?.provider {
             removeProviderFiles(of: id, provider: provider)
         }
-
         if let agent = agents[id] {
-            apply(.surfaceDied(generation: agent.launchGeneration), to: agent)
+            let effects = apply(.surfaceDied(generation: agent.launchGeneration, byUser: byUser), to: agent)
+            if effects.contains(.failed) { alert(agent, .error) }
         }
         onSurfaceDeath?(id)
         onSurfacePresentationChanged?(id)
-        updateAggregate()
-        persistState()
+        updateWaitingCount()
     }
 
     // MARK: - Notifications
@@ -1291,30 +1818,40 @@ final class AgentBridge {
     /// the agent is not viewed, posts it as a user notification. The
     /// announcement is made for a viewed agent too, whose terminal holds a
     /// VoiceOver user's focus while the status changes elsewhere on screen.
-    private func alert(_ agent: AgentInstance, _ kind: NotificationKind, title: String, body: String) {
-        notifier.announce(body)
-        guard !isViewed(agent.id) else { return }
-        postNotification(agentId: agent.id, kind: kind, title: title, body: body)
+    /// Both say the agent's name, then its sentence (words.md,
+    /// "Notification"); a finished turn whose message has not arrived yet
+    /// says "Finished".
+    private func alert(_ agent: AgentInstance, _ kind: NotificationKind) {
+        // A settled agent is silent (ruling 2); its record still takes what
+        // its CLI reports, so undo shows the truth.
+        guard agent.record.settledAt == nil else { return }
+        let said = agent.sentence
+        let sentence = kind == .finished && said.isAppWritten ? AgentShownState.finished.name : said.text
+        notifier.announce("\(agent.name), \(sentence)")
+        guard !isViewed(agent.id), notifies() else { return }
+        postNotification(agentId: agent.id, kind: kind, title: agent.name, body: sentence)
     }
 
+    /// The agent's name as its title, its project as its subtitle and its
+    /// headline as its body. A completion is passive; a wait is
+    /// time-sensitive. None makes a sound (the brief: no sounds).
     private func postNotification(agentId: UUID, kind: NotificationKind, title: String, body: String) {
         let content = UNMutableNotificationContent()
         content.title = title
+        content.subtitle = project(agentId)?.name ?? ""
         content.body = body
         content.threadIdentifier = agentId.uuidString
         content.userInfo = ["clawddy_agent_id": agentId.uuidString]
 
         switch kind {
         case .finished:
-            content.sound = nil
             content.interruptionLevel = .passive
         case .permission:
-            content.sound = .default
             content.interruptionLevel = .timeSensitive
         case .error:
-            content.sound = .default
             content.interruptionLevel = .active
         }
+        content.sound = nil
 
         let request = UNNotificationRequest(
             identifier: "clawddy.\(agentId.uuidString).\(kind.identifier)",
@@ -1333,38 +1870,54 @@ final class AgentBridge {
 
     // MARK: - Persistence
 
-    /// The unread marks the last run saved; none when there is no file. A
-    /// file that cannot be read is reported and kept as evidence: the run
-    /// starts with no unread marks and saves none over it.
-    private func loadPersistedState() -> PersistedState {
-        let stateFile = root.stateFile
-        do {
-            return try JSONDecoder().decode(PersistedState.self, from: Data(contentsOf: stateFile))
-        } catch CocoaError.fileReadNoSuchFile {
-            return PersistedState()
-        } catch {
-            stateFileUnreadable = true
-            reportStorageError(
-                stateFile,
-                "Unread marks could not be restored from \(stateFile.path) (\(AgentConfig.describeLoadFailure(error))). The file is kept as it is, and no unread marks are saved until it is removed.")
-            return PersistedState()
+    /// Keeps `text`, the agent's terminal as its CLI ended or the app quit,
+    /// in `<agent id>.screen.txt` (0600), and on the agent.
+    func saveScreen(_ text: String, of id: UUID) {
+        guard let agent = agents[id], !text.isEmpty, agent.savedScreen != text else { return }
+        agent.savedScreen = text
+        // Written on the IO queue, never waited for: quitting waits for the
+        // queue (`shutdown`), so the last screens are on disk before exit.
+        storeScreen(text, of: agent)
+    }
+
+    private func storeScreen(_ text: String, of agent: AgentInstance) {
+        let file = AgentTail.savedScreenURL(agent.id, statusDir)
+        store(file, "The last screen of \(agent.name) could not be saved", saving: true) {
+            try AgentConfig.atomicWrite(Data(text.utf8), to: file)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         }
     }
 
-    func persistState(synchronously: Bool = false) {
-        let stateFile = root.stateFile
-        if stateFileUnreadable {
-            guard !FileManager.default.fileExists(atPath: stateFile.path) else { return }
-            stateFileUnreadable = false
+    /// The screen saved for the agent, or none.
+    private func loadScreen(of entry: AgentEntry) -> String {
+        let file = AgentTail.savedScreenURL(entry.id, statusDir)
+        do {
+            return try String(contentsOf: file, encoding: .utf8)
+        } catch CocoaError.fileReadNoSuchFile {
+            return ""
+        } catch {
+            reportStorageError(file, "The last screen of \(entry.name) could not be read: \(error.localizedDescription)")
+            return ""
         }
-        var state = PersistedState()
-        state.unreadCompletions = Dictionary(uniqueKeysWithValues: agents.values.compactMap {
-            guard let completion = $0.unreadCompletion else { return nil }
-            return ($0.id, completion)
-        })
-        let saved = state
-        store(stateFile, "Unread marks could not be saved", synchronously: synchronously) {
-            try AgentConfig.atomicWrite(JSONEncoder().encode(saved), to: stateFile)
+    }
+
+    /// Writes the agent's record as one atomic replacement, never over a
+    /// record that could not be read. What is durable, and when
+    /// (`AgentRecord.durable`): every change a restart, find or the tiles
+    /// depend on (state, prompts, messages, the question, the problem,
+    /// settling, unread, names) is queued for writing in the turn of the
+    /// change, in order, and none is ever merged away; the IO queue writes
+    /// it within milliseconds, and `shutdown` waits for it. The step a
+    /// working CLI reports, which changes many times a second and which a
+    /// restart clears anyway, is never written. The main thread never waits
+    /// for the disk.
+    private func saveRecord(of agent: AgentInstance) {
+        let id = agent.id
+        guard agents[id] === agent, !unreadableRecords.contains(id) else { return }
+        let record = agent.record.durable
+        let statusDir = statusDir
+        store(AgentRecord.url(id, statusDir), "The record of \(agent.name) could not be saved", saving: true) {
+            try AgentRecord.save(record, for: id, in: statusDir)
         }
     }
 
@@ -1374,6 +1927,7 @@ final class AgentBridge {
     private func store(
         _ file: URL,
         _ failure: String,
+        saving: Bool = false,
         synchronously: Bool = false,
         _ work: @escaping @Sendable () throws -> Void
     ) {
@@ -1388,7 +1942,11 @@ final class AgentBridge {
                 diagnose(.error, message ?? failure)
             }
             io.onMainActor { [weak self, message] in
-                guard let self, self.storageErrors[file] != message else { return }
+                guard let self else { return }
+                if saving, (message != nil) != self.unsavedFiles.contains(file) {
+                    if message != nil { self.unsavedFiles.insert(file) } else { self.unsavedFiles.remove(file) }
+                }
+                guard self.storageErrors[file] != message else { return }
                 self.storageErrors[file] = message
             }
         }

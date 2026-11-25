@@ -126,8 +126,9 @@ class AppDelegate: NSObject,
     let ghostty: Ghostty.App
 
     /// Clawddy agent management. Everything Clawddy owns lives in the
-    /// controller; this file only forwards app lifecycle to it.
-    @MainActor private(set) lazy var clawddy = ClawddyController(ghostty: ghostty)
+    /// controller; this file only forwards app lifecycle to it. A test of the
+    /// real window puts its own controller here, over a temporary root.
+    @MainActor lazy var clawddy = ClawddyController(ghostty: ghostty)
 
     /// The global undo manager for app-level state such as window restoration.
     lazy var undoManager = ExpiringUndoManager()
@@ -208,9 +209,6 @@ class AppDelegate: NSObject,
     // MARK: - NSApplicationDelegate
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        // Before window restoration creates any terminal.
-        AgentTerminalEnvironmentPolicy.removeInheritedAgentIdentity()
-
         #if DEBUG
         if
             let suite = UserDefaults.ghosttySuite,
@@ -364,10 +362,14 @@ class AppDelegate: NSObject,
         setupSignals()
 
         // Clawddy agent management
-        clawddy.onAggregateStateChanged = { [weak self] in self?.syncDockBadge() }
+        // The agents' count needs no notification permission (flows.md 2.1).
+        clawddy.onWaitingCountChanged = { [weak self] in self?.setDockBadge() }
         clawddy.setup()
 
-        switch Ghostty.launchSource {
+        // A test host or a harness stays in the background however it was
+        // launched: a test host started outside Launch Services reads as a
+        // CLI launch and would otherwise take the front.
+        switch ClawddyController.keepsAppInBackground ? .app : Ghostty.launchSource {
         case .app:
             // Don't have to do anything.
             break
@@ -409,15 +411,12 @@ class AppDelegate: NSObject,
             // is possible to have other windows in a few scenarios:
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
-            if TerminalController.all.isEmpty && derivedConfig.initialWindow {
-                if clawddy.hasAgents {
-                    clawddy.showWorkspace()
-                } else {
-                    undoManager.disableUndoRegistration()
-                    _ = TerminalController.newWindow(ghostty)
-                    undoManager.enableUndoRegistration()
-                }
-            }
+            // Clawddy: the app's window is the agent window, which shows the
+            // first-launch screen while there is no project (flows.md 6.1),
+            // whatever Ghostty's `initial-window` says and whatever was
+            // opened with the app (last review ruling 4). Ghostty's terminal
+            // windows open only by Ghostty's own commands.
+            clawddy.showWorkspace()
         }
     }
 
@@ -427,9 +426,6 @@ class AppDelegate: NSObject,
 
     @MainActor
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let windows = NSApplication.shared.windows
-        if windows.isEmpty { return .terminateNow }
-
         // If we've already accepted to install an update, then we don't need to
         // confirm quit. The user is already expecting the update to happen.
         if updateController.shouldTerminateWithoutWarning {
@@ -454,10 +450,35 @@ class AppDelegate: NSObject,
             }
         }
 
-        // If our app says we don't need to confirm, we can exit now.
-        if !ghostty.needsConfirmQuit { return .terminateNow }
+        switch quitQuestion {
+        case .clawddy(let notice): return AgentQuitConfirmation.ask(notice: notice)
+        case .ghostty: return terminate()
+        case .none: return .terminateNow
+        }
+    }
 
-        return terminate(runningAgents: clawddy.bridge.runningAgentCount)
+    /// What quitting asks (last review ruling 3).
+    enum QuitQuestion: Equatable {
+        /// Clawddy's own question, with what happens to the agents.
+        case clawddy(String)
+        /// Ghostty's, for its terminal windows with running processes.
+        case ghostty
+        case none
+    }
+
+    /// The harness quits without asking: it is how a run is stopped.
+    var quitsWithoutAsking = false
+
+    /// Clawddy's question whenever an agent works or waits its turn to
+    /// start, whatever Ghostty's confirmation settings say and with or
+    /// without a window open; asked once, and then not Ghostty's as well.
+    /// Otherwise Ghostty's own rule.
+    @MainActor
+    var quitQuestion: QuitQuestion {
+        if quitsWithoutAsking { return .none }
+        if let notice = clawddy.bridge.quitNotice { return .clawddy(notice) }
+        if NSApplication.shared.windows.isEmpty || !ghostty.needsConfirmQuit { return .none }
+        return .ghostty
     }
 
     @MainActor
@@ -482,11 +503,6 @@ class AppDelegate: NSObject,
         // the dock icon.
         guard TerminalController.all.isEmpty else { return true }
 
-        // If the application isn't active yet then we don't want to process
-        // this because we're not ready. This happens sometimes in Xcode runs
-        // but I haven't seen it happen in releases. I'm unsure why.
-        guard applicationHasBecomeActive else { return true }
-
         if #available(macOS 27.0, *) {
             // It seems that with macOS 27, running an App Intent against an already
             // running app (from Shortcuts, Spotlight, the `shortcuts` CLI, ...)
@@ -510,8 +526,11 @@ class AppDelegate: NSObject,
             }
         }
 
-        // No visible windows, open a new one.
-        _ = TerminalController.newWindow(ghostty)
+        // Clawddy: no visible window, so the agent window comes back exactly
+        // as it was (flows.md 6.13), the same window launch shows. Showing it
+        // twice is harmless, so a reopen before the first activation needs
+        // no guard.
+        clawddy.showWorkspace()
         return false
     }
 
@@ -530,6 +549,15 @@ class AppDelegate: NSObject,
 
         var isDirectory = ObjCBool(true)
         guard FileManager.default.fileExists(atPath: filename, isDirectory: &isDirectory) else { return false }
+
+        // Clawddy: a folder opened with the app (`open -a`, a drop on the
+        // Dock icon) is added as a project in the agent window, as a folder
+        // dropped on the window is (last review ruling 4). A file keeps
+        // Ghostty's behaviour.
+        if isDirectory.boolValue {
+            clawddy.addProjects([URL(fileURLWithPath: filename, isDirectory: true)])
+            return true
+        }
 
         // Set to true if confirmation is required before starting up the
         // new terminal.
@@ -777,55 +805,7 @@ class AppDelegate: NSObject,
 
     @objc private func terminalWindowHasBell(_ notification: Notification) {
         guard notification.object is BaseTerminalController else { return }
-        syncDockBadge()
-    }
-
-    private func requestBadgeAuthorizationAndSet(_ center: UNUserNotificationCenter) {
-        center.requestAuthorization(options: [.badge]) { granted, error in
-            if let error = error {
-                Self.logger.warning("Error requesting badge authorization: \(error, privacy: .public)")
-                return
-            }
-
-            // Permission granted, set the badge
-            if granted {
-                DispatchQueue.main.async {
-                    self.setDockBadge()
-                }
-            }
-        }
-    }
-
-    private func syncDockBadge() {
-        let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { settings in
-            switch settings.authorizationStatus {
-            case .authorized:
-                // If we're authorized and allow badges, then set the badge.
-                if settings.badgeSetting == .enabled {
-                    DispatchQueue.main.async {
-                        self.setDockBadge()
-                    }
-                } else if settings.badgeSetting == .notSupported {
-                    // If badge setting is not supported, we may be in a sandbox that doesn't allow it.
-                    // We can still attempt to set the badge and hope for the best, but we should also
-                    // request authorization just in case it is a permissions issue.
-                    self.requestBadgeAuthorizationAndSet(center)
-                }
-
-            case .notDetermined:
-                // Not determined yet, request authorization for badge
-                self.requestBadgeAuthorizationAndSet(center)
-
-            case .denied, .provisional, .ephemeral:
-                // In these known non-authorized states, do not attempt to set the badge.
-                break
-
-            @unknown default:
-                // Handle future unknown states by doing nothing.
-                break
-            }
-        }
+        DispatchQueue.main.async { self.setDockBadge() }
     }
 
     @objc private func ghosttyNewWindow(_ notification: Notification) {
@@ -904,21 +884,27 @@ class AppDelegate: NSObject,
         }
         TerminalController.all.forEach { $0.relabelTabs() }
 
-        // Update our badge since config can change what we show.
-        syncDockBadge()
+        // Update our badge since config can change what we show. The badge
+        // asks the system for no permission (Clawddy, flows.md 2.1): where
+        // macOS shows none without one, there is none until the person
+        // turns notifications on.
+        DispatchQueue.main.async { self.setDockBadge() }
 
         // Config could change window appearance. We wrap this in an async queue because when
         // this is called as part of application launch it can deadlock with an internal
         // AppKit mutex on the appearance.
         DispatchQueue.main.async { self.syncAppearance(config: config) }
 
-        // Decide whether to hide/unhide app from dock and app switcher
-        switch config.macosHidden {
-        case .never:
-            NSApp.setActivationPolicy(.regular)
+        // Decide whether to hide/unhide app from dock and app switcher, unless
+        // Clawddy keeps the app in the background (a test host or a harness).
+        if !ClawddyController.keepsAppInBackground {
+            switch config.macosHidden {
+            case .never:
+                NSApp.setActivationPolicy(.regular)
 
-        case .always:
-            NSApp.setActivationPolicy(.accessory)
+            case .always:
+                NSApp.setActivationPolicy(.accessory)
+            }
         }
 
         // If we have configuration errors, we need to show them.
@@ -1467,22 +1453,18 @@ extension AppDelegate: NSMenuItemValidation {
 extension AppDelegate {
     /// Clawddy: agent terminals are not terminal windows, so the agents still
     /// running are named in the same confirmation, or ask on their own.
-    func terminate(runningAgents: Int) -> NSApplication.TerminateReply {
+    func terminate() -> NSApplication.TerminateReply {
         let controllersNeedConfirmation = NSApplication.shared.windows
             .compactMap { $0.windowController as? BaseTerminalController }
             .filter { !$0.windowCanBeClosedWithoutConfirmation() }
 
-        guard !controllersNeedConfirmation.isEmpty else {
-            return AgentQuitConfirmation.ask(runningAgents: runningAgents)
-        }
+        guard !controllersNeedConfirmation.isEmpty else { return .terminateNow }
 
         if controllersNeedConfirmation.count == 1 {
             Task {
                 let response = await controllersNeedConfirmation[0].confirmCloseAsync(
-                    messageText: "Quit Ghostty?",
-                    informativeText: AgentQuitConfirmation.informativeText(
-                        "The terminal still has a running process. If you quit, the process will be killed.",
-                        runningAgents: runningAgents),
+                    messageText: AgentQuitConfirmation.title,
+                    informativeText: "The terminal still has a running process. If you quit, the process will be killed.",
                     confirmButtonTitle: "Terminate",
                 )
 
@@ -1498,9 +1480,6 @@ extension AppDelegate {
             let alert = NSAlert.reviewWindowsAlert(
                 messageText: "You have \(controllersNeedConfirmation.count) windows with running processes. Do you want to review these windows before quitting?"
             )
-            alert.informativeText = AgentQuitConfirmation.informativeText(
-                alert.informativeText,
-                runningAgents: runningAgents)
 
             switch alert.runModal() {
             case .alertFirstButtonReturn:
@@ -1518,7 +1497,7 @@ extension AppDelegate {
         Task {
             for controller in controllers {
                 let response = await controller.confirmCloseAsync(
-                    messageText: "Quit Ghostty?",
+                    messageText: AgentQuitConfirmation.title,
                     informativeText: "The terminal still has a running process. If you quit, the process will be killed.",
                     confirmButtonTitle: "Terminate",
                 )

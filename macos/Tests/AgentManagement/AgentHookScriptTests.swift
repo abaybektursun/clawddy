@@ -31,7 +31,7 @@ struct AgentHookScriptTests {
             provider: .codex,
             generation: generation,
             payload: Data("""
-                {"session_id":"session-123","hook_event_name":"SessionStart","turn_id":"turn-1","model":"gpt-5.4","permission_mode":"default"}
+                {"session_id":"session-123","hook_event_name":"agent-turn-complete","turn-id":"turn-1","model":"gpt-5.4","permission_mode":"default"}
                 """.utf8))
 
         #expect(result == 0)
@@ -43,7 +43,7 @@ struct AgentHookScriptTests {
         #expect(events[0].provider == .codex)
         #expect(events[0].eventID?.isEmpty == false)
         #expect(events[0].launchGeneration == generation)
-        #expect(events[0].hookEventName == "SessionStart")
+        #expect(events[0].hookEventName == "agent-turn-complete")
         #expect(events[0].sessionID == "session-123")
         #expect(events[0].turnID == "turn-1")
         #expect(events[0].model == "gpt-5.4")
@@ -51,7 +51,7 @@ struct AgentHookScriptTests {
     }
 
     /// Claude names the turn `prompt_id` and never sends `turn_id`, so a
-    /// Claude record's turn is the prompt; Codex's stays `turn_id`. A field
+    /// Claude record's turn is the prompt; Codex's notify names it `turn-id`. A field
     /// the payload lacks is recorded as "", which decodes as absent. A
     /// compaction's record carries its trigger.
     @Test func claudeRecordsCarryPromptIDAsTurnIdentity() throws {
@@ -80,7 +80,7 @@ struct AgentHookScriptTests {
         #expect(compaction.trigger == "manual")
         #expect(try record(
             .codex,
-            #"{"session_id":"s","hook_event_name":"Stop","prompt_id":"prompt-1","turn_id":"turn-1"}"#).turnID
+            #"{"session_id":"s","hook_event_name":"agent-turn-complete","prompt_id":"prompt-1","turn-id":"turn-1"}"#).turnID
             == "turn-1")
     }
 
@@ -130,7 +130,7 @@ struct AgentHookScriptTests {
 
         let result = try fixture.run(
             agentID: agentID,
-            provider: .codex,
+            provider: .claudeCode,
             generation: UUID(),
             home: accountHome,
             payload: Data(
@@ -143,36 +143,34 @@ struct AgentHookScriptTests {
             .appendingPathComponent(".config/ghostty-agents/status").path))
     }
 
-    /// The real installed script, run without its status folder argument,
-    /// writes nothing, although a Codex agent's identity is in its
-    /// environment. It exits 0, not 1: older builds left argument-less global
-    /// entries in Claude's settings, and those must not report a hook error in
-    /// every Claude session on the machine. Codex's global command line, the
-    /// script and the status folder, records only when the identity's
-    /// `CLAWDDY_STATUS_DIR` names that same folder.
-    @Test func hookScriptRequiresStatusDirArgument() throws {
+    /// The real installed script, run without its identity, writes nothing,
+    /// even with `CLAWDDY_*` names in its environment, which older builds
+    /// gave Codex's terminal. It exits 0, not 1: older builds left
+    /// argument-less global entries, and entries with only the status
+    /// folder, in the providers' settings, and those must not report a hook
+    /// error in every session on the machine.
+    @Test func hookScriptRequiresItsIdentityAsArguments() throws {
         let fm = FileManager.default
         let sandbox = fm.temporaryDirectory
             .appendingPathComponent("clawddy-hook-argument-tests-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: sandbox) }
         let root = AgentDataRoot(url: sandbox.appendingPathComponent("root", isDirectory: true))
         let home = sandbox.appendingPathComponent("home", isDirectory: true)
-        let environmentStatus = sandbox.appendingPathComponent("environment-status", isDirectory: true)
         let payload = sandbox.appendingPathComponent("payload.json")
         try fm.createDirectory(at: home, withIntermediateDirectories: true)
         try AgentHookRuntime.install(root: root)
         try Data(#"{"session_id":"session-1","hook_event_name":"SessionStart"}"#.utf8).write(to: payload)
-        let agentID = UUID()
 
-        func run(_ executable: String, _ arguments: [String], statusVariable: URL) throws -> Int32 {
+        let before = try filesUnder(sandbox)
+        for arguments in [[], [root.statusDir.path]] {
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: executable)
+            process.executableURL = AgentHookRuntime.scriptURL(root: root)
             process.arguments = arguments
             process.environment = [
-                "CLAWDDY_AGENT_ID": agentID.uuidString,
+                "CLAWDDY_AGENT_ID": UUID().uuidString,
                 "CLAWDDY_AGENT_PROVIDER": AgentProviderID.codex.rawValue,
                 "CLAWDDY_AGENT_GENERATION": UUID().uuidString,
-                "CLAWDDY_STATUS_DIR": statusVariable.path,
+                "CLAWDDY_STATUS_DIR": root.statusDir.path,
                 "HOME": home.path,
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "TMPDIR": home.path,
@@ -180,34 +178,140 @@ struct AgentHookScriptTests {
             process.standardInput = try FileHandle(forReadingFrom: payload)
             try process.run()
             process.waitUntilExit()
-            return process.terminationStatus
+            #expect(process.terminationStatus == 0)
         }
-
-        let before = try filesUnder(sandbox)
-        #expect(try run(
-            AgentHookRuntime.scriptURL(root: root).path, [],
-            statusVariable: environmentStatus) == 0)
-        #expect(try run(
-            AgentHookRuntime.scriptURL(root: root).path, [],
-            statusVariable: root.statusDir) == 0)
-        // Another instance's agent: its variable names another folder.
-        #expect(try run(
-            "/bin/sh", ["-c", AgentHookRuntime.command(root: root)],
-            statusVariable: environmentStatus) == 0)
         #expect(try filesUnder(sandbox) == before)
+    }
 
-        #expect(try run(
-            "/bin/sh", ["-c", AgentHookRuntime.command(root: root)],
-            statusVariable: root.statusDir) == 0)
-        #expect(fm.fileExists(atPath: root.statusDir
-            .appendingPathComponent("\(agentID.uuidString).events").path))
-        #expect(!fm.fileExists(atPath: environmentStatus.path))
-        #expect(!fm.fileExists(atPath: home.appendingPathComponent(".config").path))
+    /// Text reaches the record exactly as the payload gave it, whatever it
+    /// holds: quotes, backslashes, newlines (trailing ones too), tabs, emoji
+    /// and joined emoji, a line separator, shell syntax that must not run,
+    /// a leading dash, and 70 KB. Nothing is lost, added or run.
+    @Test func textSurvivesExactly() throws {
+        let fixture = try HookFixture()
+        defer { fixture.remove() }
+        let marker = fixture.root.appendingPathComponent("injected")
+        let texts = [
+            #"He said "hi" and left \ a backslash\n (not a newline)"#,
+            "line 1\n\n\tline 3\n\n",
+            "🧪 👩‍💻 é ü 中文 \u{2028} end",
+            "$(touch \(marker.path)) `touch \(marker.path)` ; touch \(marker.path) && echo $HOME '\"",
+            "-n",
+            "--string",
+            String(repeating: "0123456789", count: 7_000) + "🧪\n",
+            "\n",
+        ]
+        for (index, text) in texts.enumerated() {
+            for (event, field) in [("UserPromptSubmit", "prompt"), ("Stop", "last_assistant_message")] {
+                let agentID = UUID()
+                let payload = try JSONSerialization.data(withJSONObject: [
+                    "session_id": "s", "hook_event_name": event, "prompt_id": "p", field: text,
+                ])
+                #expect(try fixture.run(agentID: agentID, provider: .claudeCode, generation: UUID(), payload: payload) == 0)
+                let events = try fixture.events(agentID)
+                try #require(events.count == 1, "text \(index) \(event)")
+                #expect(events[0].text == text, "text \(index) \(event)")
+                #expect(events[0].hookEventName == event)
+            }
+        }
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+        #expect(!FileManager.default.fileExists(atPath: fixture.status.appendingPathComponent("hook-errors.log").path))
+    }
+
+    /// A payload without the field records no text, never an empty one; a
+    /// failure records Claude's kind and its text; a question comes from deep
+    /// in the payload; a session's end and start record why and how.
+    @Test func eachEventRecordsItsOwnFields() throws {
+        let fixture = try HookFixture()
+        defer { fixture.remove() }
+        func record(_ payload: String) throws -> AgentRawProviderEvent {
+            let agentID = UUID()
+            #expect(try fixture.run(
+                agentID: agentID, provider: .claudeCode, generation: UUID(), payload: Data(payload.utf8)) == 0)
+            let events = try fixture.events(agentID)
+            try #require(events.count == 1)
+            return events[0]
+        }
+        let stop = try record(#"{"session_id":"s","hook_event_name":"Stop","prompt_id":"p"}"#)
+        #expect(stop.text == nil && stop.error == nil)
+        // JSON null is no text either.
+        let nullText = try record(#"{"session_id":"s","hook_event_name":"Stop","last_assistant_message":null,"error":null}"#)
+        #expect(nullText.text == nil && nullText.error == nil && nullText.hookEventName == "Stop")
+        let failure = try record(
+            #"{"session_id":"s","hook_event_name":"StopFailure","error":"rate_limit","last_assistant_message":"Claude usage limit reached."}"#)
+        #expect(failure.error == "rate_limit")
+        #expect(failure.text == "Claude usage limit reached.")
+        let question = try record(
+            #"{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which layout: A or B?","header":"Layout"}]}}"#)
+        #expect(question.text == "Which layout: A or B?")
+        let permission = try record(
+            #"{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"}}"#)
+        #expect(permission.text == nil)
+        #expect(try record(#"{"session_id":"s","hook_event_name":"SessionEnd","reason":"prompt_input_exit"}"#).reason
+            == "prompt_input_exit")
+        #expect(try record(#"{"session_id":"s","hook_event_name":"SessionStart","source":"resume"}"#).source
+            == "resume")
+        // An event that carries no text writes no text field at all.
+        let agentID = UUID()
+        #expect(try fixture.run(
+            agentID: agentID, provider: .claudeCode, generation: UUID(),
+            payload: Data(#"{"session_id":"s","hook_event_name":"SessionStart","prompt":"not this"}"#.utf8)) == 0)
+        let line = try String(contentsOf: fixture.status.appendingPathComponent("\(agentID.uuidString).events"), encoding: .utf8)
+        #expect(!line.contains("\"text\""))
+    }
+
+    /// As Codex's notify program the script takes the payload from its last
+    /// argument, records the turn's session, prompts and last message, and
+    /// runs the owner's own notify command with the same payload, as Codex
+    /// would have. Without an owner command it runs nothing else.
+    @Test func notifyRecordsTheTurnAndChainsToTheOwnersNotify() throws {
+        let fixture = try HookFixture()
+        defer { fixture.remove() }
+        let owner = fixture.root.appendingPathComponent("owner notify")
+        let ownerLog = fixture.root.appendingPathComponent("owner.log")
+        try Data("#!/bin/sh\nprintf '%s|%s' \"$1\" \"$2\" > \"$(dirname \"$0\")/owner.log\"\n".utf8).write(to: owner)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: owner.path)
+        let payload = try String(data: JSONSerialization.data(withJSONObject: [
+            "type": "agent-turn-complete", "thread-id": "thread-1", "turn-id": "turn-1",
+            "cwd": "/tmp", "client": "codex-tui",
+            "input-messages": ["first \"one\"\n", "second 🧪"],
+            "last-assistant-message": "Done.\n\nTwo files changed.",
+        ]), encoding: .utf8)!
+        let agentID = UUID()
+        let generation = UUID()
+
+        for ownerCommand in [[owner.path, "turn-ended"], []] {
+            let process = Process()
+            process.executableURL = fixture.script
+            process.arguments = [fixture.status.path, "codex", agentID.uuidString, generation.uuidString,
+                                 AgentHookRuntime.notifyMode] + ownerCommand + [payload]
+            process.environment = ["HOME": fixture.root.path, "PATH": "/usr/bin:/bin", "TMPDIR": fixture.root.path]
+            process.standardInput = FileHandle.nullDevice
+            try process.run()
+            process.waitUntilExit()
+            #expect(process.terminationStatus == 0)
+        }
+        let events = try fixture.events(agentID)
+        try #require(events.count == 2)
+        for event in events {
+            #expect(event.hookEventName == "agent-turn-complete")
+            #expect(event.sessionID == "thread-1")
+            #expect(event.turnID == "turn-1")
+            #expect(event.prompts == ["first \"one\"\n", "second 🧪"])
+            #expect(event.text == "Done.\n\nTwo files changed.")
+            #expect(event.launchGeneration == generation)
+        }
+        // The owner's command runs in the background; give it a moment.
+        for _ in 0..<100 where !FileManager.default.fileExists(atPath: ownerLog.path) {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        #expect(try String(contentsOf: ownerLog, encoding: .utf8) == "turn-ended|\(payload)")
     }
 
     /// A hook that cannot record its event says why in the status folder's
-    /// `hook-errors.log`, still exiting 0; past 64 KiB the log moves to
-    /// `hook-errors.log.1` and starts again.
+    /// `hook-errors.log`, still exiting 0, and appends a `HookFailed` record
+    /// to the agent's event file when that file takes a line, so the agent
+    /// shows the loss; past 64 KiB the log moves to `hook-errors.log.1`.
     @Test func hookFailuresGoToABoundedErrorLog() throws {
         let fixture = try HookFixture()
         defer { fixture.remove() }
@@ -227,7 +331,10 @@ struct AgentHookScriptTests {
         #expect(lines.count == 1)
         #expect(lines.last?.hasSuffix(
             " claudeCode \(agentID.uuidString) ?: the hook input names no hook_event_name") == true)
-        #expect(!FileManager.default.fileExists(atPath: events.path))
+        let failure = try fixture.events(agentID)
+        #expect(failure.map(\.hookEventName) == [AgentHookRuntime.failureRecordName])
+        #expect(failure.first?.text == ": the hook input names no hook_event_name")
+        try FileManager.default.removeItem(at: events)
 
         try FileManager.default.createDirectory(at: events, withIntermediateDirectories: true)
         lines = try run(#"{"session_id":"session-1","hook_event_name":"SessionStart"}"#)
@@ -242,37 +349,34 @@ struct AgentHookScriptTests {
         #expect(try Data(contentsOf: log.appendingPathExtension("1")) == full)
     }
 
-    @Test func providerExitIsJournaledBeforeFallbackShell() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("clawddy-exit-hook-tests-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: root) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    /// A line a full disk cut short never takes the next record with it:
+    /// each record starts on a line of its own.
+    @Test func aPartialLineDoesNotConsumeTheNextRecord() throws {
+        let fixture = try HookFixture()
+        defer { fixture.remove() }
         let agentID = UUID()
-        let generation = UUID()
-        let command = AgentHookRuntime.exitEventCommand(
-            provider: .codex,
-            agentID: agentID,
-            generation: generation,
-            statusDirectory: root)
+        let events = fixture.status.appendingPathComponent("\(agentID.uuidString).events")
+        try Data(#"{"schemaVersion":1,"provider":"claudeCo"#.utf8).write(to: events)
+        #expect(try fixture.run(
+            agentID: agentID, provider: .claudeCode, generation: UUID(),
+            payload: Data(#"{"session_id":"s","hook_event_name":"SessionStart"}"#.utf8)) == 0)
+        let lines = AgentEventJournal.read(try Data(contentsOf: events), from: 0).records
+        #expect(lines.count == 2)
+        #expect(try JSONDecoder().decode(AgentRawProviderEvent.self, from: lines[1]).hookEventName == "SessionStart")
+    }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        process.arguments = ["-c", "command_status=7; \(command)"]
-        try process.run()
-        process.waitUntilExit()
-
-        #expect(process.terminationStatus == 0)
-        let data = try Data(contentsOf: root
-            .appendingPathComponent("\(agentID.uuidString).events"))
-        let batch = AgentEventJournal.read(data, from: 0)
-        let event = try JSONDecoder().decode(
-            AgentRawProviderEvent.self,
-            from: #require(batch.records.first))
-        #expect(event.provider == .codex)
-        #expect(event.eventID?.isEmpty == false)
-        #expect(event.launchGeneration == generation)
-        #expect(event.hookEventName == "ProviderExited")
-        #expect(event.exitStatus == 7)
+    /// The script's temporary files are made by `mktemp`, under names no one
+    /// can guess, and go when it ends.
+    @Test func temporaryFilesAreUnguessableAndRemoved() throws {
+        let fixture = try HookFixture()
+        defer { fixture.remove() }
+        #expect(AgentHookRuntime.script.contains("/usr/bin/mktemp"))
+        #expect(!AgentHookRuntime.script.contains("clawddy-hook-$ID-$$"))
+        #expect(try fixture.run(
+            agentID: UUID(), provider: .claudeCode, generation: UUID(),
+            payload: Data(#"{"session_id":"s","hook_event_name":"Stop","last_assistant_message":"x"}"#.utf8)) == 0)
+        let left = try FileManager.default.contentsOfDirectory(atPath: fixture.root.path).filter { $0.hasPrefix("clawddy-hook.") }
+        #expect(left.isEmpty)
     }
 
     @Test func shellQuoteHandlesSpacesAndSingleQuotes() {

@@ -6,21 +6,6 @@ import Testing
 struct AgentDataRootTests {
     private let home = URL(fileURLWithPath: "/Users/example", isDirectory: true)
 
-    /// Runs inside the real test host. If hosted runs did not set
-    /// `XCTestConfigurationFilePath`, Clawddy would have started at launch and
-    /// this test fails.
-    @Test @MainActor func testHostDoesNotStartClawddy() throws {
-        #expect(AgentDataRoot.isRunningTests(environment: ProcessInfo.processInfo.environment))
-        #expect(Bundle.main.bundleIdentifier == "com.mitchellh.ghostty.clawddy-tests")
-        let clawddy = try #require(NSApp.delegate as? AppDelegate).clawddy
-        // `setup()` sets the environment path first, so nil means it returned at once.
-        #expect(clawddy.bridge.environmentPath == nil)
-        #expect(clawddy.bridge.agents.isEmpty)
-        #expect(NSApp.mainMenu?.items.contains { $0.title == "Agent" } != true)
-        #expect(clawddy.workspaceModel.defaults == nil)
-        #expect(clawddy.config.root.url.path.hasPrefix(FileManager.default.temporaryDirectory.path))
-    }
-
     @Test func dataRootFromInfoKey() {
         let root = AgentDataRoot.resolve(
             directoryName: "clawddy-dev",
@@ -89,65 +74,20 @@ struct AgentDataRootTests {
         #expect(mismatch(nil, production) != nil)
     }
 
-    /// The dev seed runs for the dev bundle only, only while its root has no
-    /// `agents.json`, and only when there is a production `agents.json` to
-    /// copy.
-    @Test func onlyDevIdentitySeedsUnseededRoot() {
-        let bundles: [String?] = [
-            "com.mitchellh.ghostty", "com.mitchellh.ghostty.clawddy-dev",
-            "com.mitchellh.ghostty.clawddy-tests", "com.mitchellh.ghostty.debug", nil,
-        ]
-        for bundle in bundles {
-            for configExists in [false, true] {
-                for productionConfigExists in [false, true] {
-                    let seeds = AgentDataRoot.seedsDevCopy(
-                        bundleIdentifier: bundle,
-                        configExists: configExists,
-                        productionConfigExists: productionConfigExists)
-                    let expected = bundle == "com.mitchellh.ghostty.clawddy-dev"
-                        && !configExists && productionConfigExists
-                    #expect(seeds == expected, "\(bundle ?? "nil") config \(configExists) production \(productionConfigExists)")
-                }
-            }
-        }
-        #expect(AgentDataRoot.production(homeDirectory: home).url.path
-            == "/Users/example/.config/ghostty-agents")
-        // The test host is never the dev identity, so it never seeds.
-        #expect(!AgentDataRoot.seedsDevCopy(
-            bundleIdentifier: Bundle.main.bundleIdentifier,
-            configExists: false,
-            productionConfigExists: true))
-    }
-
-    /// Review S3: only the production bundle runs `cleanupV5` at start, only
-    /// on a root holding an `agents.json`, and only until its report is in
-    /// the root, so it runs once. Dev, test and debug bundles never do.
-    @Test func onlyProductionCleansUpAtStartAndOnlyOnce() {
-        let bundles: [String?] = [
-            "com.mitchellh.ghostty", "com.mitchellh.ghostty.clawddy-dev",
-            "com.mitchellh.ghostty.clawddy-tests", "com.mitchellh.ghostty.debug", nil,
-        ]
-        for bundle in bundles {
-            for configExists in [false, true] {
-                for reportExists in [false, true] {
-                    let cleans = AgentDataRoot.cleansUpV5(
-                        bundleIdentifier: bundle,
-                        configExists: configExists,
-                        reportExists: reportExists)
-                    let expected = bundle == "com.mitchellh.ghostty" && configExists && !reportExists
-                    #expect(cleans == expected, "\(bundle ?? "nil") config \(configExists) report \(reportExists)")
-                }
-            }
-        }
-        #expect(!AgentDataRoot.cleansUpV5(
-            bundleIdentifier: Bundle.main.bundleIdentifier,
-            configExists: true,
-            reportExists: false))
+    /// A one-time change backs a root up beside it, whatever the identity:
+    /// the production root keeps the folder its earlier backups are in.
+    @Test func backupGoesBesideTheRoot() {
         let date = Calendar.current.date(from: DateComponents(
             year: 2026, month: 11, day: 12, hour: 8, minute: 15, second: 48))
+        let dev = AgentDataRoot(url: URL(fileURLWithPath: "/Users/example/.config/clawddy-dev", isDirectory: true))
+        #expect(AgentDataRoot.production(homeDirectory: home).url.path
+            == "/Users/example/.config/ghostty-agents")
         #expect(date.map {
-            AgentDataRoot.migrationBackupDir(mode: .cleanupV5, homeDirectory: home, date: $0).path
-        } == "/Users/example/.config/ghostty-agents-backups/20261112-081548-cleanupV5")
+            AgentDataRoot.production(homeDirectory: home).backupDir(named: "state-json", date: $0).path
+        } == "/Users/example/.config/ghostty-agents-backups/20261112-081548-state-json")
+        #expect(date.map {
+            dev.backupDir(named: "state-json", date: $0).path
+        } == "/Users/example/.config/clawddy-dev-backups/20261112-081548-state-json")
     }
 
     @Test @MainActor func onlyProductionBundleTakesHotKeyAndUpdater() throws {
@@ -206,26 +146,6 @@ struct AgentDataRootTests {
         #expect(other.terminationStatus == 75)
 
         // Ends the holder's lifetime here, not at its last use above.
-        try holder.close()
-    }
-
-    /// The lock is free as soon as `withLock` returns or throws, not when its
-    /// handle is eventually deallocated.
-    @Test func withLockUnlocksWhenItsBodyThrows() throws {
-        struct Failure: Error {}
-        let root = AgentDataRoot(url: FileManager.default.temporaryDirectory
-            .appendingPathComponent("clawddy-lock-tests-\(UUID().uuidString)", isDirectory: true))
-        defer {
-            do {
-                try FileManager.default.removeItem(at: root.url)
-            } catch {
-                Issue.record(error)
-            }
-        }
-
-        #expect(throws: Failure.self) { try root.withLock { () -> Int in throw Failure() } }
-        #expect(try root.withLock { 42 } == 42)
-        let holder = try root.lock()
         try holder.close()
     }
 

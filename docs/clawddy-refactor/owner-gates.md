@@ -227,3 +227,33 @@ must happen.
 - A Codex agent in Clawddy Dev shows the notice that this build does not track Codex status, and its terminal works.
 
 Anything that differs is a bug that blocks switch-over; note what you did and what you saw.
+
+# D1 rollback
+
+From design step D1 on, the first start of a build on a root whose
+`agents.json` still has tasks (schema 5) runs `flattenV6` once, on the live
+and the dev root alike. It first copies the root, without `cron/`, to
+`<root>-backups/<yyyyMMdd-HHmmss>-flattenV6/` beside it (for the live app
+`~/.config/ghostty-agents-backups/`, for Clawddy Dev
+`~/.config/clawddy-dev-backups/`), stops without writing anything if the data
+is not what it expects, and leaves `migration-flattenV6.json` in the root. It
+does everything `cleanupV5` does too, so a production build of D1 or later
+needs no separate `cleanupV5`.
+
+To roll back, quit the new app and, before the previous app starts, copy
+`agents.json` from that backup over the root's; then put the previous app
+back and start it. Nothing else needs restoring, because the bindings and
+`state.json` that `flattenV6` leaves are ones the previous app reads; agents
+created, renamed or moved in the new app since the migration are not in the
+restored file, and the next start of a D1 build migrates it again.
+
+```sh
+B=$(ls -d ~/.config/ghostty-agents-backups/*-flattenV6 | tail -1)
+cp "$B/agents.json" ~/.config/ghostty-agents/agents.json
+```
+
+The migration also turns a task scope saved in the workspace preferences into
+its project's scope; the previous values are in `$B/workspace-defaults.json`
+and need not be restored. The frozen engine build under `gates/final` reads
+schema 5 only: on a schema 6 dev root it shows that the configuration could
+not be loaded and saves nothing.

@@ -3,11 +3,14 @@ import GhosttyKit
 
 struct SettingsView: View {
     let preferencesFile: URL
+    /// The preferences were saved: the app keeps them in memory, read once.
+    let onSave: (AgentPreferences) -> Void
     @State private var preferences: AgentPreferences
     @State private var persistenceError: String?
 
-    init(preferencesFile: URL) {
+    init(preferencesFile: URL, onSave: @escaping (AgentPreferences) -> Void = { _ in }) {
         self.preferencesFile = preferencesFile
+        self.onSave = onSave
         let loaded = AgentPreferencesStore.load(from: preferencesFile)
         _preferences = State(initialValue: loaded.preferences)
         _persistenceError = State(initialValue: loaded.error)
@@ -121,6 +124,7 @@ struct SettingsView: View {
                 do {
                     try AgentPreferencesStore.save(updated, to: preferencesFile)
                     preferences = updated
+                    onSave(updated)
                     persistenceError = nil
                 } catch {
                     persistenceError = "Agent defaults could not be saved: \(error.localizedDescription)"

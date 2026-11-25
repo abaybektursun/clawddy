@@ -1,0 +1,13 @@
+{
+  "command": "/bin/cat",
+  "selected": "Tom",
+  "projects": [
+    {
+      "name": "cats",
+      "agents": [
+        { "name": "Tom", "running": true },
+        { "name": "Jerry", "running": true }
+      ]
+    }
+  ]
+}

@@ -29,13 +29,14 @@ struct AgentEntry: Codable, Identifiable, Equatable, Sendable {
 struct AgentProject: Codable, Identifiable, Equatable, Sendable {
     let id: UUID
     var name: String
-    var tasks: [AgentTask]
+    /// In the order the user arranged them.
+    var agents: [AgentEntry]
     var workingDirectory: String?
 
-    init(id: UUID = UUID(), name: String, tasks: [AgentTask] = [], workingDirectory: String? = nil) {
+    init(id: UUID = UUID(), name: String, agents: [AgentEntry] = [], workingDirectory: String? = nil) {
         self.id = id
         self.name = name
-        self.tasks = tasks
+        self.agents = agents
         self.workingDirectory = workingDirectory
     }
 }
@@ -49,36 +50,30 @@ struct AgentConfigFormatError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-struct AgentTask: Codable, Identifiable, Equatable, Sendable {
-    let id: UUID
-    var name: String
-    var agents: [AgentEntry]
-
-    init(id: UUID = UUID(), name: String, agents: [AgentEntry] = []) {
-        self.id = id
-        self.name = name
-        self.agents = agents
-    }
-}
-
 struct AgentConfigFile: Codable {
-    static let currentSchemaVersion = 5
+    static let currentSchemaVersion = 6
 
     var schemaVersion: Int
     var projects: [AgentProject]
+    /// Projects the person removed (flows.md 6.2): off the top bar, their
+    /// agents settled and kept, nothing on disk deleted.
+    var removedProjects: [AgentProject]
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, projects
+        case schemaVersion, projects, removedProjects
     }
 
-    init(projects: [AgentProject]) {
+    init(projects: [AgentProject], removedProjects: [AgentProject] = []) {
         self.schemaVersion = Self.currentSchemaVersion
         self.projects = projects
+        self.removedProjects = removedProjects
     }
 
-    /// Every key is required, as the app writes them all, and only the
+    /// Every key the app has always written is required, and only the
     /// current schema is read. The migration preflight aborts on any other
     /// shape, so the live data never needs an old format's defaults.
+    /// `removedProjects` is absent from a file no project was ever removed
+    /// from.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
@@ -87,6 +82,7 @@ struct AgentConfigFile: Codable {
                 message: "Configuration has schemaVersion \(schemaVersion); this version reads \(Self.currentSchemaVersion).")
         }
         projects = try container.decode([AgentProject].self, forKey: .projects)
+        removedProjects = try container.decodeIfPresent([AgentProject].self, forKey: .removedProjects) ?? []
     }
 }
 
@@ -94,18 +90,38 @@ struct AgentConfigFile: Codable {
 
 @Observable
 class AgentConfig {
+    /// The projects in the top bar, in the person's order.
     var projects: [AgentProject] = []
+    /// The projects the person removed: their agents stay, settled and
+    /// findable, until a project comes back (`bringBack`).
+    var removedProjects: [AgentProject] = []
     var errorMessage: String?
     var onReloaded: (() -> Void)?
     private var configDirWatcher: DispatchSourceFileSystemObject?
-    /// Snapshot of last-loaded agents.json bytes. Used by the directory watcher
-    /// to dedup spurious fires (including those caused by our own writes).
+    /// What `agents.json` holds as far as we know: the bytes last read, or
+    /// last written by a write that succeeded (never one that is only
+    /// queued or failed). The directory watcher compares the file with it.
     private var lastConfigData: Data?
+    /// A write of `agents.json` failed and none succeeded since: memory is
+    /// newer than the file and stays the truth (last review ruling 1). The
+    /// next change and quitting write it again; nothing reloads the file
+    /// over it meanwhile.
+    private(set) var unsaved = false
+    /// Whether the last write of `agents.json` failed; touched only on
+    /// `writes`, so quitting can know before the main thread hears of it.
+    @ObservationIgnored private var lastWriteFailed = false
     /// Non-nil while the configuration file on disk could not be decoded. Writes
     /// are refused until a load succeeds so a malformed file is never replaced
     /// by a partial in-memory model.
     private var loadFailure: Error?
     @ObservationIgnored let root: AgentDataRoot
+    /// Writes of `agents.json`, in the order of the changes, off the main
+    /// thread (the records' rule, s7): quitting waits for them
+    /// (`waitForWrites`).
+    @ObservationIgnored private let writes = DispatchQueue(label: "com.mitchellh.ghostty.clawddy.agents-json")
+    /// Writes queued and not yet done; the file watcher ignores the file
+    /// meanwhile, so an earlier write never reloads over a newer model.
+    @ObservationIgnored private var pendingWrites = 0
 
     private struct AccountIdentity: Sendable {
         var homeDirectory: URL
@@ -188,10 +204,14 @@ class AgentConfig {
             isDirectory: true)
     }
 
-    /// Flat list of all agent entries across all projects and tasks.
+    /// Every agent, those of removed projects too.
     var allAgentEntries: [AgentEntry] {
-        projects.flatMap { $0.tasks.flatMap(\.agents) }
+        (projects + removedProjects).flatMap(\.agents)
     }
+
+    /// The configuration on disk was read, or there is none; false while it
+    /// cannot be read, when `projects` is not what the file holds.
+    var isLoaded: Bool { loadFailure == nil }
 
     var persistenceErrorMessage: String? {
         guard errorMessage?.hasPrefix("Agents configuration could not be saved") == true
@@ -237,8 +257,10 @@ class AgentConfig {
             loadFailure = nil
             lastConfigData = data
             projects = config.projects
+            removedProjects = config.removedProjects
             errorMessage = nil
-            if Self.enforcePersistedProviderBindings(in: &projects, statusDirectory: root.statusDir) {
+            let rebound = Self.enforcePersistedProviderBindings(in: &projects, statusDirectory: root.statusDir)
+            if Self.enforcePersistedProviderBindings(in: &removedProjects, statusDirectory: root.statusDir) || rebound {
                 save()
             }
 
@@ -254,7 +276,7 @@ class AgentConfig {
     }
 
     /// Turns a decode failure into a message that names the offending record
-    /// (for example `projects[0].tasks[0].agents[1].name`) so the user can fix
+    /// (for example `projects[0].agents[1].name`) so the user can fix
     /// the file instead of losing the agents it still contains.
     static func describeLoadFailure(_ error: Error) -> String {
         guard let decodingError = error as? DecodingError else {
@@ -293,7 +315,7 @@ class AgentConfig {
     }
 
     /// A provider becomes part of an agent's durable identity as soon as a
-    /// resumable session or pending fork exists. This prevents an external
+    /// resumable session exists. This prevents an external
     /// config edit from attempting to resume one provider's session with
     /// another provider's CLI.
     @discardableResult
@@ -303,31 +325,29 @@ class AgentConfig {
     ) -> Bool {
         var changed = false
         for projectIndex in projects.indices {
-            for taskIndex in projects[projectIndex].tasks.indices {
-                for agentIndex in projects[projectIndex].tasks[taskIndex].agents.indices {
-                    let entry = projects[projectIndex].tasks[taskIndex].agents[agentIndex]
-                    let persisted: AgentProviderID?
-                    do {
-                        persisted = try AgentSessionStore.persistedProvider(
-                            for: entry.id,
-                            directory: statusDirectory)
-                    } catch {
-                        // The agent's next launch stops on the same file and
-                        // shows why.
-                        logger.error(
-                            "provider identity of agent \(entry.id) not checked: \(error.localizedDescription)")
-                        continue
-                    }
-                    guard let provider = persisted, provider != entry.provider else { continue }
-                    projects[projectIndex].tasks[taskIndex].agents[agentIndex] = AgentEntry(
-                        id: entry.id,
-                        name: entry.name,
-                        provider: provider,
-                        launchProfile: entry.launchProfile)
-                    changed = true
-                    logger.warning(
-                        "restored provider identity for agent \(entry.id) to \(provider.rawValue)")
+            for agentIndex in projects[projectIndex].agents.indices {
+                let entry = projects[projectIndex].agents[agentIndex]
+                let persisted: AgentProviderID?
+                do {
+                    persisted = try AgentSessionStore.persistedProvider(
+                        for: entry.id,
+                        directory: statusDirectory)
+                } catch {
+                    // The agent's next launch stops on the same file and
+                    // shows why.
+                    logger.error(
+                        "provider identity of agent \(entry.id) not checked: \(error.localizedDescription)")
+                    continue
                 }
+                guard let provider = persisted, provider != entry.provider else { continue }
+                projects[projectIndex].agents[agentIndex] = AgentEntry(
+                    id: entry.id,
+                    name: entry.name,
+                    provider: provider,
+                    launchProfile: entry.launchProfile)
+                changed = true
+                logger.warning(
+                    "restored provider identity for agent \(entry.id) to \(provider.rawValue)")
             }
         }
         return changed
@@ -349,7 +369,7 @@ class AgentConfig {
             clearLoadErrorMessage()
         }
         logger.info("save — \(self.projects.count) projects")
-        let config = AgentConfigFile(projects: projects)
+        let config = AgentConfigFile(projects: projects, removedProjects: removedProjects)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data: Data
@@ -360,26 +380,55 @@ class AgentConfig {
             logger.error("save encode failed: \(error.localizedDescription)")
             return false
         }
-        do {
-            try Self.atomicWrite(data, to: root.agentsFile)
-        } catch {
-            errorMessage = "Agents configuration could not be saved: \(error.localizedDescription)"
-            logger.error("save failed: \(error.localizedDescription)")
-            return false
-        }
-        // Update the cache only after the durable replacement succeeds.
-        lastConfigData = data
-        if errorMessage?.hasPrefix("Agents configuration could not be saved") == true {
-            errorMessage = nil
+        // A refusal over an unreadable file no longer holds.
+        if errorMessage?.hasPrefix("Agents configuration could not be saved because") == true { errorMessage = nil }
+        // Written in order on the write queue, never waited for on a key
+        // (final review part 2). Only a write that succeeded says what the
+        // file holds; a failed one leaves memory as the truth, shown to the
+        // person until a later write succeeds (last review ruling 1).
+        pendingWrites += 1
+        let file = root.agentsFile
+        writes.async { [weak self] in
+            var failure: String?
+            do {
+                try Self.atomicWrite(data, to: file)
+            } catch {
+                failure = error.localizedDescription
+                logger.error("save failed: \(error.localizedDescription)")
+            }
+            self?.lastWriteFailed = failure != nil
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.pendingWrites -= 1
+                if let failure {
+                    self.unsaved = true
+                    self.errorMessage = "Agents configuration could not be saved: \(failure)"
+                } else {
+                    self.lastConfigData = data
+                    self.unsaved = false
+                    if self.persistenceErrorMessage != nil { self.errorMessage = nil }
+                }
+                // An edit made by someone else while ours were queued is
+                // noticed now that they are done.
+                if self.pendingWrites == 0 { self.reloadIfChangedElsewhere() }
+            }
         }
         return true
     }
 
+    /// Returns once every queued write of `agents.json` is on disk: at quit,
+    /// and before reading the file back. When the last write failed, what
+    /// memory holds is written once more first.
+    func waitForWrites() {
+        if writes.sync(execute: { lastWriteFailed }) { save() }
+        writes.sync {}
+    }
+
     private func commitMutation(_ mutation: () -> Void) -> Bool {
-        let previous = projects
+        let previous = (projects, removedProjects)
         mutation()
         guard save() else {
-            projects = previous
+            (projects, removedProjects) = previous
             return false
         }
         return true
@@ -387,91 +436,76 @@ class AgentConfig {
 
     // MARK: - Projects
 
-    /// Add a project. Returns the new project's UUID on success, nil if empty or duplicate.
+    /// Add a project, at the end or directly after the project `previous`.
+    /// Returns the new project's UUID on success, nil if empty or duplicate.
     @discardableResult
-    func addProject(name: String, workingDirectory: String? = nil) -> UUID? {
+    func addProject(name: String, workingDirectory: String? = nil, after previous: UUID? = nil) -> UUID? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              !projects.contains(where: { $0.name == trimmed })
+              !(projects + removedProjects).contains(where: { $0.name == trimmed })
         else { return nil }
         let project = AgentProject(
             name: trimmed,
-            tasks: [],
             workingDirectory: workingDirectory)
-        guard commitMutation({ projects.append(project) }) else { return nil }
+        let index = previous.flatMap { id in projects.firstIndex { $0.id == id } }.map { $0 + 1 } ?? projects.count
+        guard commitMutation({ projects.insert(project, at: index) }) else { return nil }
         return project.id
     }
 
+    /// Takes the project off the bar and keeps it, with its agents, among
+    /// the removed projects (flows.md 6.2). Its place in the bar, for undo;
+    /// nil when it is not in the bar or the save failed.
     @discardableResult
-    func removeProject(id: UUID) -> Bool {
-        guard projects.contains(where: { $0.id == id }) else { return false }
-        return commitMutation { projects.removeAll { $0.id == id } }
+    func removeProject(id: UUID) -> Int? {
+        guard let index = projects.firstIndex(where: { $0.id == id }) else { return nil }
+        return commitMutation { removedProjects.append(projects.remove(at: index)) } ? index : nil
     }
 
-    /// Rename by stable id. Rejects duplicate names. Returns true on success.
+    /// Puts a removed project back in the bar at `index` (its old place, for
+    /// undo), else at the end. False when it is not removed or the save
+    /// failed.
     @discardableResult
-    func renameProject(id: UUID, newName: String) -> Bool {
-        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              let i = projects.firstIndex(where: { $0.id == id }),
-              projects[i].name != trimmed,
-              !projects.contains(where: { $0.name == trimmed && $0.id != id })
-        else { return false }
-        return commitMutation { projects[i].name = trimmed }
+    func bringBack(project id: UUID, at index: Int? = nil) -> Bool {
+        guard let removed = removedProjects.firstIndex(where: { $0.id == id }) else { return false }
+        return commitMutation {
+            let project = removedProjects.remove(at: removed)
+            projects.insert(project, at: min(index ?? projects.count, projects.count))
+        }
     }
 
-    // MARK: - Tasks
-
-    /// Add a task. Returns the new task's UUID on success, nil if empty or duplicate.
+    /// Moves the project to `index` in the bar's order (ruling 33), saved
+    /// at once: the one order of projects, which everything reads. False
+    /// when it is not in the bar or the save failed.
     @discardableResult
-    func addTask(project: String, name: String) -> UUID? {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let pi = projects.firstIndex(where: { $0.name == project }),
-              !trimmed.isEmpty,
-              !projects[pi].tasks.contains(where: { $0.name == trimmed })
-        else { return nil }
-        let task = AgentTask(name: trimmed)
-        guard commitMutation({ projects[pi].tasks.append(task) }) else { return nil }
-        return task.id
+    func moveProject(id: UUID, to index: Int) -> Bool {
+        guard let from = projects.firstIndex(where: { $0.id == id }) else { return false }
+        let to = min(max(index, 0), projects.count - 1)
+        guard from != to else { return true }
+        return commitMutation { projects.insert(projects.remove(at: from), at: to) }
     }
 
-    @discardableResult
-    func removeTask(projectId: UUID, taskId: UUID) -> Bool {
-        guard let pi = projects.firstIndex(where: { $0.id == projectId }),
-              let ti = projects[pi].tasks.firstIndex(where: { $0.id == taskId })
-        else { return false }
-        return commitMutation { projects[pi].tasks.remove(at: ti) }
-    }
-
-    /// Rename by stable id. Rejects duplicate names within project. Returns true on success.
-    @discardableResult
-    func renameTask(projectId: UUID, taskId: UUID, newName: String) -> Bool {
-        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty,
-              let pi = projects.firstIndex(where: { $0.id == projectId }),
-              let ti = projects[pi].tasks.firstIndex(where: { $0.id == taskId }),
-              projects[pi].tasks[ti].name != trimmed,
-              !projects[pi].tasks.contains(where: { $0.name == trimmed && $0.id != taskId })
-        else { return false }
-        return commitMutation { projects[pi].tasks[ti].name = trimmed }
+    /// The project, in the bar or removed, whose folder is `path`.
+    func project(atFolder path: String) -> AgentProject? {
+        (projects + removedProjects).first { $0.workingDirectory == path }
     }
 
     // MARK: - Agents (UUID-based)
 
-    /// Add agent, returning the created entry. Trims whitespace and rejects empty names.
+    /// Add an agent to the project, directly after its agent `previous`,
+    /// else at the end, returning the created entry. Trims whitespace and
+    /// rejects an empty name or one the project already has, ignoring case.
     @discardableResult
     func addAgent(
         project: String,
-        task: String,
         name: String,
         provider: AgentProviderID = .claudeCode,
-        launchProfile: AgentLaunchProfile = AgentLaunchProfile()
+        launchProfile: AgentLaunchProfile = AgentLaunchProfile(),
+        after previous: UUID? = nil
     ) -> AgentEntry? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let pi = projects.firstIndex(where: { $0.name == project }),
-              let ti = projects[pi].tasks.firstIndex(where: { $0.name == task }),
               !trimmed.isEmpty,
-              !projects[pi].tasks[ti].agents.contains(where: {
+              !projects[pi].agents.contains(where: {
                   $0.name.localizedCaseInsensitiveCompare(trimmed) == .orderedSame
               })
         else { return nil }
@@ -480,28 +514,23 @@ class AgentConfig {
             name: trimmed,
             provider: provider,
             launchProfile: launchProfile)
-        guard commitMutation({ projects[pi].tasks[ti].agents.append(entry) }) else { return nil }
+        let index = previous
+            .flatMap { id in projects[pi].agents.firstIndex { $0.id == id } }
+            .map { $0 + 1 } ?? projects[pi].agents.endIndex
+        guard commitMutation({ projects[pi].agents.insert(entry, at: index) }) else { return nil }
         return entry
     }
 
-    /// Add a pre-built entry (e.g., for fork with specific UUID).
+    /// Removes the agents in one save. False when none of them is here.
     @discardableResult
-    func addAgent(_ entry: AgentEntry, project: String, task: String) -> Bool {
-        guard let pi = projects.firstIndex(where: { $0.name == project }),
-              let ti = projects[pi].tasks.firstIndex(where: { $0.name == task }),
-              !projects[pi].tasks[ti].agents.contains(where: { $0.id == entry.id })
-        else { return false }
-        return commitMutation { projects[pi].tasks[ti].agents.append(entry) }
-    }
-
-    @discardableResult
-    func removeAgent(id: UUID) -> Bool {
-        guard allAgentEntries.contains(where: { $0.id == id }) else { return false }
+    func removeAgents(_ ids: Set<UUID>) -> Bool {
+        guard allAgentEntries.contains(where: { ids.contains($0.id) }) else { return false }
         return commitMutation {
             for pi in projects.indices {
-                for ti in projects[pi].tasks.indices {
-                    projects[pi].tasks[ti].agents.removeAll { $0.id == id }
-                }
+                projects[pi].agents.removeAll { ids.contains($0.id) }
+            }
+            for pi in removedProjects.indices {
+                removedProjects[pi].agents.removeAll { ids.contains($0.id) }
             }
         }
     }
@@ -511,35 +540,29 @@ class AgentConfig {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
         for pi in projects.indices {
-            for ti in projects[pi].tasks.indices {
-                if let ai = projects[pi].tasks[ti].agents.firstIndex(where: { $0.id == id }) {
-                    guard !projects[pi].tasks[ti].agents.contains(where: {
-                        $0.id != id && $0.name.localizedCaseInsensitiveCompare(trimmed) == .orderedSame
-                    }) else { return false }
-                    return commitMutation {
-                        projects[pi].tasks[ti].agents[ai].name = trimmed
-                    }
+            // Two agents may have the same name (flows.md 4.3).
+            if let ai = projects[pi].agents.firstIndex(where: { $0.id == id }) {
+                return commitMutation {
+                    projects[pi].agents[ai].name = trimmed
                 }
             }
         }
         return false
     }
 
-    /// Applies one hierarchy move as a durable transaction. The returned
-    /// command restores the exact pre-move location and is suitable for undo.
+    /// Puts the project's agents in `ids`' order (flows.md 3.5), saved at
+    /// once; `ids` must be exactly the project's agents. False when it is not
+    /// or the save fails.
     @discardableResult
-    func move(_ move: AgentWorkspaceMove) -> AgentWorkspaceMove? {
-        let previous = projects
-        let result = AgentWorkspaceMutation.apply(move, to: &projects)
-        guard case .success(let inverse) = result else {
-            projects = previous
-            return nil
+    func reorderAgents(in projectID: UUID, _ ids: [UUID]) -> Bool {
+        guard let pi = projects.firstIndex(where: { $0.id == projectID }) else { return false }
+        let agents = projects[pi].agents
+        guard Set(ids) == Set(agents.map(\.id)), ids.count == agents.count else { return false }
+        guard ids != agents.map(\.id) else { return true }
+        let byID = Dictionary(uniqueKeysWithValues: agents.map { ($0.id, $0) })
+        return commitMutation {
+            projects[pi].agents = ids.compactMap { byID[$0] }
         }
-        guard save() else {
-            projects = previous
-            return nil
-        }
-        return inverse
     }
 
     /// Restores the immutable provider identity after an external edit attempts
@@ -547,43 +570,28 @@ class AgentConfig {
     @discardableResult
     func restoreProvider(id: UUID, provider: AgentProviderID) -> Bool {
         for pi in projects.indices {
-            for ti in projects[pi].tasks.indices {
-                guard let ai = projects[pi].tasks[ti].agents.firstIndex(where: {
-                    $0.id == id
-                }) else { continue }
-                let entry = projects[pi].tasks[ti].agents[ai]
-                guard entry.provider != provider else { return true }
-                return commitMutation {
-                    projects[pi].tasks[ti].agents[ai] = AgentEntry(
-                        id: entry.id,
-                        name: entry.name,
-                        provider: provider,
-                        launchProfile: entry.launchProfile)
-                }
+            guard let ai = projects[pi].agents.firstIndex(where: { $0.id == id }) else { continue }
+            let entry = projects[pi].agents[ai]
+            guard entry.provider != provider else { return true }
+            return commitMutation {
+                projects[pi].agents[ai] = AgentEntry(
+                    id: entry.id,
+                    name: entry.name,
+                    provider: provider,
+                    launchProfile: entry.launchProfile)
             }
         }
         return false
     }
 
-    @discardableResult
-    func setWorkingDirectory(_ path: String, forProject id: UUID) -> Bool {
-        guard let index = projects.firstIndex(where: { $0.id == id }) else { return false }
-        return commitMutation { projects[index].workingDirectory = path }
-    }
-
-    /// Find the project containing this agent.
+    /// The project holding this agent, in the bar or removed.
     func project(forAgent id: UUID) -> AgentProject? {
-        projects.first { p in p.tasks.contains { t in t.agents.contains { $0.id == id } } }
+        (projects + removedProjects).first { $0.agents.contains { $0.id == id } }
     }
 
-    /// Find the task containing this agent.
-    func task(forAgent id: UUID) -> AgentTask? {
-        for p in projects {
-            for t in p.tasks where t.agents.contains(where: { $0.id == id }) {
-                return t
-            }
-        }
-        return nil
+    /// The agent's project is removed.
+    func isRemoved(project id: UUID) -> Bool {
+        removedProjects.contains { $0.id == id }
     }
 
     // MARK: - Private
@@ -611,27 +619,30 @@ class AgentConfig {
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd, eventMask: .write, queue: .main
         )
-        source.setEventHandler { [weak self] in
-            guard let self else { return }
-            // Content-based dedup: only reload if agents.json actually changed.
-            // Compare raw bytes (definitive — no hash collisions).
-            // This also suppresses our own writes (save() updates lastConfigData
-            // before the kqueue event arrives).
-            let changed: Bool
-            do {
-                changed = try Data(contentsOf: self.root.agentsFile) != self.lastConfigData
-            } catch CocoaError.fileReadNoSuchFile {
-                changed = false
-            } catch {
-                // `load` reports why the file cannot be read.
-                changed = true
-            }
-            guard changed else { return }
-            self.load()
-        }
+        source.setEventHandler { [weak self] in self?.reloadIfChangedElsewhere() }
         source.setCancelHandler { close(fd) }
         source.resume()
         configDirWatcher = source
+    }
+
+    /// Reads `agents.json` again when it holds something other than what we
+    /// know it holds: someone else edited it. Never while a write of ours
+    /// is queued (it is checked again when they are done), and never while
+    /// memory holds a change a failed write left unsaved.
+    private func reloadIfChangedElsewhere() {
+        guard pendingWrites == 0, !unsaved else { return }
+        // Compare raw bytes (definitive — no hash collisions).
+        let changed: Bool
+        do {
+            changed = try Data(contentsOf: root.agentsFile) != lastConfigData
+        } catch CocoaError.fileReadNoSuchFile {
+            changed = false
+        } catch {
+            // `load` reports why the file cannot be read.
+            changed = true
+        }
+        guard changed else { return }
+        load()
     }
 
     // MARK: - Atomic Write

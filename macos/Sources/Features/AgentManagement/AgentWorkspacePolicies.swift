@@ -1,81 +1,4 @@
 import Foundation
-import CoreTransferable
-import UniformTypeIdentifiers
-
-enum AgentSelectionIntent: Equatable, Sendable {
-    /// Keeps detail presentation synchronized with authoritative selection.
-    case reveal
-    /// Records deliberate user inspection and may acknowledge completed work.
-    case inspect
-}
-
-struct AgentWorkspaceSelectionState: Equatable, Sendable {
-    var scope: AgentWorkspaceModel.Scope
-    var agentID: UUID?
-}
-
-enum AgentWorkspaceSelectionAction: Equatable, Sendable {
-    /// Scope and descendant are committed together so observers never render
-    /// a new scope with the previous scope's agent.
-    case userSelectedScope(AgentWorkspaceModel.Scope, agentID: UUID?)
-    /// Remains meaningful for an already-selected row; intent is an event,
-    /// not something inferred from whether a UUID happened to mutate.
-    case userSelectedAgent(UUID)
-    case reveal(scope: AgentWorkspaceModel.Scope?, agentID: UUID?)
-    case reconcile(visibleAgentIDs: Set<UUID>, fallbackAgentID: UUID?)
-}
-
-enum AgentWorkspaceSelectionEffect: Equatable, Sendable {
-    case none
-    case present(agentID: UUID?, intent: AgentSelectionIntent)
-}
-
-struct AgentWorkspaceSelectionTransition: Equatable, Sendable {
-    var state: AgentWorkspaceSelectionState
-    var effect: AgentWorkspaceSelectionEffect
-}
-
-/// The sole state machine for workspace navigation. A user event produces one
-/// committed selection and at most one presentation effect; views never infer
-/// intent from independent Observation callbacks.
-enum AgentWorkspaceSelectionReducer {
-    static func reduce(
-        _ state: AgentWorkspaceSelectionState,
-        action: AgentWorkspaceSelectionAction
-    ) -> AgentWorkspaceSelectionTransition {
-        switch action {
-        case .userSelectedScope(let scope, let agentID):
-            return AgentWorkspaceSelectionTransition(
-                state: AgentWorkspaceSelectionState(scope: scope, agentID: agentID),
-                effect: .present(agentID: agentID, intent: .reveal))
-
-        case .userSelectedAgent(let agentID):
-            var next = state
-            next.agentID = agentID
-            return AgentWorkspaceSelectionTransition(
-                state: next,
-                effect: .present(agentID: agentID, intent: .inspect))
-
-        case .reveal(let scope, let agentID):
-            var next = state
-            if let scope { next.scope = scope }
-            next.agentID = agentID
-            return AgentWorkspaceSelectionTransition(
-                state: next,
-                effect: .present(agentID: agentID, intent: .reveal))
-
-        case .reconcile(let visibleAgentIDs, let fallbackAgentID):
-            if let current = state.agentID, visibleAgentIDs.contains(current) {
-                return AgentWorkspaceSelectionTransition(state: state, effect: .none)
-            }
-            var next = state
-            next.agentID = fallbackAgentID
-            return AgentWorkspaceSelectionTransition(
-                state: next,
-                effect: .present(agentID: fallbackAgentID, intent: .reveal))
-        }
-    }
-}
 
 /// What an asynchronous launch is still allowed to do when it finishes.
 /// Activation authorized preparation, but selection can move while it runs, so
@@ -94,36 +17,41 @@ enum AgentLaunchPresentationPolicy {
     /// not take first responder. Focus also requires a window that can show
     /// the pane; making a view first responder inside an invisible or
     /// minimized window would leave the activation intent stranded there
-    /// instead of waiting for the next key transition.
+    /// instead of waiting for the next key transition. Another view keeps the
+    /// keys while it has them, as the sidebar when the arrow keys chose the
+    /// agent; the caller reads that from the window's real first responder.
     static func decide(
         agentID: UUID,
         selectedAgentID: UUID?,
+        anotherViewHasKeys: Bool,
         windowIsVisible: Bool,
         windowIsMiniaturized: Bool
     ) -> AgentLaunchPresentation {
         let stillSelected = selectedAgentID == agentID
         return AgentLaunchPresentation(
             presentsPane: stillSelected,
-            focusesTerminal: stillSelected && windowIsVisible && !windowIsMiniaturized)
+            focusesTerminal: stillSelected && !anotherViewHasKeys && windowIsVisible && !windowIsMiniaturized)
     }
 }
 
-/// Everything that must still agree before an agent counts as viewed. Intent is
-/// only one leg: the committed selection, the pane the detail controller
-/// actually presents, that pane's live surface, and a key, visible, unminimized
-/// workspace window must all name the same agent. Anything less stays unread, so
-/// a completion cannot be silently acknowledged behind a placeholder, another
-/// agent, a minimized window, or an inactive application.
+/// Everything that must still agree before an agent counts as read
+/// (`docs/clawddy-design/flows.md` 3.3): the person entered it, it is the
+/// selection and the pane presents it (its terminal, or its saved lines when
+/// its CLI is not running), in a window that is key, visible, not covered and
+/// not minimized, with the app active and the session unlocked. Anything less
+/// stays unread.
 struct AgentViewingContext: Equatable, Sendable {
     /// The user explicitly activated or inspected this agent: the
     /// workspace model's `viewedAgentID`.
     var explicitAgentID: UUID?
     /// The committed workspace selection.
     var selectedAgentID: UUID?
-    /// The agent the detail pane currently displays.
+    /// The agent the detail pane currently displays, its terminal or its
+    /// saved lines.
     var presentedAgentID: UUID?
-    /// That pane owns a live surface; placeholder presentation owns none.
-    var presentedSurfaceIsLive: Bool
+    /// The app is active and the session unlocked.
+    var personCanSee: Bool
+    /// The window is on screen and not covered (`occlusionState` visible).
     var windowIsVisible: Bool
     var windowIsKey: Bool
     var windowIsMiniaturized: Bool
@@ -134,7 +62,7 @@ enum AgentViewingPolicy {
         guard let explicitAgentID = context.explicitAgentID,
               explicitAgentID == context.selectedAgentID,
               explicitAgentID == context.presentedAgentID,
-              context.presentedSurfaceIsLive,
+              context.personCanSee,
               context.windowIsVisible,
               context.windowIsKey,
               !context.windowIsMiniaturized
@@ -143,52 +71,93 @@ enum AgentViewingPolicy {
     }
 }
 
-/// What quitting says about agents. Their terminals are not terminal
-/// windows, so Ghostty's own quit confirmation does not count them.
+/// What quitting says about agents (`docs/clawddy-design/flows.md` 11).
+/// Their terminals are not terminal windows, so Ghostty's own quit
+/// confirmation does not count them.
 enum AgentQuitConfirmation {
-    /// The sentence for the agents quitting would stop; nil when none run,
-    /// and then the agents need no confirmation.
-    static func notice(runningAgents: Int) -> String? {
-        switch runningAgents {
-        case ...0: return nil
-        case 1: return "1 agent is running. Its session can be resumed."
-        default: return "\(runningAgents) agents are running. Their sessions can be resumed."
+    /// Every quit confirmation's title, Ghostty's for terminal windows too.
+    static let title = "Quit Clawddy?"
+
+    /// What quitting does to the `working` agents and those waiting their
+    /// turn to start (words.md): the working ones stop and continue by
+    /// themselves at the next start; the waiting ones do not start. Nil when
+    /// there are none, and then the agents need no confirmation: the others
+    /// come back as they were.
+    static func notice(working: Int, waitingToStart: Int = 0) -> String? {
+        let work: String? = switch working {
+        case ...0: nil
+        case 1: "1 agent is working. It stops now and continues by itself when Clawddy opens again."
+        default: "\(working) agents are working. They stop now and continue by themselves when Clawddy opens again."
         }
-    }
-
-    /// Ghostty's quit text for terminal windows, followed by the sentence for
-    /// running agents as its own paragraph.
-    static func informativeText(_ terminalText: String, runningAgents: Int) -> String {
-        guard let notice = notice(runningAgents: runningAgents) else { return terminalText }
-        return terminalText + "\n\n" + notice
+        let wait: String? = switch waitingToStart {
+        case ...0: nil
+        case 1: "1 agent waiting its turn to start does not start."
+        default: "\(waitingToStart) agents waiting their turn to start do not start."
+        }
+        let both = [work, wait].compactMap { $0 }
+        return both.isEmpty ? nil : both.joined(separator: " ")
     }
 }
 
-struct AgentListEmptyPresentation: Equatable, Sendable {
-    var title: String
-    var message: String
-    var symbolName: String
-    var offersCreation: Bool
+/// What closing a running agent's terminal asks (design plan section 7):
+/// what will happen.
+struct AgentCloseConfirmation: Equatable {
+    let title: String
+    let message: String
+    /// The button that agrees; Cancel is the other.
+    static let confirm = "Close"
+
+    init(name: String) {
+        title = "Close \(name)?"
+        message = "\(name) is running. Closing stops it; it continues when you come back to it."
+    }
 }
 
-/// Authoritative state for agent creation. Provider changes are transitions,
-/// not independent picker mutations: provider-specific model and reasoning
-/// values are cleared together and the new provider's saved start mode is
-/// applied atomically.
+/// The name a provider's terminal title gives a conversation
+/// (`docs/clawddy-design/flows.md` 5; `cli-facts.md`, flows 2 capture).
+/// Claude titles its terminal "Claude Code" until the first prompt, then
+/// with a few words about the conversation, which it keeps, and shows
+/// "claude · resume" over its list of conversations; before the terminal
+/// answers its status query it puts a status glyph first ("✳ Single word
+/// reply"), and clears it as it exits, when Ghostty shows the working
+/// directory instead. Codex titles it with the folder, a spinner first while
+/// it works, then "<topic> | <folder>".
+enum AgentConversationTitle {
+    /// The longest name a title gives.
+    static let maxLength = 40
+
+    /// The conversation's name in `title`, from a terminal in `folder`:
+    /// without leading glyphs and spinners, the product's own titles, a path
+    /// and the folder, at most `maxLength` characters; nil when nothing is
+    /// left.
+    static func name(from title: String, folder: String?) -> String? {
+        let trimmed = AgentSentence.label(title, limit: 200)
+        guard !trimmed.hasPrefix("/"), !trimmed.hasPrefix("~") else { return nil }
+        var text = String(trimmed.drop { !$0.isLetter && !$0.isNumber })
+            .trimmingCharacters(in: .whitespaces)
+        if let folder = folder.map({ URL(fileURLWithPath: $0).lastPathComponent }), !folder.isEmpty {
+            if text == folder { return nil }
+            if text.hasSuffix(" | \(folder)") { text = String(text.dropLast(folder.count + 3)) }
+        }
+        let lowered = text.lowercased()
+        guard !text.isEmpty, lowered != "claude code", !lowered.hasPrefix("claude · ") else { return nil }
+        guard text.count > maxLength else { return text }
+        return String(text.prefix(maxLength - 1)).trimmingCharacters(in: .whitespaces) + "…"
+    }
+}
+
+/// How a new agent runs: the saved defaults for its CLI.
 struct AgentCreationDraft: Equatable, Sendable {
-    var name = ""
     var provider: AgentProviderID
     var modelID = ""
     var reasoningEffort: String?
     var startMode: AgentStartMode
 
+    /// The saved defaults: `provider`, its default start mode, and its own
+    /// default model and reasoning.
     init(provider: AgentProviderID, preferences: AgentPreferences) {
         self.provider = provider
         startMode = preferences.defaultStartMode(for: provider)
-    }
-
-    var normalizedName: String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var launchProfile: AgentLaunchProfile {
@@ -198,514 +167,85 @@ struct AgentCreationDraft: Equatable, Sendable {
             reasoningEffort: reasoningEffort,
             startMode: startMode)
     }
+}
 
-    var launchSummary: String {
-        var parts = [provider.startModeTitle(startMode)]
-        if let modelID = launchProfile.modelID { parts.append(modelID) }
-        if let effort = launchProfile.displayReasoningEffort {
-            parts.append("\(effort) reasoning")
+/// Names that stay apart within a project.
+enum AgentNames {
+    /// `name`, or, when one of `agents` has it, ignoring case, `name` with
+    /// the lowest number from 2 that none has: "review 2".
+    static func free(_ name: String, among agents: [AgentEntry]) -> String {
+        func isTaken(_ candidate: String) -> Bool {
+            agents.contains { $0.name.localizedCaseInsensitiveCompare(candidate) == .orderedSame }
         }
-        return parts.joined(separator: " · ")
-    }
-
-    func canCreate(providerHealth: AgentProviderHealth) -> Bool {
-        !normalizedName.isEmpty && providerHealth.isReadyToLaunch
-    }
-
-    mutating func transition(
-        to provider: AgentProviderID,
-        preferences: AgentPreferences
-    ) {
-        self.provider = provider
-        modelID = ""
-        reasoningEffort = nil
-        startMode = preferences.defaultStartMode(for: provider)
+        guard isTaken(name) else { return name }
+        var number = 2
+        while isTaken("\(name) \(number)") { number += 1 }
+        return "\(name) \(number)"
     }
 }
 
-/// Empty workspace copy is scope semantics, not a generic list fallback. Smart
-/// scopes communicate successful system state while hierarchy scopes explain
-/// the next valid action at that level.
-enum AgentListEmptyStatePolicy {
-    static func presentation(
-        scope: AgentWorkspaceModel.Scope,
-        searchQuery: String
-    ) -> AgentListEmptyPresentation {
-        if !searchQuery.isEmpty {
-            return AgentListEmptyPresentation(
-                title: "No Results",
-                message: "No agents match “\(searchQuery)”.",
-                symbolName: "magnifyingglass",
-                offersCreation: false)
-        }
-
-        switch scope {
-        case .attention:
-            return AgentListEmptyPresentation(
-                title: "All Clear",
-                message: "No agents need your attention.",
-                symbolName: "checkmark.circle",
-                offersCreation: false)
-        case .running:
-            return AgentListEmptyPresentation(
-                title: "Nothing Running",
-                message: "Start an agent from one of your tasks when you’re ready.",
-                symbolName: "bolt.slash",
-                offersCreation: false)
-        case .task:
-            return AgentListEmptyPresentation(
-                title: "No Agents Yet",
-                message: "Create the first agent for this task.",
-                symbolName: "person.crop.circle.badge.plus",
-                offersCreation: true)
-        case .project:
-            return AgentListEmptyPresentation(
-                title: "No Agents Yet",
-                message: "Choose a task in this project to create an agent.",
-                symbolName: "folder",
-                offersCreation: false)
-        case .all:
-            return AgentListEmptyPresentation(
-                title: "No Agents Yet",
-                message: "Choose a project task to create your first agent.",
-                symbolName: "person.2",
-                offersCreation: false)
-        }
-    }
-}
-
-/// Project disclosure is navigation state, but it must remain coherent with
-/// the selected scope. A task scope is never allowed to become invisibly
-/// selected beneath a collapsed parent.
-enum AgentNavigationDisclosurePolicy {
-    /// A workspace without an explicit disclosure preference starts as a calm
-    /// project index. The selected task's parent remains visible because a
-    /// selection must never be hidden by initialization.
-    static func initialCollapsedProjectIDs(
-        validProjectIDs: Set<UUID>,
-        selectedScope: AgentWorkspaceModel.Scope
-    ) -> Set<UUID> {
-        reconciledCollapsedProjectIDs(
-            validProjectIDs,
-            validProjectIDs: validProjectIDs,
-            selectedScope: selectedScope)
-    }
-
-    static func replacementScopeWhenCollapsing(
-        projectID: UUID,
-        selectedScope: AgentWorkspaceModel.Scope
-    ) -> AgentWorkspaceModel.Scope? {
-        guard case .task(let selectedProjectID, _) = selectedScope,
-              selectedProjectID == projectID
-        else { return nil }
-        return .project(projectID)
-    }
-
-    static func reconciledCollapsedProjectIDs(
-        _ collapsedProjectIDs: Set<UUID>,
-        validProjectIDs: Set<UUID>,
-        selectedScope: AgentWorkspaceModel.Scope
-    ) -> Set<UUID> {
-        var result = collapsedProjectIDs.intersection(validProjectIDs)
-        if case .task(let projectID, _) = selectedScope {
-            result.remove(projectID)
-        }
-        return result
-    }
-}
-
-/// One product-wide ordering for urgency and relevance. Presentation,
-/// aggregation, and task selection must not invent competing interpretations
-/// of the same agent state.
-enum AgentStatePriority {
-    static func value(of state: DisplayState) -> Int {
-        switch state {
-        case .failed: return 140
-        case .error: return 130
-        case .authentication: return 125
-        case .input: return 120
-        case .permission: return 115
-        case .finished: return 110
-        case .statusUnavailable: return 100
-        case .statusDelayed: return 95
-        case .compacting: return 90
-        case .working: return 80
-        case .thinking: return 70
-        case .launching: return 60
-        case .idle: return 50
-        case .inactive: return 40
-        case .dead: return 30
-        }
-    }
-}
-
-struct AgentImportanceCandidate: Equatable, Sendable {
-    var id: UUID
-    var state: DisplayState
-    var lastAuthoritativeChange: Date?
-    var configurationRank: Int
-}
-
-/// Chooses the agent a deliberate project/task selection should reveal.
-/// Runtime changes never call this policy on their own, so an agent becoming
-/// urgent cannot steal focus while the user is working elsewhere.
-enum AgentImportance {
-    static func mostImportant<Candidates: Sequence>(
-        in candidates: Candidates,
-        preferredID: UUID?
-    ) -> UUID? where Candidates.Element == AgentImportanceCandidate {
-        candidates.max { lhs, rhs in
-            precedes(lhs, rhs, preferredID: preferredID)
-        }?.id
-    }
-
-    private static func precedes(
-        _ lhs: AgentImportanceCandidate,
-        _ rhs: AgentImportanceCandidate,
-        preferredID: UUID?
-    ) -> Bool {
-        let leftPriority = AgentStatePriority.value(of: lhs.state)
-        let rightPriority = AgentStatePriority.value(of: rhs.state)
-        if leftPriority != rightPriority {
-            return leftPriority < rightPriority
-        }
-
-        let leftPreferred = lhs.id == preferredID
-        let rightPreferred = rhs.id == preferredID
-        if leftPreferred != rightPreferred {
-            return !leftPreferred
-        }
-
-        let leftChanged = lhs.lastAuthoritativeChange ?? .distantPast
-        let rightChanged = rhs.lastAuthoritativeChange ?? .distantPast
-        if leftChanged != rightChanged {
-            return leftChanged < rightChanged
-        }
-
-        if lhs.configurationRank != rhs.configurationRank {
-            return lhs.configurationRank > rhs.configurationRank
-        }
-        return lhs.id.uuidString > rhs.id.uuidString
-    }
-}
-
-/// Shared projection for scope and search membership. Navigation selection and
-/// list rendering must resolve from the same agent set or they can immediately
-/// overwrite each other's selection.
 @MainActor
-enum AgentWorkspaceProjection {
-    static func includes(
-        _ agent: AgentInstance,
-        project: AgentProject,
-        task: AgentTask,
-        scope: AgentWorkspaceModel.Scope
-    ) -> Bool {
-        switch scope {
-        case .all: return true
-        case .attention: return agent.displayState.needsAttention
-        case .running: return agent.displayState.isActive
-        case .project(let id): return project.id == id
-        case .task(let projectID, let taskID):
-            return project.id == projectID && task.id == taskID
-        }
-    }
-
-    static func matchesSearch(
-        _ entry: AgentEntry,
-        project: AgentProject,
-        task: AgentTask,
-        instance: AgentInstance,
-        query: String
-    ) -> Bool {
-        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return true }
-        return ([
-            entry.name, project.name, task.name, instance.displayState.label,
-            entry.provider.displayName,
-        ]
-            + entry.launchProfile.searchTerms
-            + (instance.metadata?.searchTerms ?? []))
-            .contains(where: { $0.localizedCaseInsensitiveContains(query) })
-    }
-}
-
-enum AgentWorkspaceItem: Equatable, Hashable, Sendable {
-    case project(UUID)
-    case task(UUID)
-    case agent(UUID)
-}
-
-enum AgentWorkspaceDestination: Equatable, Sendable {
-    case projects(index: Int)
-    case tasks(projectID: UUID, index: Int)
-    case agents(projectID: UUID, taskID: UUID, index: Int)
-}
-
-struct AgentWorkspaceMove: Equatable, Sendable {
-    var item: AgentWorkspaceItem
-    var destination: AgentWorkspaceDestination
-}
-
-enum AgentWorkspaceMoveError: Error, Equatable, Sendable {
-    case itemNotFound
-    case incompatibleDestination
-    case destinationNotFound
-    case duplicateName
-}
-
-/// Pure hierarchy mutation. The returned inverse command is computed from the
-/// pre-move location and can be registered directly with NSUndoManager.
-enum AgentWorkspaceMutation {
-    static func apply(
-        _ move: AgentWorkspaceMove,
-        to projects: inout [AgentProject]
-    ) -> Result<AgentWorkspaceMove, AgentWorkspaceMoveError> {
-        var updatedProjects = projects
-        let result = applyValidated(move, to: &updatedProjects)
-        if case .success = result {
-            projects = updatedProjects
-        }
-        return result
-    }
-
-    /// Destination indices describe the final index after the moved item has
-    /// been removed. Keeping that contract here prevents individual views from
-    /// inventing different off-by-one rules for downward moves.
-    private static func applyValidated(
-        _ move: AgentWorkspaceMove,
-        to projects: inout [AgentProject]
-    ) -> Result<AgentWorkspaceMove, AgentWorkspaceMoveError> {
-        switch (move.item, move.destination) {
-        case (.project(let id), .projects(let destinationIndex)):
-            guard let sourceIndex = projects.firstIndex(where: { $0.id == id }) else {
-                return .failure(.itemNotFound)
-            }
-            let project = projects.remove(at: sourceIndex)
-            projects.insert(project, at: normalizedInsertionIndex(
-                destinationIndex,
-                count: projects.count))
-            return .success(AgentWorkspaceMove(
-                item: .project(id),
-                destination: .projects(index: sourceIndex)))
-
-        case (.task(let id), .tasks(let destinationProjectID, let destinationIndex)):
-            guard let source = taskLocation(id: id, in: projects) else {
-                return .failure(.itemNotFound)
-            }
-            guard let destinationProjectIndex = projects.firstIndex(where: {
-                $0.id == destinationProjectID
-            }) else {
-                return .failure(.destinationNotFound)
-            }
-            let task = projects[source.projectIndex].tasks[source.itemIndex]
-            guard !projects[destinationProjectIndex].tasks.contains(where: {
-                $0.id != id && $0.name.localizedCaseInsensitiveCompare(task.name) == .orderedSame
-            }) else {
-                return .failure(.duplicateName)
-            }
-            projects[source.projectIndex].tasks.remove(at: source.itemIndex)
-            guard let updatedDestinationProjectIndex = projects.firstIndex(where: {
-                $0.id == destinationProjectID
-            }) else {
-                return .failure(.destinationNotFound)
-            }
-            projects[updatedDestinationProjectIndex].tasks.insert(
-                task,
-                at: normalizedInsertionIndex(
-                    destinationIndex,
-                    count: projects[updatedDestinationProjectIndex].tasks.count))
-            return .success(AgentWorkspaceMove(
-                item: .task(id),
-                destination: .tasks(
-                    projectID: projects[source.projectIndex].id,
-                    index: source.itemIndex)))
-
-        case (
-            .agent(let id),
-            .agents(let destinationProjectID, let destinationTaskID, let destinationIndex)
-        ):
-            guard let source = agentLocation(id: id, in: projects) else {
-                return .failure(.itemNotFound)
-            }
-            guard let destination = taskLocation(
-                projectID: destinationProjectID,
-                taskID: destinationTaskID,
-                in: projects)
-            else {
-                return .failure(.destinationNotFound)
-            }
-            let agent = projects[source.projectIndex]
-                .tasks[source.taskIndex]
-                .agents[source.itemIndex]
-            guard !projects[destination.projectIndex]
-                .tasks[destination.itemIndex]
-                .agents.contains(where: {
-                    $0.id != id
-                        && $0.name.localizedCaseInsensitiveCompare(agent.name) == .orderedSame
-                })
-            else {
-                return .failure(.duplicateName)
-            }
-            let sourceProjectID = projects[source.projectIndex].id
-            let sourceTaskID = projects[source.projectIndex].tasks[source.taskIndex].id
-            projects[source.projectIndex].tasks[source.taskIndex].agents.remove(at: source.itemIndex)
-            guard let updatedDestination = taskLocation(
-                projectID: destinationProjectID,
-                taskID: destinationTaskID,
-                in: projects)
-            else {
-                return .failure(.destinationNotFound)
-            }
-            projects[updatedDestination.projectIndex]
-                .tasks[updatedDestination.itemIndex]
-                .agents.insert(
-                    agent,
-                    at: normalizedInsertionIndex(
-                        destinationIndex,
-                        count: projects[updatedDestination.projectIndex]
-                            .tasks[updatedDestination.itemIndex].agents.count))
-            return .success(AgentWorkspaceMove(
-                item: .agent(id),
-                destination: .agents(
-                    projectID: sourceProjectID,
-                    taskID: sourceTaskID,
-                    index: source.itemIndex)))
-
-        default:
-            return .failure(.incompatibleDestination)
-        }
-    }
-
-    private struct ItemLocation {
-        var projectIndex: Int
-        var taskIndex: Int = 0
-        var itemIndex: Int
-    }
-
-    private static func taskLocation(
-        id: UUID,
-        in projects: [AgentProject]
-    ) -> ItemLocation? {
-        for projectIndex in projects.indices {
-            if let taskIndex = projects[projectIndex].tasks.firstIndex(where: { $0.id == id }) {
-                return ItemLocation(projectIndex: projectIndex, itemIndex: taskIndex)
-            }
-        }
-        return nil
-    }
-
-    private static func taskLocation(
-        projectID: UUID,
-        taskID: UUID,
-        in projects: [AgentProject]
-    ) -> ItemLocation? {
-        guard let projectIndex = projects.firstIndex(where: { $0.id == projectID }),
-              let taskIndex = projects[projectIndex].tasks.firstIndex(where: {
-                  $0.id == taskID
-              })
-        else { return nil }
-        return ItemLocation(projectIndex: projectIndex, itemIndex: taskIndex)
-    }
-
-    private static func agentLocation(
-        id: UUID,
-        in projects: [AgentProject]
-    ) -> ItemLocation? {
-        for projectIndex in projects.indices {
-            for taskIndex in projects[projectIndex].tasks.indices {
-                if let agentIndex = projects[projectIndex].tasks[taskIndex]
-                    .agents.firstIndex(where: { $0.id == id }) {
-                    return ItemLocation(
-                        projectIndex: projectIndex,
-                        taskIndex: taskIndex,
-                        itemIndex: agentIndex)
-                }
-            }
-        }
-        return nil
-    }
-
-    private static func normalizedInsertionIndex(_ requested: Int, count: Int) -> Int {
-        min(max(0, requested), count)
-    }
-}
-
-enum AgentWorkspaceDropIndex {
-    /// Converts an AppKit/SwiftUI "drop before this original row" index into
-    /// the move engine's final post-removal index contract.
-    static func before(
-        sourceIndex: Int?,
-        targetIndex: Int,
-        inSameContainer: Bool
-    ) -> Int {
-        guard inSameContainer, let sourceIndex, sourceIndex < targetIndex else {
-            return targetIndex
-        }
-        return targetIndex - 1
-    }
-}
-
-extension UTType {
-    static let clawddyWorkspaceItem = UTType(
-        exportedAs: "com.mitchellh.ghostty.clawddy.workspace-item")
-}
-
-struct AgentWorkspaceDragPayload: Codable, Transferable {
-    enum Kind: String, Codable {
-        case project
-        case task
-        case agent
-    }
-
-    var kind: Kind
-    var id: UUID
-
-    init(_ item: AgentWorkspaceItem) {
-        switch item {
-        case .project(let id):
-            kind = .project
-            self.id = id
-        case .task(let id):
-            kind = .task
-            self.id = id
-        case .agent(let id):
-            kind = .agent
-            self.id = id
-        }
-    }
-
-    var item: AgentWorkspaceItem {
-        switch kind {
-        case .project: return .project(id)
-        case .task: return .task(id)
-        case .agent: return .agent(id)
-        }
-    }
-
-    static var transferRepresentation: some TransferRepresentation {
-        CodableRepresentation(contentType: .clawddyWorkspaceItem)
-    }
-}
-
 enum AgentWorkspaceTransactions {
-    /// Runs one durable move and registers the exact inverse. Undo invokes the
-    /// same transaction boundary, which naturally registers redo.
-    @discardableResult
-    static func perform(
-        _ move: AgentWorkspaceMove,
-        on config: AgentConfig,
-        undoManager: UndoManager?,
-        actionName: String
-    ) -> Bool {
-        guard let inverse = config.move(move) else { return false }
-        undoManager?.registerUndo(withTarget: config) { [weak undoManager] target in
-            perform(
-                inverse,
-                on: target,
-                undoManager: undoManager,
-                actionName: actionName)
-        }
-        undoManager?.setActionName(actionName)
-        return true
+    /// Gives an agent whose name is Clawddy's the name `title` from its
+    /// conversation, numbered when another agent of its project has it
+    /// ("Fix login 2"), saved as a rename is; whose name it is stays the same.
+    static func adoptTitle(_ title: String, of id: UUID, config: AgentConfig, bridge: AgentBridge) {
+        guard let project = config.project(forAgent: id) else { return }
+        let name = AgentNames.free(title, among: project.agents.filter { $0.id != id })
+        guard config.renameAgent(id: id, newName: name) else { return }
+        bridge.showName(id: id, name: name, source: .cli)
     }
+}
+
+/// The order in which the agents waiting on the person are walked
+/// (`docs/clawddy-design/flows.md` 6.6): the current project's first, then
+/// the other projects' in the bar's order; within a project questions, then
+/// problems, then finished unread and reset limits; within those, the
+/// longest waiting first. The menu bar item lists them in the same order.
+@MainActor
+/// What orders an agent among those waiting on the person (flows.md 6.6):
+/// a question first, then a problem, then the rest, each oldest first.
+struct AgentWaitingKey: Equatable, Comparable {
+    var rank: Int
+    var since: Date
+
+    /// Its key while it waits on the person; nil otherwise.
+    init?(_ record: AgentRecord) {
+        guard record.isWaitingOnYou else { return nil }
+        rank = switch record.state {
+        case .asks: 0
+        case .problem: 1
+        case .finished, .limitReset, .working, .paused: 2
+        }
+        since = record.changedAt
+    }
+
+    static func < (a: Self, b: Self) -> Bool {
+        a.rank != b.rank ? a.rank < b.rank : a.since < b.since
+    }
+}
+
+@MainActor
+enum AgentWaitingOrder {
+    /// Every agent waiting on the person, the current project's first, then
+    /// the bar's order, each project's by `AgentWaitingKey`. It reads only
+    /// what transitions change, so an observer of it is not woken by
+    /// activity.
+    static func agents(projects: [AgentProject], agents: [UUID: AgentInstance], currentProject: UUID?) -> [AgentWalk.Waiting] {
+        let ordered = projects.filter { $0.id == currentProject } + projects.filter { $0.id != currentProject }
+        return ordered.flatMap { project in
+            project.agents.compactMap { entry in agents[entry.id].flatMap { agent in agent.waitingKey.map { (agent.id, $0) } } }
+                .sorted { $0.1 < $1.1 }
+                .map { AgentWalk.Waiting(id: $0.0, since: $0.1.since) }
+        }
+    }
+}
+
+/// The top bar's sentences about the app's own files (words.md).
+enum AgentNotices {
+    /// A write failed; memory keeps the change (last review ruling 1).
+    static let unsaved = "Could not save your changes. Check the disk; they are kept while Clawddy is open."
+    /// An older build's `state.json` could not be read and was moved to the
+    /// backups (last review ruling 2).
+    static let movedStateFile = "The older Clawddy's state file could not be read. It was moved to the backups folder."
 }

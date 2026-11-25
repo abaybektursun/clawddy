@@ -5,37 +5,56 @@ enum AgentHookRuntime {
         root.hooksDir.appendingPathComponent("clawddy-provider-hook.sh")
     }
 
-    /// Codex's global hook command: the status folder only. The agent's
-    /// identity comes from the `CLAWDDY_*` variables of its terminal.
-    static func command(root: AgentDataRoot) -> String {
-        "\(shellQuote(scriptURL(root: root).path)) \(shellQuote(root.statusDir.path))"
-    }
-
     /// A Claude agent's hook command, written into its own settings overlay:
-    /// the status folder followed by the agent's identity as arguments.
+    /// the script, the status folder and the agent's identity as arguments.
     static func command(
         root: AgentDataRoot,
         provider: AgentProviderID,
         agentID: UUID,
         generation: UUID
     ) -> String {
-        [command(root: root), provider.rawValue, agentID.uuidString, generation.uuidString]
+        arguments(root: root, provider: provider, agentID: agentID, generation: generation)
+            .map(shellQuote)
             .joined(separator: " ")
     }
 
-    /// Arguments: STATUS_DIR PROVIDER AGENT_ID GENERATION. A Claude agent's
-    /// settings overlay passes all four. Codex's global entry passes only
-    /// STATUS_DIR, and the other three then come from CLAWDDY_AGENT_PROVIDER,
-    /// CLAWDDY_AGENT_ID and CLAWDDY_AGENT_GENERATION, but only when
-    /// CLAWDDY_STATUS_DIR names that same folder, so an agent started by
-    /// another Clawddy instance is never recorded here. Without a complete
+    /// The script and its four arguments, unquoted: a Codex launch's notify
+    /// program is this list.
+    static func arguments(
+        root: AgentDataRoot,
+        provider: AgentProviderID,
+        agentID: UUID,
+        generation: UUID
+    ) -> [String] {
+        [scriptURL(root: root).path, root.statusDir.path, provider.rawValue, agentID.uuidString, generation.uuidString]
+    }
+
+    /// The record the script appends when it could not record an event.
+    static let failureRecordName = "HookFailed"
+
+    /// The fifth argument that makes the script Codex's notify program.
+    static let notifyMode = "notify"
+
+    /// Arguments: STATUS_DIR PROVIDER AGENT_ID GENERATION, then for Codex's
+    /// notify program `notify`, the owner's own notify command (any number
+    /// of words, possibly none) and the payload Codex appends as the last
+    /// argument. A hook reads its payload from its input. Without a complete
     /// identity the script drains its input and records nothing; it exits 0,
     /// because an argument-less global entry left by an older Clawddy must not
-    /// report a hook error in every Claude session on the machine. The script
-    /// only appends records; the bridge writes the session binding from them.
-    /// It records only the events of the provider's event table, each with
-    /// the turn named by the payload field that table gives, and nothing for
-    /// any other event.
+    /// report a hook error in every session on the machine. The script only
+    /// appends records; the bridge writes the session binding from them. It
+    /// records only the events of the provider's event table, each with the
+    /// turn named by the payload field that table gives, and nothing for any
+    /// other event.
+    ///
+    /// Text (a prompt, a message, an error's text, a question) goes into the
+    /// record without the shell ever parsing it: `plutil` reads the raw value
+    /// out of the payload, the value travels as one argument into a fresh
+    /// property list, and `plutil` writes that list as JSON. The `x` after
+    /// the value keeps its trailing newlines, which `$(...)` would drop; the
+    /// one newline `raw` adds goes with the `x`. A payload without the field
+    /// records no text, never an empty one.
+    ///
     /// A hook that has an identity but cannot record its event appends one
     /// line saying why to `hook-errors.log` in the status folder, and still
     /// exits 0. Once that log passes 64 KiB it becomes `hook-errors.log.1`,
@@ -44,14 +63,9 @@ enum AgentHookRuntime {
         #!/bin/sh
         umask 077
         DIR="$1"
-        PROVIDER="$2"
-        ID="$3"
-        GENERATION="$4"
-        if [ "$#" -eq 1 ] && [ "${CLAWDDY_STATUS_DIR:-}" = "$DIR" ]; then
-          PROVIDER="${CLAWDDY_AGENT_PROVIDER:-}"
-          ID="${CLAWDDY_AGENT_ID:-}"
-          GENERATION="${CLAWDDY_AGENT_GENERATION:-}"
-        fi
+        PROVIDER=$(printf '%s' "$2" | /usr/bin/tr -cd '[:alnum:]')
+        ID=$(printf '%s' "$3" | /usr/bin/tr -cd 'A-Fa-f0-9-')
+        GENERATION=$(printf '%s' "$4" | /usr/bin/tr -cd 'A-Fa-f0-9-')
         if [ -z "$DIR" ] || [ -z "$PROVIDER" ] || [ -z "$ID" ] || [ -z "$GENERATION" ]; then
           cat >/dev/null
           exit 0
@@ -70,12 +84,33 @@ enum AgentHookRuntime {
           fi
           printf '%s %s %s %s: %s\n' "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" \
             "$PROVIDER" "$ID" "${EVENT:-?}" "$1" >> "$LOG" 2>/dev/null
+          # The agent shows that a report was lost, when its file takes a line.
+          printf '\n{"schemaVersion":1,"provider":"%s","launchGeneration":"%s","hookEventName":"\(failureRecordName)","text":"%s"}\n' \
+            "$PROVIDER" "$GENERATION" "$(printf '%s' "${EVENT:-?}: $1" | /usr/bin/tr -cd '[:alnum:] _.:/-')" \
+            >> "$DIR/$ID.events" 2>/dev/null
           exit 0
         }
 
-        INPUT="${TMPDIR:-/tmp}/clawddy-hook-$ID-$$.json"
-        trap 'rm -f "$INPUT"' EXIT HUP INT TERM
-        cat > "$INPUT" || fail "could not save the hook input to $INPUT"
+        INPUT=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
+        TEXTS=$(/usr/bin/mktemp "${TMPDIR:-/tmp}/clawddy-hook.XXXXXX") || fail "could not make a temporary file"
+        trap 'rm -f "$INPUT" "$TEXTS"' EXIT HUP INT TERM
+        if [ "${5:-}" = \(notifyMode) ]; then
+          # Codex's notify program. The payload is the last argument; the
+          # words between `notify` and it are the owner's own notify command,
+          # which runs as Codex would have run it.
+          for PAYLOAD; do :; done
+          shift 5
+          if [ "$#" -gt 1 ]; then
+            ( "$@" </dev/null >/dev/null 2>&1 & )
+          fi
+          printf '%s' "$PAYLOAD" > "$INPUT" || fail "could not save the notify payload to $INPUT"
+          EVENT_KEY=type
+          SESSION_KEY=thread-id
+        else
+          cat > "$INPUT" || fail "could not save the hook input to $INPUT"
+          EVENT_KEY=hook_event_name
+          SESSION_KEY=session_id
+        fi
         chmod 600 "$INPUT" 2>/dev/null
 
         extract() {
@@ -84,57 +119,101 @@ enum AgentHookRuntime {
         sanitize() {
           printf '%s' "$1" | /usr/bin/tr -cd '[:alnum:]_.:/-'
         }
+        # The field's raw text, trailing newlines kept, in VALUE; false when
+        # the payload has no such field.
+        text() {
+          VALUE=$(/usr/bin/plutil -extract "$1" raw -o - "$INPUT" 2>/dev/null && printf x)
+          [ -n "$VALUE" ] || return 1
+          VALUE=${VALUE%?x}
+        }
 
-        SID=$(sanitize "$(extract session_id)")
-        EVENT=$(sanitize "$(extract hook_event_name)")
+        SID=$(sanitize "$(extract "$SESSION_KEY")")
+        EVENT=$(sanitize "$(extract "$EVENT_KEY")")
         MODEL=$(sanitize "$(extract model)")
         PERMISSION=$(sanitize "$(extract permission_mode)")
         TRIGGER=$(sanitize "$(extract trigger)")
+        ERROR=$(sanitize "$(extract error)")
+        REASON=$(sanitize "$(extract reason)")
+        SOURCE=$(sanitize "$(extract source)")
         EVENT_ID=$(sanitize "$(/usr/bin/uuidgen 2>/dev/null)")
-        PROVIDER=$(sanitize "$PROVIDER")
-        GENERATION=$(sanitize "$GENERATION")
         [ -z "$EVENT_ID" ] && EVENT_ID=$(sanitize "$GENERATION-$$-$(/bin/date +%s)")
 
-        [ -z "$EVENT" ] && fail "the hook input names no hook_event_name"
+        [ -z "$EVENT" ] && fail "the hook input names no $EVENT_KEY"
+        TEXT_FIELD=
+        PROMPTS_FIELD=
         case "$PROVIDER" in
-        \(providerCase(.claudeCode, turnIDField: ClaudeCodeProvider.turnIDField, events: ClaudeCodeProvider.hookEvents))
-        \(providerCase(.codex, turnIDField: CodexProvider.turnIDField, events: CodexProvider.hookEvents))
+        \(providerCase(.claudeCode, turnIDField: ClaudeCodeProvider.turnIDField, events: ClaudeCodeProvider.hookEvents, textFields: ClaudeCodeProvider.textFields))
+        \(providerCase(.codex, turnIDField: CodexProvider.turnIDField, events: CodexProvider.hookEvents, textFields: CodexProvider.textFields, promptsField: CodexProvider.promptsField))
           *) fail "unknown provider $PROVIDER" ;;
         esac
         TURN=$(sanitize "$(extract "$TURN_FIELD")")
         EVENTS="$DIR/$ID.events"
         LOCK="$DIR/$ID.events.lock"
         EVENT_LINE=$(printf \
-          '{"schemaVersion":1,"eventID":"%s","provider":"%s","launchGeneration":"%s","hookEventName":"%s","sessionID":"%s","turnID":"%s","model":"%s","permissionMode":"%s","trigger":"%s"}' \
-          "$EVENT_ID" "$PROVIDER" "$GENERATION" "$EVENT" "$SID" "$TURN" "$MODEL" "$PERMISSION" "$TRIGGER")
+          '{"schemaVersion":1,"eventID":"%s","provider":"%s","launchGeneration":"%s","hookEventName":"%s","sessionID":"%s","turnID":"%s","model":"%s","permissionMode":"%s","trigger":"%s","error":"%s","reason":"%s","source":"%s"}' \
+          "$EVENT_ID" "$PROVIDER" "$GENERATION" "$EVENT" "$SID" "$TURN" "$MODEL" "$PERMISSION" "$TRIGGER" "$ERROR" "$REASON" "$SOURCE")
+
+        if [ -n "$TEXT_FIELD$PROMPTS_FIELD" ]; then
+          printf '%s' '<plist version="1.0"><dict/></plist>' > "$TEXTS" || fail "could not write $TEXTS"
+          if [ -n "$TEXT_FIELD" ] && text "$TEXT_FIELD"; then
+            /usr/bin/plutil -insert text -string "$VALUE" "$TEXTS" || fail "could not record $TEXT_FIELD"
+          fi
+          if [ -n "$PROMPTS_FIELD" ]; then
+            COUNT=$(extract "$PROMPTS_FIELD")
+            case "$COUNT" in ''|*[!0-9]*) COUNT=0 ;; esac
+            I=0
+            while [ "$I" -lt "$COUNT" ]; do
+              text "$PROMPTS_FIELD.$I" || VALUE=
+              if [ "$I" -eq 0 ]; then
+                /usr/bin/plutil -insert prompts -array "$TEXTS" || fail "could not record $PROMPTS_FIELD"
+              fi
+              /usr/bin/plutil -insert prompts -string "$VALUE" -append "$TEXTS" || fail "could not record $PROMPTS_FIELD.$I"
+              I=$((I + 1))
+            done
+          fi
+          JSON=$(/usr/bin/plutil -convert json -o - "$TEXTS") || fail "could not convert $TEXTS"
+          case "$JSON" in
+            '{}') ;;
+            *) EVENT_LINE="${EVENT_LINE%\\}},${JSON#\\{}" ;;
+          esac
+        fi
+
         export EVENTS EVENT_LINE
         /usr/bin/lockf -s -k "$LOCK" /bin/sh -c \
-          'printf "%s\n" "$EVENT_LINE" >> "$EVENTS"' 2>/dev/null \
+          'printf "\n%s\n" "$EVENT_LINE" >> "$EVENTS"' 2>/dev/null \
           || fail "could not append to $EVENTS (status $?)"
         exit 0
         """
 
     /// One provider's part of the script, made from its event table: the
-    /// payload field that names its turn, and the hook events it records.
+    /// payload field that names its turn, the hook events it records, the
+    /// field whose text each event carries, and the field holding a list of
+    /// prompts.
     private static func providerCase(
         _ provider: AgentProviderID,
         turnIDField: String,
-        events: [String: AgentProviderEntry.Meaning]
+        events: [String: AgentProviderEntry.Meaning],
+        textFields: [String: String],
+        promptsField: String? = nil
     ) -> String {
-        """
+        let textCases = textFields.keys.sorted().map { event in
+            "      \(event)) TEXT_FIELD=\(textFields[event] ?? "") ;;"
+        }.joined(separator: "\n")
+        return """
           \(provider.rawValue))
             TURN_FIELD=\(turnIDField)
+            PROMPTS_FIELD=\(promptsField ?? "")
             case "$EVENT" in
               \(events.keys.sorted().joined(separator: "|"))) ;;
               *) exit 0 ;;
             esac
+            case "$EVENT" in
+        \(textCases)
+              *) ;;
+            esac
             ;;
         """
     }
-
-    /// The name of the record the launch script appends when the provider
-    /// returns, for a provider whose entry records its exit.
-    static let exitRecordName = "ProviderExited"
 
     static func install(root: AgentDataRoot) throws {
         try FileManager.default.createDirectory(
@@ -148,26 +227,6 @@ enum AgentHookRuntime {
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: scriptURL.path)
-    }
-
-    static func exitEventCommand(
-        provider: AgentProviderID,
-        agentID: UUID,
-        generation: UUID,
-        statusDirectory: URL
-    ) -> String {
-        let eventFormat = "{\"schemaVersion\":1,\"eventID\":\"\(UUID().uuidString)\","
-            + "\"provider\":\"\(provider.rawValue)\","
-            + "\"launchGeneration\":\"\(generation.uuidString)\","
-            + "\"hookEventName\":\"\(exitRecordName)\",\"exitStatus\":%s}"
-        let directory = shellQuote(statusDirectory.path)
-        let events = shellQuote(
-            statusDirectory.appendingPathComponent("\(agentID.uuidString).events").path)
-        let lock = shellQuote(
-            statusDirectory.appendingPathComponent("\(agentID.uuidString).events.lock").path)
-        return "mkdir -p \(directory); EVENT_LINE=$(printf \(shellQuote(eventFormat)) \"$command_status\"); "
-            + "export EVENT_LINE; /usr/bin/lockf -s -k \(lock) /bin/sh -c "
-            + shellQuote("printf '%s\\n' \"$EVENT_LINE\" >> \(events)")
     }
 
     static func shellQuote(_ value: String) -> String {

@@ -78,6 +78,13 @@ A file for [guiding coding agents](https://agents.md/).
   cases. Treat surface-level retries, duplicated state, and one-off UI patches
   as design failures unless the platform contract requires them.
 
+## Example Data
+
+- The remote is public. Example data in code, tests, scenes, docs,
+  prototypes and pictures is invented.
+- Never copy the names of the owner's projects, agents, folders, tasks or
+  messages into a tracked file, nor anything modelled on them.
+
 ## Issue and PR Guidelines
 
 - Never create an issue.

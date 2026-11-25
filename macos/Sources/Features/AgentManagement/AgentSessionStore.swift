@@ -4,7 +4,7 @@ enum AgentSessionStore {
     private static let safeIDCharacters = CharacterSet.alphanumerics
         .union(CharacterSet(charactersIn: "-_."))
 
-    /// A binding or fork marker that exists but cannot be used: it cannot be
+    /// A binding that exists but cannot be used: it cannot be
     /// read, does not decode, or names a session ID Clawddy would not write.
     struct UnreadableFile: LocalizedError {
         let url: URL
@@ -21,17 +21,14 @@ enum AgentSessionStore {
         var errorDescription: String? { "“\(sessionID)” is not a session ID Clawddy can store." }
     }
 
-    /// The provider the agent's saved session or pending fork belongs to;
-    /// nil when it has neither. Throws when one of them is unreadable.
+    /// The provider the agent's saved session belongs to; nil when it has
+    /// none. Throws when it is unreadable.
     static func persistedProvider(
         for agentID: UUID,
         directory: URL
     ) throws -> AgentProviderID? {
         if let binding = try savedBinding(agentID, directory) {
             return binding.provider
-        }
-        if let pending = try savedFork(agentID, directory) {
-            return pending.provider
         }
 
         // An untagged binding predates provider support and is exclusively
@@ -96,43 +93,12 @@ enum AgentSessionStore {
 
     /// Forgets the agent's saved session, so its next launch starts a new
     /// one: the binding, the untagged file older builds wrote, which
-    /// `session` would otherwise read and resume, and a pending fork.
+    /// `session` would otherwise read and resume.
     static func discardSession(for agentID: UUID, directory: URL) throws {
-        for suffix in ["session.json", "session", "fork.json"] {
+        for suffix in ["session.json", "session"] {
             try FileManager.default.removeItemIfPresent(
                 at: directory.appendingPathComponent("\(agentID.uuidString).\(suffix)"))
         }
-    }
-
-    /// The agent's pending fork for `provider`, or nil when it has none.
-    /// Throws when the marker is unreadable.
-    static func pendingFork(
-        for agentID: UUID,
-        provider: AgentProviderID,
-        directory: URL
-    ) throws -> AgentPendingFork? {
-        guard let pending = try savedFork(agentID, directory),
-              pending.provider == provider
-        else { return nil }
-        return pending
-    }
-
-    static func write(
-        _ pending: AgentPendingFork,
-        for agentID: UUID,
-        directory: URL
-    ) throws {
-        guard valid(pending.sourceSessionID) else {
-            throw InvalidSessionID(sessionID: pending.sourceSessionID)
-        }
-        try write(pending, to: forkURL(agentID, directory))
-    }
-
-    static func clearPendingFork(
-        for agentID: UUID,
-        directory: URL
-    ) throws {
-        try FileManager.default.removeItemIfPresent(at: forkURL(agentID, directory))
     }
 
     static func valid(_ value: String) -> Bool {
@@ -145,16 +111,8 @@ enum AgentSessionStore {
         directory.appendingPathComponent("\(agentID.uuidString).session.json")
     }
 
-    static func forkURL(_ agentID: UUID, _ directory: URL) -> URL {
-        directory.appendingPathComponent("\(agentID.uuidString).fork.json")
-    }
-
     private static func savedBinding(_ agentID: UUID, _ directory: URL) throws -> AgentSessionBinding? {
         try decoded(AgentSessionBinding.self, at: sessionURL(agentID, directory), sessionID: \.sessionID)
-    }
-
-    private static func savedFork(_ agentID: UUID, _ directory: URL) throws -> AgentPendingFork? {
-        try decoded(AgentPendingFork.self, at: forkURL(agentID, directory), sessionID: \.sourceSessionID)
     }
 
     /// The file decoded, or nil when there is no file. The session ID it
@@ -188,11 +146,10 @@ enum AgentSessionStore {
 
     /// The untagged binding's text, trimmed, or nil when there is none.
     ///
-    /// Every use is logged as an error. The production app runs `cleanupV5`
-    /// at its first start, before it reads anything, and that converts every
-    /// untagged binding; the dev seed writes none. So in either app a use
-    /// comes after the cleanup report exists, and the fallback can be deleted
-    /// only while the log shows none.
+    /// Every use is logged as an error. Earlier builds converted every
+    /// untagged binding at their first start on older data (`flattenV6`,
+    /// since deleted), so the fallback can be deleted once the log shows
+    /// none.
     private static func legacySession(_ agentID: UUID, _ directory: URL) throws -> String? {
         let url = directory.appendingPathComponent("\(agentID.uuidString).session")
         let text: String
@@ -205,7 +162,7 @@ enum AgentSessionStore {
         }
         AgentDiagnostics.unifiedLog(
             .error,
-            "used the legacy binding \(url.path), which cleanupV5 converts: the .session fallback is still needed")
+            "used the legacy binding \(url.path), which earlier builds converted: the .session fallback is still needed")
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 

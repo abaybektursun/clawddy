@@ -10,7 +10,7 @@ struct AgentActivationIntentTests {
         explicit: UUID?,
         selected: UUID?,
         presented: UUID?,
-        surfaceIsLive: Bool = true,
+        canSee: Bool = true,
         visible: Bool = true,
         key: Bool = true,
         miniaturized: Bool = false
@@ -19,7 +19,7 @@ struct AgentActivationIntentTests {
             explicitAgentID: explicit,
             selectedAgentID: selected,
             presentedAgentID: presented,
-            presentedSurfaceIsLive: surfaceIsLive,
+            personCanSee: canSee,
             windowIsVisible: visible,
             windowIsKey: key,
             windowIsMiniaturized: miniaturized)
@@ -36,10 +36,11 @@ struct AgentActivationIntentTests {
             explicit: agentID,
             selected: agentID,
             presented: agentID,
-            surfaceIsLive: false)) == nil)
+            canSee: false)) == nil)
         #expect(AgentLaunchPresentationPolicy.decide(
             agentID: agentID,
             selectedAgentID: agentID,
+            anotherViewHasKeys: false,
             windowIsVisible: true,
             windowIsMiniaturized: false) == AgentLaunchPresentation(
                 presentsPane: true,
@@ -68,10 +69,11 @@ struct AgentActivationIntentTests {
             explicit: agentID,
             selected: agentID,
             presented: agentID,
-            surfaceIsLive: false)) == nil)
+            canSee: false)) == nil)
         #expect(AgentLaunchPresentationPolicy.decide(
             agentID: agentID,
             selectedAgentID: agentID,
+            anotherViewHasKeys: false,
             windowIsVisible: true,
             windowIsMiniaturized: false).focusesTerminal)
 
@@ -88,6 +90,7 @@ struct AgentActivationIntentTests {
         let decision = AgentLaunchPresentationPolicy.decide(
             agentID: launchedAgentID,
             selectedAgentID: newerSelectionID,
+            anotherViewHasKeys: false,
             windowIsVisible: true,
             windowIsMiniaturized: false)
         #expect(decision == AgentLaunchPresentation(
@@ -110,6 +113,7 @@ struct AgentActivationIntentTests {
         #expect(!AgentLaunchPresentationPolicy.decide(
             agentID: launchedAgentID,
             selectedAgentID: nil,
+            anotherViewHasKeys: false,
             windowIsVisible: true,
             windowIsMiniaturized: false).presentsPane)
     }
@@ -120,6 +124,7 @@ struct AgentActivationIntentTests {
         let decision = AgentLaunchPresentationPolicy.decide(
             agentID: agentID,
             selectedAgentID: agentID,
+            anotherViewHasKeys: false,
             windowIsVisible: false,
             windowIsMiniaturized: false)
         #expect(decision == AgentLaunchPresentation(
@@ -129,8 +134,18 @@ struct AgentActivationIntentTests {
         #expect(!AgentLaunchPresentationPolicy.decide(
             agentID: agentID,
             selectedAgentID: agentID,
+            anotherViewHasKeys: false,
             windowIsVisible: true,
             windowIsMiniaturized: true).focusesTerminal)
+
+        // Principle 3: the sidebar keeps the keys while it has them, as when
+        // the arrow keys chose the agent that comes back.
+        #expect(AgentLaunchPresentationPolicy.decide(
+            agentID: agentID,
+            selectedAgentID: agentID,
+            anotherViewHasKeys: true,
+            windowIsVisible: true,
+            windowIsMiniaturized: false) == AgentLaunchPresentation(presentsPane: true, focusesTerminal: false))
     }
 
     @Test func focusIsNeverGrantedWithoutPresentation() {
@@ -138,12 +153,15 @@ struct AgentActivationIntentTests {
         for selected in [agentID, UUID(), nil] as [UUID?] {
             for visible in [true, false] {
                 for miniaturized in [true, false] {
-                    let decision = AgentLaunchPresentationPolicy.decide(
-                        agentID: agentID,
-                        selectedAgentID: selected,
-                        windowIsVisible: visible,
-                        windowIsMiniaturized: miniaturized)
-                    #expect(!decision.focusesTerminal || decision.presentsPane)
+                    for sidebarHasKeys in [true, false] {
+                        let decision = AgentLaunchPresentationPolicy.decide(
+                            agentID: agentID,
+                            selectedAgentID: selected,
+                            anotherViewHasKeys: sidebarHasKeys,
+                            windowIsVisible: visible,
+                            windowIsMiniaturized: miniaturized)
+                        #expect(!decision.focusesTerminal || decision.presentsPane)
+                    }
                 }
             }
         }
@@ -175,7 +193,7 @@ struct AgentActivationIntentTests {
             explicit: agentID,
             selected: agentID,
             presented: agentID,
-            surfaceIsLive: false)) == nil)
+            canSee: false)) == nil)
         #expect(AgentViewingPolicy.viewedAgentID(in: context(
             explicit: agentID,
             selected: agentID,
@@ -209,5 +227,21 @@ struct AgentActivationIntentTests {
             selected: agentID,
             presented: agentID,
             key: true)) == agentID)
+    }
+
+    /// The reading ruling (flows.md 3.3): shown in a key, visible, uncovered
+    /// window to a person who can see it, whether its CLI runs or not.
+    @Test func readOnlyWhileThePersonCanSeeIt() {
+        let agentID = UUID()
+        func viewed(canSee: Bool = true, visible: Bool = true, key: Bool = true, miniaturized: Bool = false) -> Bool {
+            AgentViewingPolicy.viewedAgentID(in: context(
+                explicit: agentID, selected: agentID, presented: agentID,
+                canSee: canSee, visible: visible, key: key, miniaturized: miniaturized)) == agentID
+        }
+        #expect(viewed())
+        #expect(!viewed(canSee: false))
+        #expect(!viewed(visible: false))
+        #expect(!viewed(key: false))
+        #expect(!viewed(miniaturized: true))
     }
 }

@@ -41,7 +41,7 @@ enum AgentTerminalEnvironmentPolicy {
     /// Removes agent identity from this process's own environment by name, so
     /// an app started from an agent's terminal never passes that agent's
     /// identity to its terminals, probes or agents. Called once at launch,
-    /// before any terminal is created or restored.
+    /// before `ghostty_init` takes its snapshot of the environment (main.swift).
     static func removeInheritedAgentIdentity() {
         for name in inheritedAgentIdentityVariables {
             precondition(unsetenv(name) == 0, "unsetenv(\(name)) failed: errno \(errno)")
@@ -66,18 +66,6 @@ enum AgentTerminalEnvironmentPolicy {
             interactiveDefault
         }
         return result
-    }
-
-    /// A surface configuration overlays variables but cannot delete values
-    /// inherited by Ghostty's child process. Normalize the login shell itself
-    /// so the provider's eventual fallback shell retains interactive defaults
-    /// and does not inherit parent-agent session markers.
-    static var shellPrelude: String {
-        let unset = "unset \(inheritedAutomationVariables.joined(separator: " "))"
-        let exports = interactivePresentationDefaults.sorted(by: { $0.key < $1.key })
-            .map { "export \($0.key)=\(AgentHookRuntime.shellQuote($0.value))" }
-            .joined(separator: "\n")
-        return "\(unset)\n\(exports)"
     }
 
     /// Returns the authoritative provider entrypoint. The explicit `env -u`

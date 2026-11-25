@@ -52,8 +52,9 @@ macos/Sources/Features/AgentManagement/
   AgentTerminalHost.swift          — Terminal model/delegate adapter for each agent
   AgentDetailViewController.swift  — Terminal-surface ownership and switching
   AgentWorkspaceViews.swift        — Navigation, agent list, search, and editing
-  AgentCommandPaletteView.swift    — Agent entries for the shared command palette
-  AgentSearchPanel.swift           — Floating command-palette panel
+  AgentCommands.swift              — Agent menu commands, keys and key routing
+  AgentFinderView.swift            — The finder in the search panel
+  AgentSearchPanel.swift           — Floating panel for the finder
   AgentWorkspaceController.swift   — Split-view workspace and window creation
 
 ## Download

@@ -20,14 +20,7 @@ struct AgentDataRoot: Equatable, Sendable {
     var hooksDir: URL { url.appendingPathComponent("hooks", isDirectory: true) }
     var runtimeDir: URL { url.appendingPathComponent("runtime", isDirectory: true) }
     var launchDir: URL { runtimeDir.appendingPathComponent("launch", isDirectory: true) }
-    var codexHookReviewMarker: URL { url.appendingPathComponent("codex-hook-review-required") }
     var lockFile: URL { url.appendingPathComponent("clawddy.lock") }
-    /// agent-cron's folder. Clawddy never reads, writes or copies it.
-    var cronDir: URL { url.appendingPathComponent("cron", isDirectory: true) }
-
-    func migrationReportFile(mode: AgentMigrationMode) -> URL {
-        url.appendingPathComponent("migration-\(mode.rawValue).json")
-    }
 
     static func isRunningTests(environment: [String: String]) -> Bool {
         environment["XCTestConfigurationFilePath"] != nil
@@ -65,48 +58,17 @@ struct AgentDataRoot: Equatable, Sendable {
             .appendingPathComponent(productionDirectoryName, isDirectory: true))
     }
 
-    /// Whether this start first copies the production root's Claude agents
-    /// into its own root (`seedAgentDevCopy`). Only the dev bundle does,
-    /// only while its own root has no `agents.json` (it has none before the
-    /// first seed, nor after one that stopped), and only when the production
-    /// root has an `agents.json` to copy (agent-cron alone may have created
-    /// that folder). Every other start uses its root as it is, or empty.
-    static func seedsDevCopy(
-        bundleIdentifier: String?,
-        configExists: Bool,
-        productionConfigExists: Bool
-    ) -> Bool {
-        bundleIdentifier == devBundleIdentifier && !configExists && productionConfigExists
-    }
-
-    /// Whether this start first runs `cleanupV5` on its root
-    /// (`runCleanupV5OnFirstStart`), the switch-over's conversion of the
-    /// data older apps wrote. Only the production bundle does, only on a
-    /// root that holds an `agents.json`, and only until that run has left its
-    /// report in the root. Dev and test roots never hold older data.
-    static func cleansUpV5(
-        bundleIdentifier: String?,
-        configExists: Bool,
-        reportExists: Bool
-    ) -> Bool {
-        isProductionBundle(bundleIdentifier) && configExists && !reportExists
-    }
-
-    /// Where an in-place migration of the production root backs it up:
-    /// `~/.config/ghostty-agents-backups/<yyyyMMdd-HHmmss>-<mode>/`, outside
-    /// the root, so neither the app's watcher nor agent-cron sees it.
-    static func migrationBackupDir(
-        mode: AgentMigrationMode,
-        homeDirectory: URL,
-        date: Date
-    ) -> URL {
+    /// Where a one-time change of this root backs up what it replaces:
+    /// beside it, in `<root>-backups/<yyyyMMdd-HHmmss>-<name>/` (for the
+    /// production root `~/.config/ghostty-agents-backups/…`), outside the
+    /// root, so neither the app's watcher nor agent-cron sees it.
+    func backupDir(named name: String, date: Date) -> URL {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return homeDirectory
-            .appendingPathComponent(".config", isDirectory: true)
-            .appendingPathComponent("\(productionDirectoryName)-backups", isDirectory: true)
-            .appendingPathComponent("\(formatter.string(from: date))-\(mode.rawValue)", isDirectory: true)
+        return url.deletingLastPathComponent()
+            .appendingPathComponent("\(url.lastPathComponent)-backups", isDirectory: true)
+            .appendingPathComponent("\(formatter.string(from: date))-\(name)", isDirectory: true)
     }
 
     /// Why this bundle must not run on this root, or nil when the pairing is
@@ -187,18 +149,5 @@ struct AgentDataRoot: Equatable, Sendable {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(code))
         }
         return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-    }
-
-    /// Runs `body` holding the root's lock, and unlocks however `body` ends.
-    /// Unlocking does not wait for the handle to be deallocated, which can
-    /// happen well after the call returns.
-    func withLock<T>(_ body: () throws -> T) throws -> T {
-        let handle = try lock()
-        defer {
-            precondition(
-                flock(handle.fileDescriptor, LOCK_UN) == 0,
-                "Unlocking \(lockFile.path) failed with errno \(errno).")
-        }
-        return try body()
     }
 }

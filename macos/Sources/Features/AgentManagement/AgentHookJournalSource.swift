@@ -162,9 +162,10 @@ final class AgentHookJournalSource {
                 do {
                     event = try JSONDecoder().decode(AgentRawProviderEvent.self, from: record)
                 } catch {
-                    diagnose(
-                        .error,
-                        "undecodable record in \(Self.journalURL(id, in: statusDir).path) at byte \(offset): \(AgentConfig.describeLoadFailure(error))")
+                    let reason = "undecodable record in \(Self.journalURL(id, in: statusDir).path) at byte \(offset): \(AgentConfig.describeLoadFailure(error))"
+                    diagnose(.error, reason)
+                    observe(AgentStatusObservation(
+                        agentID: id, generation: nil, source: .hookJournal, event: .unreadableRecord(reason)))
                     continue
                 }
                 observe(AgentStatusObservation(
@@ -291,6 +292,15 @@ final class AgentHookJournalSource {
 
     nonisolated private static func journalURL(_ id: UUID, in statusDir: URL) -> URL {
         statusDir.appendingPathComponent("\(id.uuidString).events")
+    }
+
+    /// When the agent's hooks last appended to its event file, which they do
+    /// from the start of each launch to its end; nil when there is no file,
+    /// because the agent has never run.
+    nonisolated static func lastRecordDate(of id: UUID, in statusDir: URL) throws -> Date? {
+        let url = journalURL(id, in: statusDir)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
     }
 
     /// The file's size, and 0 when there is no file yet.

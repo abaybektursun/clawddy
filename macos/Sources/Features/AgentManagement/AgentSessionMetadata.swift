@@ -18,10 +18,18 @@ struct AgentSessionMetadata: Codable, Equatable, Sendable {
     var totalOutputTokens: Int?
     var totalCostUSD: Double?
     var durationMilliseconds: Int?
+    /// Lines the session added and removed, as Claude's status line reports
+    /// them: the header's "+38 −9".
+    var linesAdded: Int?
+    var linesRemoved: Int?
     var sessionID: String?
     var runtimeVersion: String?
     var permissionMode: String?
     var thinkingEnabled: Bool?
+    /// When the plan's most used usage window resets, from the status
+    /// line's `rate_limits` (Claude Code 2.1.331: `five_hour` and `seven_day`,
+    /// each with `used_percentage` and `resets_at` in seconds since 1970).
+    var limitResetsAt: Date?
     var observedAt: Date
 
     init(
@@ -40,43 +48,6 @@ struct AgentSessionMetadata: Codable, Equatable, Sendable {
         self.runtimeVersion = runtimeVersion
         self.permissionMode = permissionMode
         self.observedAt = observedAt
-    }
-
-    var displayModel: String? {
-        nonempty(modelDisplayName) ?? nonempty(modelID)
-    }
-
-    var displayEffort: String? {
-        guard let effort = nonempty(effortLevel) else { return nil }
-        switch effort.lowercased() {
-        case "xhigh": return "Extra high"
-        case "max": return "Maximum"
-        default: return effort.replacingOccurrences(of: "_", with: " ").capitalized
-        }
-    }
-
-    /// Claude defines context use as current input plus cache creation/read input.
-    var contextUsedTokens: Int? {
-        let values = [currentInputTokens, cacheCreationInputTokens, cacheReadInputTokens]
-        guard values.contains(where: { $0 != nil }) else { return nil }
-        return values.compactMap { $0 }.reduce(0, +)
-    }
-
-    var contextFraction: Double? {
-        if let percentage = contextUsedPercentage {
-            return min(max(percentage / 100, 0), 1)
-        }
-        guard let used = contextUsedTokens, let size = contextWindowSize, size > 0 else { return nil }
-        return min(max(Double(used) / Double(size), 0), 1)
-    }
-
-    var contextPercentText: String? {
-        guard let fraction = contextFraction else { return nil }
-        return "\(Int((fraction * 100).rounded()))%"
-    }
-
-    var searchTerms: [String] {
-        [displayModel, displayEffort, contextPercentText].compactMap { $0 }
     }
 
     static func decodeStatusLinePayload(_ data: Data, observedAt: Date = Date()) throws -> Self {
@@ -98,27 +69,14 @@ struct AgentSessionMetadata: Codable, Equatable, Sendable {
         snapshot.totalInputTokens = payload.contextWindow?.totalInputTokens
         snapshot.totalOutputTokens = payload.contextWindow?.totalOutputTokens
         snapshot.totalCostUSD = payload.cost?.totalCostUSD
+        snapshot.linesAdded = payload.cost?.totalLinesAdded
+        snapshot.linesRemoved = payload.cost?.totalLinesRemoved
         snapshot.durationMilliseconds = payload.cost?.totalDurationMS
         snapshot.thinkingEnabled = payload.thinking?.enabled
+        let windows = [payload.rateLimits?.fiveHour, payload.rateLimits?.sevenDay].compactMap { $0 }
+        snapshot.limitResetsAt = windows.max { ($0.usedPercentage ?? 0) < ($1.usedPercentage ?? 0) }?
+            .resetsAt.map { Date(timeIntervalSince1970: $0) }
         return snapshot
-    }
-
-    static func formatTokens(_ value: Int) -> String {
-        let magnitude = abs(value)
-        if magnitude < 1_000 { return value.formatted() }
-        if magnitude < 100_000 {
-            return String(format: "%.1fK", Double(value) / 1_000)
-        }
-        if magnitude < 1_000_000 {
-            return "\(Int((Double(value) / 1_000).rounded()))K"
-        }
-        return String(format: "%.1fM", Double(value) / 1_000_000)
-    }
-
-    private func nonempty(_ value: String?) -> String? {
-        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty
-        else { return nil }
-        return value
     }
 }
 
@@ -173,14 +131,38 @@ private struct StatusLinePayload: Decodable {
     struct Cost: Decodable {
         var totalCostUSD: Double?
         var totalDurationMS: Int?
+        var totalLinesAdded: Int?
+        var totalLinesRemoved: Int?
 
         enum CodingKeys: String, CodingKey {
             case totalCostUSD = "total_cost_usd"
             case totalDurationMS = "total_duration_ms"
+            case totalLinesAdded = "total_lines_added"
+            case totalLinesRemoved = "total_lines_removed"
         }
     }
 
     struct Thinking: Decodable { var enabled: Bool? }
+
+    struct RateLimitWindow: Decodable {
+        var usedPercentage: Double?
+        var resetsAt: Double?
+
+        enum CodingKeys: String, CodingKey {
+            case usedPercentage = "used_percentage"
+            case resetsAt = "resets_at"
+        }
+    }
+
+    struct RateLimits: Decodable {
+        var fiveHour: RateLimitWindow?
+        var sevenDay: RateLimitWindow?
+
+        enum CodingKeys: String, CodingKey {
+            case fiveHour = "five_hour"
+            case sevenDay = "seven_day"
+        }
+    }
 
     var model: Model?
     var effort: Effort?
@@ -189,10 +171,12 @@ private struct StatusLinePayload: Decodable {
     var sessionID: String?
     var version: String?
     var thinking: Thinking?
+    var rateLimits: RateLimits?
 
     enum CodingKeys: String, CodingKey {
         case model, effort, cost, version, thinking
         case contextWindow = "context_window"
         case sessionID = "session_id"
+        case rateLimits = "rate_limits"
     }
 }

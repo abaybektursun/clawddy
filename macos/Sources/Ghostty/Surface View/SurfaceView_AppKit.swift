@@ -19,6 +19,11 @@ extension Ghostty {
             }
         }
 
+        // A Clawddy agent's terminal: it shows no OSC 9;4 progress bar (the
+        // agent's mark and sentence say the same) and posts no desktop
+        // notification of its own (the app's, off by default, is the one).
+        var isAgentTerminal = false
+
         // The progress report (if any)
         override var progressReport: Action.ProgressReport? {
             didSet {
@@ -863,6 +868,12 @@ extension Ghostty {
             // To update our tracking area we just recreate it all.
             trackingAreas.forEach { removeTrackingArea($0) }
 
+            // A hidden surface (Clawddy keeps every agent's terminal in its
+            // window, hidden unless shown) tracks no pointer, so its program
+            // gets no mouse reports. Whoever unhides it updates its tracking
+            // areas again.
+            guard !isHiddenOrHasHiddenAncestor else { return }
+
             // This tracking area is across the entire frame to notify us of mouse movements.
             addTrackingArea(NSTrackingArea(
                 rect: frame,
@@ -1626,6 +1637,18 @@ extension Ghostty {
             }
             menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
 
+            // Clawddy: an agent's terminal is never split, tabbed or renamed
+            // by hand: Copy, Paste, Reset Terminal and Read-only only.
+            if isAgentTerminal {
+                menu.addItem(.separator())
+                item = menu.addItem(withTitle: "Reset Terminal", action: #selector(resetTerminal(_:)), keyEquivalent: "")
+                item.setImageIfDesired(systemSymbolName: "arrow.trianglehead.2.clockwise")
+                item = menu.addItem(withTitle: "Terminal Read-only", action: #selector(toggleReadonly(_:)), keyEquivalent: "")
+                item.setImageIfDesired(systemSymbolName: "eye.fill")
+                item.state = readonly ? .on : .off
+                return menu
+            }
+
             menu.addItem(.separator())
             item = menu.addItem(withTitle: "Split Right", action: #selector(splitRight(_:)), keyEquivalent: "")
             item.setImageIfDesired(systemSymbolName: "rectangle.righthalf.inset.filled")
@@ -2285,6 +2308,12 @@ extension Ghostty.SurfaceView: NSMenuItemValidation {
 
         case #selector(findHide):
             return searchState != nil
+
+        // Clawddy: no split, closing it as a split, or a title by hand for an
+        // agent's terminal, from the menu bar either.
+        case #selector(splitRight(_:)), #selector(splitLeft(_:)), #selector(splitDown(_:)), #selector(splitUp(_:)),
+             #selector(closeSurface(_:)), #selector(changeTitle(_:)), #selector(toggleTerminalInspector(_:)):
+            return !isAgentTerminal
 
         case #selector(toggleReadonly):
             item.state = readonly ? .on : .off

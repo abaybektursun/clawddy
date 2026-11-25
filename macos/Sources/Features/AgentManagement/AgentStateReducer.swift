@@ -27,27 +27,20 @@ enum AgentActivityState: Codable, Equatable, Sendable {
     }
 }
 
-enum AgentInteractionState: Codable, Equatable, Sendable {
-    case none
-    case permission
-    case input
-    case authentication
-}
-
 enum AgentTelemetryHealth: Equatable, Sendable {
     case notStarted
     case awaiting
     case live
-    case delayed
     case unavailable(String)
 }
 
 enum AgentTurnState: Equatable, Sendable {
     case inactive
     /// The program reported `working` with no turn active. The turn starts
-    /// when that report has stood for `AgentBridge.turnStartDelay`, so the
-    /// `working` of `/clear`, `/exit` or the `/exit` confirmation, which
-    /// lasts 14 to 63 ms, starts nothing and changes nothing on screen.
+    /// with the prompt, or when that report has stood for the provider's
+    /// `turnStartDelay`, so the `working` of a command that submits no
+    /// prompt (`/clear`, `/exit`, `/resume`) starts nothing and changes
+    /// nothing on screen.
     case starting
     case active(turnID: String?)
     /// A manual compaction (`/compact`): it ends as a turn does, but
@@ -63,70 +56,124 @@ struct AgentCompletionID: Codable, Equatable, Hashable, Sendable {
     var eventID: String
 }
 
+/// An agent's state: its stored record, which says what the person sees
+/// and survives restarts, and what its current launch knows of its CLI
+/// process and turn, which does not.
 struct AgentRuntimeSnapshot: Equatable, Sendable {
     var surfaceState: AgentSurfaceState = .inactive
     var processState: AgentProcessState = .notStarted
     var activityState: AgentActivityState = .unknown
-    var interactionState: AgentInteractionState = .none
     var telemetryHealth: AgentTelemetryHealth = .notStarted
-    var unreadCompletion: AgentCompletionID?
     var lastAppliedCompletion: AgentCompletionID?
-    var failureMessage: String?
-    var runtimeErrorMessage: String?
     var launchGeneration: UUID?
     var sessionID: String?
     var turnState: AgentTurnState = .inactive
     /// The saved session this launch resumes, until the provider starts it.
     var resumingSessionID: String?
     /// The saved session this launch found missing. The agent can only
-    /// start fresh; `failureMessage` says why.
+    /// start fresh.
     var missingSessionID: String?
     /// The saved session could not be read, so this launch did not start.
-    /// The agent can only start fresh; `failureMessage` says why.
+    /// The agent can only start fresh.
     var sessionUnreadable = false
     /// This launch created its session, `sessionID`, and the session is not
-    /// on disk yet: Claude writes a new or forked session only with its
+    /// on disk yet: Claude writes a new session only with its
     /// first entry. It is saved, and becomes the agent's binding, when the
-    /// first turn starts (`sessionSaved`); until then a relaunch creates or
-    /// forks it again instead of resuming a session that does not exist.
+    /// first turn starts (`sessionSaved`); until then a relaunch creates it
+    /// again instead of resuming a session that does not exist.
     var sessionUnsaved = false
     /// Failures this launch's `error` reports raised whose `StopFailure`
     /// record has not arrived. Claude reports one failed turn on both
     /// channels, the record 15 to 27 ms after the report and the event file
     /// up to 0.3 s later, when an `idle` or the next turn may already have
-    /// cleared the failure; the record must then not fail a turn again.
+    /// come; the record must then not fail a turn again.
     var stopFailuresDue = 0
+    /// The provider's exit status, as its launch script reported it.
+    var exitStatus: Int?
+    /// The user stopped the agent: its provider exited with status 0, or
+    /// its terminal was closed or "Stop agent" chosen.
+    var stoppedOnPurpose = false
+    /// The turn's last message, come before the turn's end.
+    var pendingMessage: String?
+    /// A `done` that ended a `working` before its prompt's record came.
+    var endedBeforeItsPrompt: AgentCompletionID?
+    /// Codex turns its terminal or title ended whose notify has not come.
+    var turnsEndedWithoutNotify = 0
+    /// The turn of Codex's last notify.
+    var lastNotifiedTurn: String?
+    /// This launch gave the CLI its first prompt on the command line.
+    var launchPrompted = false
+    /// The CLI reads its input: what is typed or sent reaches its prompt
+    /// (probes.md, P2 "ready"). Nothing is typed into it before.
+    var inputReady = false
+    /// Codex reported `idle` before any `working`; its start-up `working`
+    /// may still come, so it is ready once 3 s pass without one.
+    var inputSettling = false
+    /// Codex reported a `working` in this launch.
+    var sawWorking = false
+    /// A prompt was submitted in this launch.
+    var prompted = false
+    /// Prompts Clawddy put into the CLI, by the person or by the app, whose
+    /// report by the CLI has not come: it is recorded once, when sent.
+    var promptsDue: [String] = []
+    /// A prompt was sent, or given on the command line, and no turn has
+    /// started for it yet: the start-up `idle` before its `working` does not
+    /// end the agent's work.
+    var promptAwaitsTurn = false
+    /// The agent's stored record.
+    var record = AgentRecord()
 }
 
 enum AgentRuntimeEvent: Equatable, Sendable {
-    case launchRequested(generation: UUID)
+    /// `prompted` when the launch gives the CLI its first prompt.
+    case launchRequested(generation: UUID, prompted: Bool = false)
     /// `newSessionID` is the session the launch creates under an ID it
     /// chose, which is not on disk until the first turn.
     case surfaceOpened(generation: UUID, resumedSessionID: String? = nil, newSessionID: String? = nil)
     case launchTimedOut(generation: UUID)
-    case launchFailed(generation: UUID, message: String, sessionUnreadable: Bool = false)
-    case interactionRequired(generation: UUID, interaction: AgentInteractionState)
+    case launchFailed(generation: UUID, problem: AgentRecord.Problem, sessionUnreadable: Bool = false)
     case provider(
         generation: UUID,
         provider: AgentProviderID,
         eventID: String,
         event: AgentDomainEvent,
         isViewed: Bool)
-    case compactionExpired(generation: UUID)
     /// The `working` report that put the turn in `.starting` has stood for
-    /// `AgentBridge.turnStartDelay`.
+    /// the provider's `turnStartDelay`.
     case turnStartSettled(generation: UUID)
-    case telemetryDelayed(generation: UUID)
-    case surfaceDied(generation: UUID?)
-    case completionViewed
-    /// The provider's sign-in state, from a health probe.
-    case providerAuthentication(AgentProviderAuthState)
+    /// Codex's `idle` has stood 3 s without a start-up `working`.
+    case inputSettled(generation: UUID)
+    /// Clawddy put `prompt` into the CLI and submitted it, for `by`.
+    case sent(prompt: String, by: AgentRecord.Prompt.Sender)
+    /// The agent's terminal is gone; `byUser` when the user closed it or
+    /// chose "Stop agent".
+    case surfaceDied(generation: UUID?, byUser: Bool)
+    /// Clawddy started and read the record: a turn under way when it
+    /// quit or crashed was cut off.
+    case appStarted
+    /// The person opened the agent.
+    case opened
+    case markedUnread
+    /// The person settled it; removing its project settles a working one too.
+    case settled(includingWorking: Bool)
+    case unsettled
+    /// The reset time its usage limit gave has passed.
+    case usageLimitReset
+    /// The app continues a turn a restart cut off, sending `prompt`.
+    case continuedByApp(prompt: String)
+    /// A cut-off agent that cannot be continued: no conversation and no
+    /// first instruction.
+    case notContinued
+    /// The agent's name now comes from `source`.
+    case named(by: AgentRecord.NameSource)
+    /// What its CLI reported could not be read or recorded.
+    case reportFailed
 }
 
 enum AgentRuntimeEffect: Equatable, Sendable {
     case becameAlive
     /// The session the launch created is on disk now: it is the agent's
-    /// binding, and a fork it came from is done.
+    /// binding.
     case sessionSaved
     /// The session the launch resumed does not exist; its binding records
     /// that, so the agent offers only Start Fresh until it is discarded.
@@ -136,34 +183,69 @@ enum AgentRuntimeEffect: Equatable, Sendable {
     case failed
     case unreadChanged
     case providerExited(Int)
+    /// The CLI reads its input now (`inputReady`).
+    case inputReady
+    /// Codex's first `idle` came before its start-up `working`: settle in 3 s.
+    case inputSettling
 }
 
+/// The one reducer of an agent's state: its record's states and every
+/// transition between them (`docs/clawddy-design/flows.md` 2.2), from what
+/// the CLI reports in its terminal and hooks and from what the person does.
 enum AgentStateReducer {
     static func reduce(
         _ current: AgentRuntimeSnapshot,
-        event: AgentRuntimeEvent
+        event: AgentRuntimeEvent,
+        at now: Date = .distantPast
     ) -> (state: AgentRuntimeSnapshot, effects: [AgentRuntimeEffect]) {
-        var state = current
-        var effects: [AgentRuntimeEffect] = []
+        var reduction = Reduction(state: current, now: now)
+        reduction.apply(event)
+        return (reduction.state, reduction.effects)
+    }
+}
 
+/// One application of the reducer: the state as it changes, the effects it
+/// raises, and the time of the event.
+private struct Reduction {
+    var state: AgentRuntimeSnapshot
+    let now: Date
+    var effects: [AgentRuntimeEffect] = []
+    var provider: AgentProviderID = .claudeCode
+
+    init(state: AgentRuntimeSnapshot, now: Date) {
+        self.state = state
+        self.now = now
+    }
+
+    var record: AgentRecord {
+        get { state.record }
+        set { state.record = newValue }
+    }
+
+    mutating func apply(_ event: AgentRuntimeEvent) {
         switch event {
-        case .launchRequested(let generation):
+        case .launchRequested(let generation, let prompted):
+            // A new launch leaves the last one's failure behind.
+            if let kind = record.problem?.kind, [.launch, .notInstalled, .conversationMissing, .didNotStart, .openElsewhere].contains(kind) {
+                change(to: .finished)
+                record.problem = nil
+            }
+            let kept = state
             state = AgentRuntimeSnapshot(
                 surfaceState: .opening,
                 processState: .launching,
                 activityState: .unknown,
-                interactionState: .none,
                 telemetryHealth: .awaiting,
-                unreadCompletion: current.unreadCompletion,
-                lastAppliedCompletion: current.lastAppliedCompletion,
-                failureMessage: nil,
-                runtimeErrorMessage: nil,
+                lastAppliedCompletion: kept.lastAppliedCompletion,
                 launchGeneration: generation,
-                sessionID: current.sessionID,
-                turnState: .inactive)
+                sessionID: kept.sessionID,
+                turnState: .inactive,
+                launchPrompted: prompted,
+                record: kept.record)
+            state.promptAwaitsTurn = prompted
 
         case .surfaceOpened(let generation, let resumedSessionID, let newSessionID):
-            guard state.launchGeneration == generation else { break }
+            guard state.launchGeneration == generation else { return }
             state.surfaceState = .open
             state.resumingSessionID = resumedSessionID
             if let newSessionID {
@@ -172,288 +254,366 @@ enum AgentStateReducer {
             }
 
         case .launchTimedOut(let generation):
-            guard state.launchGeneration == generation,
-                  state.processState == .launching
-            else { break }
-            state.telemetryHealth = .unavailable(
-                "The terminal is running, but agent activity status is unavailable.")
+            // Its CLI did not come to read its input within the limit.
+            guard state.launchGeneration == generation, !state.inputReady,
+                  state.processState != .exited
+            else { return }
+            state.telemetryHealth = .unavailable("It did not start within 30 seconds.")
+            stop(AgentRecord.Problem(kind: .didNotStart))
 
-        case .launchFailed(let generation, let message, let sessionUnreadable):
-            guard state.launchGeneration == generation else { break }
+        case .launchFailed(let generation, let problem, let sessionUnreadable):
+            guard state.launchGeneration == generation else { return }
             state.sessionUnreadable = sessionUnreadable
             state.surfaceState = .failed
             state.processState = .exited
             state.activityState = .unknown
-            state.interactionState = .none
             state.turnState = .inactive
-            state.failureMessage = message
-            state.runtimeErrorMessage = nil
-            effects.append(.failed)
-
-        case .interactionRequired(let generation, let interaction):
-            guard state.launchGeneration == generation,
-                  interaction != .none
-            else { break }
-            if state.interactionState != interaction {
-                state.interactionState = interaction
-                effects.append(.waitingForUser)
-            }
+            stop(problem)
 
         case .provider(let generation, let provider, let eventID, let domainEvent, let isViewed):
-            guard state.launchGeneration == generation else { break }
-            if case .providerExited(let status) = domainEvent {
-                // A launch's provider exits once. Codex's exit record, which
-                // its launch script still writes, follows the exit report and
-                // changes nothing, as does a report printed again later.
-                guard state.processState != .exited else { return (current, []) }
-                // "Pre-start" is the launch phase, not "not currently
-                // running": a session that started has moved the process to
-                // .running, and its exit, with any status, is no launch
-                // failure. A launch that already failed because its session
-                // is missing keeps saying so.
-                let stillLaunching = state.processState == .notStarted
-                    || state.processState == .launching
-                state.processState = .exited
-                state.activityState = .unknown
-                state.interactionState = .none
-                state.turnState = .inactive
-                if stillLaunching && status != 0 && state.missingSessionID == nil {
-                    state.failureMessage = "The provider exited before the agent session started (status \(status))."
-                    effects.append(.failed)
-                }
-                effects.append(.providerExited(status))
-                break
-            }
-
-            switch domainEvent {
-            case .sessionStarted, .turnCompleted:
-                confirmProviderAlive(&state, effects: &effects)
-            case .turnStarted, .turnFailed:
-                // A prompt or a failure the event file delivers after the
-                // exit report starts or fails no turn: the provider has gone.
-                guard state.processState != .exited else { return (current, []) }
-                confirmProviderAlive(&state, effects: &effects)
-            case .programStatus(let report):
-                // The provider has exited or its terminal has closed: what
-                // the terminal reports now is not this launch's provider.
-                guard state.processState != .exited else { return (current, []) }
-                // `clear` is no sign of life: Claude sends it when the folder
-                // trust dialog is declined and when it exits.
-                if report.state != .clear {
-                    confirmProviderAlive(&state, effects: &effects)
-                }
-            case .sessionBound, .manualCompactionStarted, .turnActivityChanged,
-                    .turnInteractionChanged, .sessionEnded, .providerExited:
-                break
-            }
-            state.telemetryHealth = .live
-
-            switch domainEvent {
-            case .sessionStarted(let sessionID, _, _):
-                state.sessionID = sessionID ?? state.sessionID
-                state.activityState = .idle
-                state.interactionState = .none
-                state.turnState = .inactive
-                state.runtimeErrorMessage = nil
-
-            case .sessionBound(let sessionID):
-                state.sessionID = sessionID ?? state.sessionID
-                // The session exists, so a resume found it.
-                state.resumingSessionID = nil
-
-            case .turnStarted(let turnID):
-                startTurn(&state, effects: &effects, turnID: turnID, activity: .reasoning)
-
-            case .programStatus(let report):
-                applyProgramStatus(
-                    report,
-                    to: &state,
-                    effects: &effects,
-                    completion: AgentCompletionID(
-                        provider: provider,
-                        sessionID: state.sessionID,
-                        turnID: nil,
-                        launchGeneration: generation,
-                        eventID: eventID),
-                    isViewed: isViewed)
-
-            case .manualCompactionStarted:
-                switch state.turnState {
-                case .starting:
-                    // The `working` it follows is the compaction, no blip.
-                    startTurn(&state, effects: &effects, activity: .compacting)
-                    state.turnState = .compaction
-                case .active:
-                    state.turnState = .compaction
-                    state.activityState = .compacting
-                case .inactive, .compaction:
-                    // With no turn under way the hook came before its
-                    // `working`, or after its `done` ended a short
-                    // compaction; nothing tells the two apart. Marking the
-                    // next turn would suppress a real completion, so the
-                    // hook changes nothing. A compaction it fails to mark
-                    // still completes nothing when its `done` carries the
-                    // previous summary, as the captured one does.
-                    break
-                }
-
-            case .turnActivityChanged(let activity):
-                guard case .active = state.turnState else { break }
-                state.activityState = activity
-
-            case .turnInteractionChanged(let interaction):
-                guard case .active = state.turnState else { break }
-                if interaction != .none && state.interactionState != interaction {
-                    effects.append(.waitingForUser)
-                }
-                state.interactionState = interaction
-
-            case .turnCompleted(let turnID):
-                endTurn(&state)
-                state.runtimeErrorMessage = nil
-                complete(
-                    AgentCompletionID(
-                        provider: provider,
-                        sessionID: state.sessionID,
-                        turnID: turnID,
-                        launchGeneration: generation,
-                        eventID: eventID),
-                    isViewed: isViewed,
-                    state: &state,
-                    effects: &effects)
-
-            case .turnFailed(let message):
-                // A failed turn fails once. Claude's own `error` report
-                // usually comes first, and its record then changes nothing,
-                // even after an `idle` or the next turn (`stopFailuresDue`).
-                // A record that comes first fails the turn; the report then
-                // only adds its message.
-                if state.stopFailuresDue > 0 {
-                    state.stopFailuresDue -= 1
-                    break
-                }
-                guard state.runtimeErrorMessage == nil else { break }
-                failTurn(message, state: &state, effects: &effects)
-
-            case .sessionEnded:
-                // The process goes on after `/clear`, whose next
-                // `SessionStart` rebinds the agent, and reports its own exit.
-                // What a session end does tell: Claude ends a resume of a
-                // session it cannot find before starting it, with
-                // `SessionEnd`, no `SessionStart`, and exit status 1. The
-                // exit report, which skips the event file's delay, usually
-                // comes first and has then already marked the launch failed
-                // and notified it; this only says why.
-                if let missing = state.resumingSessionID {
-                    state.resumingSessionID = nil
-                    state.missingSessionID = missing
-                    if state.failureMessage == nil { effects.append(.failed) }
-                    state.failureMessage = missingSessionMessage(provider: provider, sessionID: missing)
-                    effects.append(.sessionMissing)
-                }
-
-            case .providerExited:
-                // Handled before provider confirmation above so an executable
-                // that fails immediately never masquerades as a live agent.
-                break
-            }
-
-        case .compactionExpired(let generation):
-            guard state.launchGeneration == generation else { break }
-            if state.activityState == .compacting {
-                if case .active = state.turnState {
-                    state.activityState = .reasoning
-                } else {
-                    state.activityState = .idle
-                }
-            }
+            guard state.launchGeneration == generation else { return }
+            applyProvider(domainEvent, provider: provider, generation: generation, eventID: eventID, isViewed: isViewed)
 
         case .turnStartSettled(let generation):
             guard state.launchGeneration == generation,
                   state.turnState == .starting
-            else { break }
-            startTurn(&state, effects: &effects, activity: .executing)
+            else { return }
+            startTurn(activity: .executing)
 
-        case .telemetryDelayed(let generation):
-            guard state.launchGeneration == generation,
-                  state.processState == .running,
-                  case .active = state.turnState,
-                  state.telemetryHealth == .live
-            else { break }
-            // Confidence changed; the last confirmed activity fact did not.
-            state.telemetryHealth = .delayed
+        case .inputSettled(let generation):
+            guard state.launchGeneration == generation, state.inputSettling else { return }
+            becomeReady()
 
-        case .surfaceDied(let generation):
-            if let generation, state.launchGeneration != generation { break }
+        case .sent(let raw, let by):
+            // Capped as the CLI's report of it is, so that report matches.
+            let prompt = String(raw.prefix(AgentRecord.textLimit))
+            record.prompts.append(AgentRecord.Prompt(text: prompt, at: now, by: by))
+            trimPrompts()
+            state.promptsDue.append(prompt)
+            state.promptAwaitsTurn = true
+            if record.firstInstruction == nil {
+                record.firstInstruction = prompt
+                record.firstInstructionAt = now
+            }
+            if by == .person { record.continuedInARow = 0 }
+            // A sent prompt is a turn starting (flows.md 2.2): a quit in the
+            // next instant cuts it off.
+            if record.state != .working { change(to: .working) }
+            clearStop()
+            record.interrupted = false
+
+        case .surfaceDied(let generation, let byUser):
+            if let generation, state.launchGeneration != generation { return }
+            // A provider that was up and went without the user: its terminal
+            // closed under it. An exit with a status other than 0 has said
+            // so already, with the status.
+            if state.processState == .running && !byUser {
+                stop(AgentRecord.Problem(kind: .exited))
+            } else if record.state == .working {
+                // Stopped or closed by the person: the turn is over.
+                finish(interrupted: true)
+            }
+            state.stoppedOnPurpose = byUser || (state.processState == .exited && state.exitStatus == 0)
             state.surfaceState = .closed
             state.processState = .exited
             state.activityState = .unknown
-            state.interactionState = .none
             state.turnState = .inactive
             state.resumingSessionID = nil
-            // A missing or unreadable saved session outlives the terminal:
-            // it describes the saved session, not the launch, and only Start
-            // Fresh replaces it.
-            if state.missingSessionID == nil && !state.sessionUnreadable {
-                state.failureMessage = nil
+            state.inputReady = false
+
+        case .appStarted:
+            // A turn under way when Clawddy quit or crashed was cut off; its
+            // CLI is gone with the app. A settled agent is never continued:
+            // its turn ended when its CLI did.
+            if record.state == .working {
+                if record.settledAt == nil {
+                    record.cutOff = true
+                } else {
+                    finish(interrupted: true)
+                }
+            }
+            record.activity = nil
+
+        case .notContinued:
+            // Cut off before its CLI had a conversation or an instruction to
+            // start again from: its turn is over.
+            guard record.state == .working else { return }
+            finish(interrupted: true)
+
+        case .opened:
+            // Opening reads a finished turn; it never clears a question, a
+            // problem or a reset limit.
+            if record.unread {
+                record.unread = false
+                effects.append(.unreadChanged)
             }
 
-        case .completionViewed:
-            clearUnread(&state, effects: &effects)
+        case .markedUnread:
+            guard record.state == .finished, !record.unread else { return }
+            record.unread = true
+            effects.append(.unreadChanged)
 
-        case .providerAuthentication(let authentication):
-            // Only an agent that has never started and has nothing unread
-            // shows its provider's sign-in state.
-            guard state.surfaceState == .inactive,
-                  state.processState == .notStarted,
-                  state.unreadCompletion == nil
-            else { break }
-            state.interactionState = AgentAuthenticationPresentation.reconciledInteraction(
-                current: state.interactionState,
-                authentication: authentication)
+        case .settled(let includingWorking):
+            guard record.settledAt == nil, includingWorking || record.state != .working else { return }
+            record.settledAt = now
+
+        case .unsettled:
+            record.settledAt = nil
+
+        case .usageLimitReset:
+            guard record.state == .paused else { return }
+            change(to: .limitReset)
+            effects.append(.waitingForUser)
+
+        case .continuedByApp(let prompt):
+            // The fourth continuation in a row is not sent.
+            guard record.mayContinue else {
+                record.cutOff = false
+                stop(AgentRecord.Problem(kind: .cutOffTooOften))
+                return
+            }
+            record.continuedInARow += 1
+            record.prompts.append(AgentRecord.Prompt(text: prompt, at: now, by: .app))
+            state.promptsDue.append(String(prompt.prefix(AgentRecord.textLimit)))
+            trimPrompts()
+            // It goes on with the turn the restart cut off, which keeps its
+            // start: the age reads as before the restart.
+            if record.state != .working { change(to: .working) }
+            clearStop()
+
+        case .named(let source):
+            // A name the person gave is the agent's for good.
+            guard record.nameSource != .person || source == .person else { return }
+            record.nameSource = source
+
+        case .reportFailed:
+            stop(AgentRecord.Problem(kind: .reportFailed))
+        }
+    }
+
+    private mutating func applyProvider(
+        _ domainEvent: AgentDomainEvent,
+        provider: AgentProviderID,
+        generation: UUID,
+        eventID: String,
+        isViewed: Bool
+    ) {
+        if case .providerExited(let status) = domainEvent {
+            // A launch's provider exits once; a report printed again later
+            // changes nothing.
+            guard state.processState != .exited else { return }
+            // "Pre-start" is the launch phase, not "not currently running":
+            // a session that started has moved the process to .running, and
+            // its exit, with any status, is no launch failure. A launch that
+            // already failed because its session is missing keeps saying so.
+            let stillLaunching = state.processState == .notStarted || state.processState == .launching
+            state.processState = .exited
+            state.exitStatus = status
+            state.activityState = .unknown
+            state.turnState = .inactive
+            state.inputReady = false
+            if status != 0 && state.missingSessionID == nil {
+                stop(stillLaunching
+                    ? AgentRecord.Problem(kind: .launch, text: "It exited before its session started.")
+                    : AgentRecord.Problem(kind: .exited, status: status))
+            } else if record.state == .working {
+                // `/exit` or Control-D during a turn: the turn is over.
+                finish(interrupted: true)
+            }
+            effects.append(.providerExited(status))
+            return
         }
 
-        return (state, effects)
+        switch domainEvent {
+        case .turnCompleted, .messageReported:
+            confirmProviderAlive()
+        case .turnFailed, .promptSubmitted, .questionReported:
+            // A prompt or a failure the event file delivers after the exit
+            // report starts or fails no turn: the provider has gone.
+            guard state.processState != .exited else { return }
+            confirmProviderAlive()
+        case .programStatus(let report):
+            // The provider has exited or its terminal has closed: what the
+            // terminal reports now is not this launch's provider.
+            guard state.processState != .exited else { return }
+            // `clear` is no sign of life: Claude sends it when the folder
+            // trust dialog is declined and when it exits.
+            if report.state != .clear { confirmProviderAlive() }
+        case .sessionBound, .manualCompactionStarted, .turnActivityChanged, .sessionEnded, .providerExited:
+            break
+        }
+        state.telemetryHealth = .live
+
+        switch domainEvent {
+        case .sessionBound(let sessionID):
+            state.sessionID = sessionID ?? state.sessionID
+            // The session exists, so a resume found it.
+            state.resumingSessionID = nil
+
+        case .promptSubmitted(let text):
+            let underWay = state.turnState
+            let endedEarly = state.endedBeforeItsPrompt
+            state.endedBeforeItsPrompt = nil
+            // The prompt reads the turn before it.
+            if record.unread {
+                record.unread = false
+                effects.append(.unreadChanged)
+            }
+            if state.turnState == .starting || endedEarly != nil { startTurn(activity: .reasoning) }
+            if let text { recordPrompt(text, queued: underWay != .starting && underWay != .inactive) }
+            if let endedEarly {
+                endTurn()
+                complete(endedEarly, isViewed: isViewed)
+            }
+
+        case .messageReported(let text):
+            // Claude's `Stop` is written just before its `done`, but the
+            // event file can bring it after: during the turn it waits for
+            // the turn's end; after it, it is that turn's message.
+            let message = String(text.prefix(AgentRecord.textLimit))
+            switch state.turnState {
+            case .active, .compaction, .starting: state.pendingMessage = message
+            case .inactive:
+                record.lastMessage = message
+                record.lastMessageAt = now
+            }
+
+        case .questionReported(let text):
+            // The hook can come before or after the `blocked` report.
+            guard record.state == .asks || state.turnState != .inactive else { return }
+            record.question = text
+
+        case .programStatus(let report):
+            applyProgramStatus(
+                report,
+                completion: AgentCompletionID(
+                    provider: provider,
+                    sessionID: state.sessionID,
+                    turnID: nil,
+                    launchGeneration: generation,
+                    eventID: eventID),
+                isViewed: isViewed)
+
+        case .manualCompactionStarted:
+            switch state.turnState {
+            case .starting:
+                // The `working` it follows is the compaction, no blip.
+                startTurn(activity: .compacting)
+                state.turnState = .compaction
+            case .active:
+                state.turnState = .compaction
+                state.activityState = .compacting
+            case .inactive, .compaction:
+                // With no turn under way the hook came before its `working`,
+                // or after its `done` ended a short compaction; nothing tells
+                // the two apart. Marking the next turn would suppress a real
+                // completion, so the hook changes nothing.
+                break
+            }
+
+        case .turnActivityChanged(let activity):
+            guard case .active = state.turnState else { return }
+            state.activityState = activity
+
+        case .turnCompleted(let turnID):
+            // Codex's notify, after its terminal or title already ended that
+            // turn, or a second notify of one turn, ends nothing: it must not
+            // end the next one.
+            if turnID != nil && turnID == state.lastNotifiedTurn { return }
+            state.lastNotifiedTurn = turnID
+            if state.turnsEndedWithoutNotify > 0 {
+                state.turnsEndedWithoutNotify -= 1
+                applyPendingMessage()
+                return
+            }
+            endTurn()
+            complete(
+                AgentCompletionID(
+                    provider: provider,
+                    sessionID: state.sessionID,
+                    turnID: turnID,
+                    launchGeneration: generation,
+                    eventID: eventID),
+                isViewed: isViewed)
+
+        case .turnFailed(let failure):
+            // A failed turn fails once. Claude's own `error` report usually
+            // comes first, and its record then only tells what kind of
+            // failure it was, even after an `idle` or the next turn
+            // (`stopFailuresDue`). A record that comes first fails the turn.
+            if state.stopFailuresDue > 0 {
+                state.stopFailuresDue -= 1
+                if record.state == .problem, record.problem?.kind == .error {
+                    fail(failure)
+                }
+                return
+            }
+            fail(failure)
+
+        case .sessionEnded:
+            // The process goes on after `/clear`, whose next `SessionStart`
+            // rebinds the agent, and reports its own exit. What a session
+            // end does tell: Claude ends a resume of a session it cannot
+            // find before starting it, with `SessionEnd`, no `SessionStart`,
+            // and exit status 1.
+            if let missing = state.resumingSessionID {
+                state.resumingSessionID = nil
+                state.missingSessionID = missing
+                stop(AgentRecord.Problem(kind: .conversationMissing))
+                effects.append(.sessionMissing)
+            }
+
+        case .providerExited:
+            break
+        }
     }
 
-    /// Why an agent whose saved session is missing can only start fresh.
-    static func missingSessionMessage(provider: AgentProviderID, sessionID: String) -> String {
-        "\(provider.displayName) found no conversation with session ID \(sessionID), so the agent could not be resumed."
-    }
-
-    /// What one report the program made about itself (the root record) means,
-    /// given the turn it finds. The reports are Claude's, as captured in
-    /// `docs/clawddy-refactor/cli-facts.md`; `completion` is the one a `done`
-    /// that completes the turn records.
-    private static func applyProgramStatus(
+    /// What one report the program made about itself (the root record)
+    /// means, given the turn it finds. The reports are Claude's, as captured
+    /// in `docs/clawddy-refactor/cli-facts.md`; `completion` is the one a
+    /// `done` that completes the turn records.
+    private mutating func applyProgramStatus(
         _ report: Ghostty.Action.ProgramStatus,
-        to state: inout AgentRuntimeSnapshot,
-        effects: inout [AgentRuntimeEffect],
         completion: AgentCompletionID,
         isViewed: Bool
     ) {
+        if report.state != .done { state.endedBeforeItsPrompt = nil }
+        provider = completion.provider
+        noteReadiness(report.state)
         switch report.state {
         case .working:
+            state.promptAwaitsTurn = false
             switch state.turnState {
             case .inactive: state.turnState = .starting
             case .starting: break
-            case .active, .compaction: state.interactionState = .none
+            case .active, .compaction:
+                // A question answered, or the next step of the turn.
+                if record.state == .asks {
+                    change(to: .working)
+                    record.question = nil
+                }
+            }
+            // Claude's report names the step under way ("Creating empty
+            // marker file", cli-facts.md); a bare `working` has none now.
+            if state.turnState != .inactive {
+                record.activity = report.message.map { AgentSentence.label($0) }.flatMap { $0.isEmpty ? nil : $0 }
             }
 
         case .blocked:
             if state.turnState == .inactive || state.turnState == .starting {
-                startTurn(&state, effects: &effects, activity: .executing)
+                startTurn(activity: .executing)
             }
-            let interaction: AgentInteractionState
-            switch report.kind {
-            case .question: interaction = .input
-            case .auth: interaction = .authentication
-            case .permission, nil: interaction = .permission
+            if report.kind == .auth {
+                fail(AgentFailure(error: "authentication_failed", text: report.message))
+                return
             }
-            if state.interactionState != interaction {
-                state.interactionState = interaction
+            // The hook's question, in full, wins over the report's.
+            let question = record.question ?? report.message.map(Self.question)
+            if record.state != .asks {
+                change(to: .asks)
                 effects.append(.waitingForUser)
             }
+            record.question = question
 
         case .done:
             switch state.turnState {
@@ -463,56 +623,122 @@ enum AgentStateReducer {
                 break
             case .starting:
                 // A blip, such as the `/exit` confirmation's `done` 14 ms
-                // after its `working`.
+                // after its `working`, or a turn shorter than its prompt's
+                // record is late: if that record comes, the turn completes.
                 state.turnState = .inactive
+                state.endedBeforeItsPrompt = completion
             case .active:
-                endTurn(&state)
+                endTurn()
                 // Every captured `done` that completed a turn was bare; one
                 // with a summary ended something else, such as a compaction.
                 if report.message == nil {
-                    complete(completion, isViewed: isViewed, state: &state, effects: &effects)
+                    if completion.provider == .codex { state.turnsEndedWithoutNotify += 1 }
+                    complete(completion, isViewed: isViewed)
+                } else {
+                    finish(interrupted: false)
                 }
             case .compaction:
-                endTurn(&state)
+                endTurn()
+                finish(interrupted: false)
             }
 
         case .idle:
-            // An interrupt, Esc on a prompt and `/clear` all end here; no
-            // turn is completed and nothing is notified.
-            endTurn(&state)
-            state.runtimeErrorMessage = nil
+            // An interrupt and Esc on a prompt end a turn here; `/clear`
+            // ends only its blip. No turn is completed and nothing is
+            // notified.
+            let wasUnderWay = state.turnState != .inactive && state.turnState != .starting
+            endTurn()
+            if wasUnderWay && record.state != .problem && record.state != .paused {
+                finish(interrupted: true)
+            } else {
+                leaveWorkingWithoutTurn()
+            }
 
         case .clear:
             // Resets the activity; the launch goes on until the provider's
-            // exit is reported.
+            // exit is reported. A turn under way is over.
             let known = state.activityState != .unknown
-            endTurn(&state)
+            let wasUnderWay = state.turnState != .inactive && state.turnState != .starting
+            endTurn()
             if !known { state.activityState = .unknown }
-            state.runtimeErrorMessage = nil
+            if wasUnderWay && record.state == .working {
+                finish(interrupted: true)
+            } else {
+                leaveWorkingWithoutTurn()
+            }
 
         case .error:
             // Never a blip: a failure can come 106 ms after its `working`.
-            if state.turnState == .starting {
-                startTurn(&state, effects: &effects, activity: .executing)
-            }
+            if state.turnState == .starting { startTurn(activity: .executing) }
             // A failure this report raises has its `StopFailure` record to
             // come; one the record raised first has had it.
-            if state.runtimeErrorMessage == nil { state.stopFailuresDue += 1 }
-            failTurn(report.message, state: &state, effects: &effects)
+            if record.state != .problem && record.state != .paused { state.stopFailuresDue += 1 }
+            fail(AgentFailure(text: report.message))
         }
     }
 
-    private static func startTurn(
-        _ state: inout AgentRuntimeSnapshot,
-        effects: inout [AgentRuntimeEffect],
-        turnID: String? = nil,
-        activity: AgentActivityState
-    ) {
+    /// Whether this report shows the CLI reading its input (probes.md, P2
+    /// "ready"): an `idle`, `done` or `error`, or a `working` when the launch
+    /// gave it its first prompt. Codex reports `idle`, then a start-up
+    /// `working` of up to 2.4 s, then `idle`: its first `idle` counts only
+    /// after a `working`, or once 3 s pass without one. A `blocked` report,
+    /// such as Claude's folder-trust dialog, is never readiness.
+    private mutating func noteReadiness(_ report: Ghostty.Action.ProgramStatus.State) {
+        guard !state.inputReady else { return }
+        switch report {
+        case .working:
+            state.inputSettling = false
+            if state.launchPrompted {
+                becomeReady()
+            } else if provider == .codex {
+                state.sawWorking = true
+            }
+        case .idle, .done, .error:
+            if provider == .codex && !state.sawWorking && !state.launchPrompted {
+                guard !state.inputSettling else { return }
+                state.inputSettling = true
+                effects.append(.inputSettling)
+            } else {
+                becomeReady()
+            }
+        case .blocked, .clear:
+            break
+        }
+    }
+
+    private mutating func becomeReady() {
+        state.inputReady = true
+        state.inputSettling = false
+        effects.append(.inputReady)
+        if record.problem?.kind == .didNotStart {
+            change(to: .finished)
+            record.problem = nil
+        }
+    }
+
+    /// The question in a `blocked` report's message, without Claude's
+    /// "answer: " before a question.
+    private static func question(_ message: String) -> String {
+        message.hasPrefix("answer: ") ? String(message.dropFirst("answer: ".count)) : message
+    }
+
+    // MARK: Turns
+
+    /// Starts a turn: the agent works, and what it asked, the problem it
+    /// stopped with, its limit and its unread mark are behind it.
+    private mutating func startTurn(turnID: String? = nil, activity: AgentActivityState) {
         state.turnState = .active(turnID: turnID)
         state.activityState = activity
-        state.interactionState = .none
-        state.runtimeErrorMessage = nil
-        clearUnread(&state, effects: &effects)
+        state.prompted = true
+        if record.state != .working { change(to: .working) }
+        clearStop()
+        record.interrupted = false
+        record.lastMessage = nil
+        record.lastMessageAt = nil
+        state.pendingMessage = nil
+        // A turn the person starts after a cut-off one ends that story; a
+        // continuation's own turn keeps it, and says so.
+        if record.continuedInARow == 0 { record.cutOff = false }
         // The turn's prompt is the session's first entry, which writes it.
         if state.sessionUnsaved {
             state.sessionUnsaved = false
@@ -520,67 +746,162 @@ enum AgentStateReducer {
         }
     }
 
-    private static func endTurn(_ state: inout AgentRuntimeSnapshot) {
+    private mutating func endTurn() {
         state.turnState = .inactive
         state.activityState = .idle
-        state.interactionState = .none
     }
 
-    /// Records `completion` once, unread unless the agent is viewed.
-    private static func complete(
-        _ completion: AgentCompletionID,
-        isViewed: Bool,
-        state: inout AgentRuntimeSnapshot,
-        effects: inout [AgentRuntimeEffect]
-    ) {
+    /// Records `completion` once: the agent is finished, unread unless it
+    /// is viewed.
+    private mutating func complete(_ completion: AgentCompletionID, isViewed: Bool) {
         guard state.lastAppliedCompletion != completion else { return }
         state.lastAppliedCompletion = completion
         effects.append(.completed)
-        if !isViewed, state.unreadCompletion != completion {
-            state.unreadCompletion = completion
+        finish(interrupted: false)
+        applyPendingMessage()
+        record.continuedInARow = 0
+        if !isViewed, !record.unread {
+            record.unread = true
             effects.append(.unreadChanged)
         }
     }
 
-    /// Ends the turn as failed. A turn that has already failed only takes
-    /// the new message, if there is one, and is not reported again.
-    private static func failTurn(
-        _ message: String?,
-        state: inout AgentRuntimeSnapshot,
-        effects: inout [AgentRuntimeEffect]
-    ) {
-        if state.runtimeErrorMessage == nil { effects.append(.failed) }
-        endTurn(&state)
-        state.runtimeErrorMessage = message?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-            ?? state.runtimeErrorMessage
-            ?? "The agent reported a runtime error."
+    private mutating func applyPendingMessage() {
+        guard let message = state.pendingMessage else { return }
+        state.pendingMessage = nil
+        record.lastMessage = message
+        record.lastMessageAt = now
     }
 
-    private static func clearUnread(
-        _ state: inout AgentRuntimeSnapshot,
-        effects: inout [AgentRuntimeEffect]
-    ) {
-        guard state.unreadCompletion != nil else { return }
-        state.unreadCompletion = nil
-        effects.append(.unreadChanged)
+    /// The agent is finished; `interrupted` when the person stopped it.
+    private mutating func finish(interrupted: Bool) {
+        if interrupted { state.pendingMessage = nil }
+        if record.state != .finished { change(to: .finished) }
+        record.interrupted = interrupted
+        record.cutOff = false
+        record.queued = nil
+        record.activity = nil
+        record.question = nil
+    }
+
+    /// The turn failed: at a usage limit the agent pauses, a sign-in that no
+    /// longer works or any other failure stops it with a problem. A turn
+    /// that has already failed only takes what this failure adds.
+    private mutating func fail(_ failure: AgentFailure) {
+        endTurn()
+        let text = failure.text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = text?.isEmpty == false ? text : nil
+        if failure.isUsageLimit {
+            if record.state != .paused { change(to: .paused) }
+            record.problem = nil
+            record.limit = AgentRecord.UsageLimit(
+                message: message ?? record.limit?.message,
+                resetsAt: failure.resetsAt ?? record.limit?.resetsAt)
+            finishStopping()
+            return
+        }
+        let kind: AgentRecord.Problem.Kind = failure.isLogin ? .loginExpired : .error
+        let raises = record.state != .problem
+        stop(AgentRecord.Problem(kind: kind, text: message ?? (record.problem?.kind == kind ? record.problem?.text : nil)))
+        if !raises { effects.removeAll { $0 == .failed } }
+    }
+
+    /// The agent stops with `problem`, announced once.
+    private mutating func stop(_ problem: AgentRecord.Problem) {
+        if record.state != .problem || record.problem != problem {
+            if record.state != .problem { effects.append(.failed) }
+            change(to: .problem)
+            record.problem = problem
+        }
+        record.limit = nil
+        finishStopping()
+    }
+
+    private mutating func finishStopping() {
+        record.cutOff = false
+        record.queued = nil
+        record.activity = nil
+        record.question = nil
+        record.interrupted = false
+    }
+
+    /// An `idle` or `clear` with no turn under way: the agent is not working,
+    /// unless a prompt it was given is still on its way to a turn (the
+    /// start-up `idle` a launch with a prompt reports first, probes.md P5).
+    private mutating func leaveWorkingWithoutTurn() {
+        guard record.state == .working else { return }
+        if state.promptAwaitsTurn {
+            state.promptAwaitsTurn = false
+            return
+        }
+        finish(interrupted: false)
+    }
+
+    private mutating func clearStop() {
+        record.question = nil
+        record.problem = nil
+        record.limit = nil
+        if record.unread {
+            record.unread = false
+            effects.append(.unreadChanged)
+        }
+    }
+
+    private mutating func change(to newState: AgentRecord.State) {
+        record.state = newState
+        record.changedAt = now
+    }
+
+    /// Keeps a submitted prompt: the first is the agent's first instruction;
+    /// one sent while the turn was already under way waits in the CLI for
+    /// that turn.
+    private mutating func recordPrompt(_ raw: String, queued: Bool) {
+        let text = String(AgentRecord.prompt(raw).prefix(AgentRecord.textLimit))
+        state.prompted = true
+        // One Clawddy sent, recorded when it was sent.
+        if let due = state.promptsDue.firstIndex(of: text) ?? state.promptsDue.firstIndex(of: String(raw.prefix(AgentRecord.textLimit))) {
+            state.promptsDue.remove(at: due)
+            if queued { record.queued = text }
+            return
+        }
+        // Claude's own note that a background command ended comes as a
+        // prompt; nobody typed it (seen 2026-11-24, Claude Code 2.1.331).
+        if raw.hasPrefix("<task-notification>") { return }
+        record.prompts.append(AgentRecord.Prompt(text: text, at: now, by: .person))
+        record.continuedInARow = 0
+        trimPrompts()
+        if record.firstInstruction == nil {
+            record.firstInstruction = text
+            record.firstInstructionAt = now
+        }
+        if queued { record.queued = text }
+    }
+
+    private mutating func trimPrompts() {
+        if record.prompts.count > AgentRecord.promptLimit {
+            record.prompts.removeFirst(record.prompts.count - AgentRecord.promptLimit)
+        }
     }
 
     /// The provider is seen alive. A launch whose provider has exited, or
     /// whose terminal has closed, is never alive again: a hook record that
     /// arrives after the exit report was written before the exit, and the
     /// event file delivered it late.
-    private static func confirmProviderAlive(
-        _ state: inout AgentRuntimeSnapshot,
-        effects: inout [AgentRuntimeEffect]
-    ) {
+    private mutating func confirmProviderAlive() {
         guard state.processState == .notStarted || state.processState == .launching else { return }
         state.processState = .running
-        state.failureMessage = nil
         state.resumingSessionID = nil
         effects.append(.becameAlive)
     }
 }
 
-private extension String {
-    var nilIfEmpty: String? { isEmpty ? nil : self }
+extension AgentRecord {
+    /// A prompt as the person wrote it: Claude wraps a long paste in
+    /// `<pasted_content id="…">` tags in the prompt it reports (probes,
+    /// 2026-11-23), which are taken off.
+    static func prompt(_ reported: String) -> String {
+        reported
+            .replacingOccurrences(of: #"\n*<pasted_content id="[^"]*">\n?"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\n?</pasted_content id="[^"]*">\n*"#, with: "", options: .regularExpression)
+    }
 }

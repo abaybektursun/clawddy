@@ -3,16 +3,17 @@ import Testing
 @testable import Ghostty
 
 struct AgentProviderTests {
-    @Test func reasoningEffortOptionsAreProviderData() {
-        for provider in AgentProviderID.allCases {
-            let options = provider.reasoningEffortOptions
-            #expect(options.first?.value == nil, "first option is the provider default")
-            #expect(Set(options.map(\.id)).count == options.count, "ids are unique")
-        }
-        #expect(AgentProviderID.claudeCode.reasoningEffortOptions.map(\.value)
-            == [nil, "low", "medium", "high", "xhigh", "max"])
-        #expect(AgentProviderID.codex.reasoningEffortOptions.map(\.value)
-            == [nil, "minimal", "low", "medium", "high", "xhigh"])
+    /// A probe whose output outlives it (a child left holding the pipe)
+    /// ends as a timeout about a second after it exits, instead of holding
+    /// the IO queue, and with it every record save, until the child ends.
+    @Test func aProbeWhoseOutputOutlivesItTimesOut() {
+        let start = Date()
+        let outcome = AgentProcessProbe.run(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "sleep 8 & echo started"],
+            environmentPath: "/usr/bin:/bin")
+        #expect(outcome == .timedOut)
+        #expect(Date().timeIntervalSince(start) < 4)
     }
 
     @Test func providerProbeEnvironmentPreservesMacOSAccountIdentity() {
@@ -79,21 +80,6 @@ struct AgentProviderTests {
                 "Codex returned an unreadable sign-in status."))
     }
 
-    @Test func providerAuthenticationPresentationRetractsStaleSignInRequirement() {
-        #expect(AgentAuthenticationPresentation.reconciledInteraction(
-            current: .none,
-            authentication: .signedOut) == .authentication)
-        #expect(AgentAuthenticationPresentation.reconciledInteraction(
-            current: .authentication,
-            authentication: .signedIn) == .none)
-        #expect(AgentAuthenticationPresentation.reconciledInteraction(
-            current: .authentication,
-            authentication: .unavailable("Probe failed")) == .none)
-        #expect(AgentAuthenticationPresentation.reconciledInteraction(
-            current: .permission,
-            authentication: .unavailable("Probe failed")) == .permission)
-    }
-
     @Test func mixedProviderConfigRoundTripsAtSchemaFive() throws {
         let agents = [
             AgentEntry(name: "Claude", provider: .claudeCode),
@@ -105,15 +91,13 @@ struct AgentProviderTests {
                     reasoningEffort: "high")),
         ]
         let source = AgentConfigFile(projects: [
-            AgentProject(
-                name: "Project",
-                tasks: [AgentTask(name: "Task", agents: agents)]),
+            AgentProject(name: "Project", agents: agents),
         ])
 
         let data = try JSONEncoder().encode(source)
         let decoded = try JSONDecoder().decode(AgentConfigFile.self, from: data)
-        let decodedAgents = try #require(decoded.projects.first?.tasks.first?.agents)
-        #expect(decoded.schemaVersion == 5)
+        let decodedAgents = try #require(decoded.projects.first?.agents)
+        #expect(decoded.schemaVersion == 6)
         #expect(decodedAgents == agents)
     }
 
@@ -196,38 +180,16 @@ struct AgentProviderTests {
 
         var projects = [AgentProject(
             name: "Project",
-            tasks: [AgentTask(
-                name: "Task",
-                agents: [AgentEntry(
-                    id: agentID,
-                    name: "Agent",
-                    provider: .claudeCode)])])]
+            agents: [AgentEntry(id: agentID, name: "Agent", provider: .claudeCode)])]
 
         #expect(AgentConfig.enforcePersistedProviderBindings(
             in: &projects,
             statusDirectory: directory))
-        let restored = try #require(projects.first?.tasks.first?.agents.first)
+        let restored = try #require(projects.first?.agents.first)
         #expect(restored.provider == .codex)
         #expect(!AgentConfig.enforcePersistedProviderBindings(
             in: &projects,
             statusDirectory: directory))
-    }
-
-    @Test func pendingForkIsProviderTaggedAndValidated() throws {
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let agentID = UUID()
-        let pending = AgentPendingFork(provider: .codex, sourceSessionID: "source.session-1")
-
-        try AgentSessionStore.write(pending, for: agentID, directory: directory)
-        #expect(try AgentSessionStore.pendingFork(
-            for: agentID,
-            provider: .codex,
-            directory: directory) == pending)
-        #expect(try AgentSessionStore.pendingFork(
-            for: agentID,
-            provider: .claudeCode,
-            directory: directory) == nil)
     }
 
     @Test func rawEventsDecodeOnlyTaggedRecords() throws {
@@ -263,15 +225,12 @@ struct AgentProviderTests {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let executable = directory.appendingPathComponent("codex")
-        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try Data("#!/bin/sh\n[ \"$1\" = agents ] && echo '[]'\nexit 0\n".utf8).write(to: executable)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: executable.path)
         let root = AgentDataRoot(url: directory)
-        let provider = CodexProvider(
-            root: root,
-            hooksFile: directory.appendingPathComponent("hooks.json"),
-            isProduction: false)
+        let provider = CodexProvider(root: root, configFile: directory.appendingPathComponent("config.toml"))
         let agentID = UUID()
         let generation = UUID()
         let base = AgentLaunchRequest(
@@ -284,20 +243,17 @@ struct AgentProviderTests {
             workingDirectory: nil,
             environmentPath: directory.path,
             launchGeneration: generation,
-            session: nil,
-            pendingFork: nil)
+            session: nil)
 
         let fresh = try launch(provider.prepareLaunch(base))
+        let notify = CodexProvider.tomlArray(AgentHookRuntime.arguments(
+            root: root, provider: .codex, agentID: agentID, generation: generation) + ["notify"])
         #expect(fresh.arguments == [
+            "-c", "notify=\(notify)",
             "--dangerously-bypass-approvals-and-sandbox",
             "--model", "gpt-5.4", "--config", "model_reasoning_effort=\"xhigh\"",
         ])
-        #expect(fresh.environment.filter { $0.key.hasPrefix("CLAWDDY_") } == [
-            "CLAWDDY_AGENT_ID": agentID.uuidString,
-            "CLAWDDY_AGENT_PROVIDER": "codex",
-            "CLAWDDY_AGENT_GENERATION": generation.uuidString,
-            "CLAWDDY_STATUS_DIR": root.statusDir.path,
-        ])
+        #expect(fresh.environment.filter { $0.key.hasPrefix("CLAWDDY_") }.isEmpty)
 
         var resumedRequest = base
         resumedRequest.session = AgentSessionBinding(
@@ -307,78 +263,85 @@ struct AgentProviderTests {
         let resumed = try launch(provider.prepareLaunch(resumedRequest))
         #expect(resumed.arguments.suffix(2) == ["resume", "session-1"])
 
-        var forkRequest = base
-        forkRequest.pendingFork = AgentPendingFork(
-            provider: .codex,
-            sourceSessionID: "source-1")
-        let forked = try launch(provider.prepareLaunch(forkRequest))
-        #expect(forked.arguments.suffix(2) == ["fork", "source-1"])
-
         var standardRequest = base
         standardRequest.launchProfile.startMode = .standard
         let standard = try launch(provider.prepareLaunch(standardRequest))
         #expect(!standard.arguments.contains(where: { $0.contains("dangerously") }))
     }
 
-    @Test func eventTablesMapProviderSpecificHooksToSharedEvents() throws {
-        #expect(try meaning(CodexProvider.hookEvents, "PermissionRequest") == [.turnInteractionChanged(.permission)])
-        #expect(try meaning(CodexProvider.hookEvents, "PostToolUseFailure") == nil)
-        #expect(try meaning(CodexProvider.hookEvents, "SubagentStop") == [
-            .turnInteractionChanged(.none),
-            .turnActivityChanged(.reasoning),
-        ])
-        #expect(try meaning(CodexProvider.hookEvents, "SessionStart")
-            == [.sessionStarted(sessionID: nil, model: nil, permissionMode: nil)])
+    /// Each Codex launch names the hook script its notify program, with the
+    /// owner's own `notify` from Codex's configuration after `notify`, so the
+    /// script runs it. Only the top-level key counts.
+    @Test func codexNotifyChainsToTheOwnersNotify() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let config = directory.appendingPathComponent("config.toml")
+        #expect(try CodexProvider.notifyCommand(inConfig: config) == [])
+        for (text, expected) in [
+            (#"notify = ["/Apps/A B.app/client", "turn-ended"]"#, ["/Apps/A B.app/client", "turn-ended"]),
+            ("model = \"x\"\nnotify = [\n  'C:\\raw', # a comment\n  \"q\\\"\\u00e9\",\n]\n", ["C:\\raw", "q\"é"]),
+            ("model = \"x\"\n[profiles.a]\nnotify = [\"not top level\"]\n", []),
+        ] {
+            try Data(text.utf8).write(to: config)
+            #expect(try CodexProvider.notifyCommand(inConfig: config) == expected, "\(text)")
+        }
+        try Data(#"notify = ["unterminated"#.utf8).write(to: config)
+        #expect(throws: (any Error).self) { try CodexProvider.notifyCommand(inConfig: config) }
+        #expect(CodexProvider.tomlArray(["a\"b\\c", "é\n"]) == #"["a\"b\\c","é\n"]"#)
     }
 
-    /// Claude's terminal reports its turns (P3.5): no hook of Claude's starts,
+    /// Codex's one event is its notify program's record of a completed turn:
+    /// its session, its prompts as submitted, the completion, and the last
+    /// message. Codex's own title turn notifies too and means nothing.
+    @Test func codexNotifyMeansACompletedTurn() throws {
+        func record(_ prompts: [String]) throws -> AgentRawProviderEvent {
+            let object: [String: Any] = [
+                "provider": "codex", "launchGeneration": UUID().uuidString,
+                "hookEventName": "agent-turn-complete", "sessionID": "thread-1", "turnID": "turn-1",
+                "text": "Done.", "prompts": prompts,
+            ]
+            return try JSONDecoder().decode(
+                AgentRawProviderEvent.self, from: JSONSerialization.data(withJSONObject: object))
+        }
+        let meaning = try #require(CodexProvider.hookEvents["agent-turn-complete"])
+        #expect(try meaning(record(["fix it", "also this"])) == [
+            .sessionBound(sessionID: "thread-1"),
+            .promptSubmitted("fix it"),
+            .promptSubmitted("also this"),
+            .turnCompleted(turnID: "turn-1"),
+            .messageReported("Done."),
+        ])
+        #expect(try meaning(record([CodexProvider.titleInstruction + " ... User prompt:\nfix it"])) == [])
+        #expect(CodexProvider.hookEvents.count == 1)
+    }
+
+    /// Claude's terminal reports its turns (P3.5): no hook of Claude's
     /// continues or completes one. `SessionStart` only binds the session,
-    /// `StopFailure` fails the turn, and `PreCompact` tells a manual
-    /// compaction from an automatic one by its trigger.
+    /// `UserPromptSubmit` is the prompt that starts the turn its terminal
+    /// announced, `Stop` brings the turn's last message, `StopFailure` fails
+    /// the turn with Claude's kind and text, `PermissionRequest` brings an
+    /// asked question in full, and `PreCompact` tells a manual compaction
+    /// from an automatic one by its trigger.
     @Test func claudeHooksCarryNoTurnActivity() throws {
-        for event in ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PostToolUseFailure",
-                      "SubagentStart", "SubagentStop", "PermissionRequest", "Stop"] {
+        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop"] {
             #expect(try meaning(ClaudeCodeProvider.hookEvents, event) == nil, "\(event)")
         }
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "UserPromptSubmit", text: "hi") == [.promptSubmitted("hi")])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "Stop", text: "ok") == [.messageReported("ok")])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "Stop") == [])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "PermissionRequest", text: "A or B?")
+            == [.questionReported("A or B?")])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "PermissionRequest") == [])
         #expect(try meaning(ClaudeCodeProvider.hookEvents, "SessionStart") == [.sessionBound(sessionID: nil)])
-        #expect(try meaning(ClaudeCodeProvider.hookEvents, "StopFailure") == [.turnFailed(nil)])
+        #expect(try meaning(ClaudeCodeProvider.hookEvents, "StopFailure", text: "limit", error: "rate_limit")
+            == [.turnFailed(AgentFailure(error: "rate_limit", text: "limit"))])
         #expect(try meaning(ClaudeCodeProvider.hookEvents, "PreCompact", trigger: "manual")
             == [.manualCompactionStarted])
         #expect(try meaning(ClaudeCodeProvider.hookEvents, "PreCompact", trigger: "auto")
             == [.turnActivityChanged(.compacting)])
         #expect(try meaning(ClaudeCodeProvider.hookEvents, "PostCompact") == [.turnActivityChanged(.executing)])
-    }
-
-    @Test func unreportableCodexTelemetrySaysWhy() {
-        #expect(AgentProviderID.codex.effortUnavailableReason != nil)
-        #expect(AgentProviderID.codex.contextUnavailableReason != nil)
-        #expect(AgentProviderID.claudeCode.effortUnavailableReason == nil)
-        #expect(AgentProviderID.claudeCode.contextUnavailableReason == nil)
-    }
-
-    @Test func requestedLaunchMetadataHasHonestPresentationAndSearchTerms() {
-        let profile = AgentLaunchProfile(
-            modelID: "gpt-5.4",
-            reasoningEffort: "xhigh")
-        #expect(profile.displayReasoningEffort == "Extra high")
-        #expect(profile.searchTerms.contains("gpt-5.4"))
-        #expect(profile.searchTerms.contains("Extra high"))
-    }
-
-    @Test func lifecyclePresentationDistinguishesNotStartedFromLiveIdle() {
-        #expect(DisplayState.inactive.label == "Not Started")
-        #expect(DisplayState.idle.label == "Ready")
-        #expect(DisplayState.inactive.label != DisplayState.idle.label)
-        #expect(!DisplayState.inactive.showsListLabel)
-        #expect(DisplayState.idle.showsListLabel)
-    }
-
-    @Test func activePresentationIncludesStartupAndContextCompaction() {
-        #expect(DisplayState.launching.isActive)
-        #expect(DisplayState.thinking.isActive)
-        #expect(DisplayState.working.isActive)
-        #expect(DisplayState.compacting.isActive)
-        #expect(!DisplayState.idle.isActive)
+        // Every event with text is one Claude subscribes to.
+        #expect(Set(ClaudeCodeProvider.textFields.keys).isSubset(of: ClaudeCodeProvider.hookEvents.keys))
     }
 
     @Test func providerReconciliationOnlyReplacesAnUnboundInactiveRuntime() {
@@ -404,32 +367,58 @@ struct AgentProviderTests {
 
     @MainActor
     @Test func unreadCompletionSurvivesProviderExitInPresentationState() {
-        let entry = AgentEntry(name: "Codex", provider: .codex)
-        let agent = AgentInstance(entry: entry, runtime: AgentRuntimeSnapshot(
-            surfaceState: .open,
-            processState: .exited,
-            activityState: .unknown,
-            unreadCompletion: AgentCompletionID(
-                provider: .codex,
-                sessionID: "session",
-                turnID: "turn",
-                launchGeneration: UUID(),
-                eventID: "complete")))
-
-        #expect(agent.displayState == .finished)
+        var runtime = AgentRuntimeSnapshot(surfaceState: .open, processState: .exited, activityState: .unknown)
+        runtime.record.unread = true
+        let agent = AgentInstance(entry: AgentEntry(name: "Codex", provider: .codex), runtime: runtime)
+        #expect(agent.shownState == .finishedUnread)
     }
 
     @MainActor
     @Test func persistedUnreadCompletionIsVisibleWithoutARestoredSurface() {
-        let agent = AgentInstance(
-            entry: AgentEntry(name: "Codex", provider: .codex),
-            runtime: AgentRuntimeSnapshot(unreadCompletion: AgentCompletionID(
-                provider: .codex,
-                sessionID: "session",
-                turnID: "turn",
-                launchGeneration: UUID(),
-                eventID: "complete")))
-        #expect(agent.displayState == .finished)
+        var runtime = AgentRuntimeSnapshot()
+        runtime.record.unread = true
+        let agent = AgentInstance(entry: AgentEntry(name: "Codex", provider: .codex), runtime: runtime)
+        #expect(agent.shownState == .finishedUnread)
+    }
+
+    /// Claude's own list of its running sessions (`claude agents --json`)
+    /// says whether a conversation is live in another terminal: an
+    /// interactive one whose process is alive, or a background one. Such a
+    /// conversation is not resumed; a list that cannot be read stops the
+    /// launch rather than risk it (flows.md 4.5).
+    @Test func aLiveClaudeConversationIsNotResumed() throws {
+        let folder = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let claude = folder.appendingPathComponent("claude")
+        func answer(_ list: String) throws {
+            try Data("#!/bin/sh\n[ \"$1 $2\" = 'agents --json' ] && /bin/cat <<'LIST'\n\(list)\nLIST\nexit 0\n".utf8).write(to: claude)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: claude.path)
+        }
+        func isLive(_ session: String) -> Result<Bool, AgentProviderIssue> {
+            ClaudeCodeProvider.runningSessions(executable: claude, environmentPath: folder.path)
+                .flatMap { ClaudeCodeProvider.isLive(session, in: $0) }
+        }
+        let me = ProcessInfo.processInfo.processIdentifier
+        try answer(#"[{"pid":\#(me),"sessionId":"s-1","kind":"interactive","status":"idle"}]"#)
+        #expect(isLive("s-1") == .success(true))
+        #expect(isLive("s-2") == .success(false))
+        try answer(#"[{"pid":99999,"sessionId":"s-1","kind":"interactive"}]"#)
+        #expect(isLive("s-1") == .success(false))
+        try answer(#"[{"id":"b-1","sessionId":"s-1","state":"running","kind":"background"}]"#)
+        #expect(isLive("s-1") == .success(true))
+        try answer("[]")
+        #expect(isLive("s-1") == .success(false))
+        try answer("not a list")
+        guard case .failure = isLive("s-1") else { Issue.record("An unreadable list was taken as an answer."); return }
+
+        try answer(#"[{"pid":\#(me),"sessionId":"s-1","kind":"interactive"}]"#)
+        let request = AgentLaunchRequest(
+            agentID: UUID(), name: "Agent", provider: .claudeCode, launchProfile: AgentLaunchProfile(),
+            workingDirectory: nil, environmentPath: folder.path, launchGeneration: UUID(),
+            session: AgentSessionBinding(provider: .claudeCode, sessionID: "s-1"))
+        let launch = ClaudeCodeProvider(root: AgentDataRoot(url: folder.appendingPathComponent("root"))).prepareLaunch(request)
+        guard case .failure(let issue) = launch else { Issue.record("A live conversation was resumed."); return }
+        #expect(issue == .sessionOpenElsewhere(.claudeCode, "s-1"))
     }
 
     private func temporaryDirectory() throws -> URL {
@@ -450,15 +439,22 @@ struct AgentProviderTests {
 
     /// What the event table says a record of the hook event `name` means, or
     /// nil when the table has no such event. The record carries only the
-    /// hook name, the trigger, and the keys every record has.
+    /// hook name, the trigger, the text, the error, and the keys every
+    /// record has.
     private func meaning(
         _ table: [String: AgentProviderEntry.Meaning],
         _ name: String,
-        trigger: String = ""
+        trigger: String = "",
+        text: String? = nil,
+        error: String = ""
     ) throws -> [AgentDomainEvent]? {
+        var object: [String: Any] = [
+            "provider": "claudeCode", "launchGeneration": UUID().uuidString,
+            "hookEventName": name, "trigger": trigger, "error": error,
+        ]
+        object["text"] = text
         let record = try JSONDecoder().decode(
-            AgentRawProviderEvent.self,
-            from: Data("{\"provider\":\"claudeCode\",\"launchGeneration\":\"\(UUID().uuidString)\",\"hookEventName\":\"\(name)\",\"trigger\":\"\(trigger)\"}".utf8))
+            AgentRawProviderEvent.self, from: JSONSerialization.data(withJSONObject: object))
         return table[name]?(record)
     }
 }

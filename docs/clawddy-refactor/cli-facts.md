@@ -1079,3 +1079,77 @@ Claude Code 2.1.323 (one patch release after the captures above), same harness a
 - **Consequence for Clawddy:** a binding names a resumable session only once the session has had its first entry. Clawddy cannot see the file, so it takes the first turn as that point (a settled `working`, a `blocked` or an `error`): until then a launch that created its session under an ID it chose has not saved it, and the next launch forks again from the fork's source, or starts a new session with a new `--session-id`. Waiting for the turn is conservative: a `/clear` with no prompt also writes the session, but nothing in the hooks Clawddy subscribes to separates it from a fork's `SessionStart`, and forking again loses only that empty session.
 
 **Safety:** none of the four session ids appears anywhere in `<CLAWDDY_CONFIG>/status/`. `run.sh` saw changes only in two live agents' files, from the owner's own sessions running at the time. The old global `clawddy-provider-hook.sh` entry ran on each `SessionStart` and `SessionEnd`, found no agent identity and exited 0.
+
+## Flows capture (2026-11-14): `/resume` inside Claude, `--resume`, `/clear`
+
+The owner reported that an agent stopped showing its state after "continue". Its event file showed `SessionEnd` for the launch's session, then `SessionStart` for an older session of the same folder in the same launch, which is what `/resume` inside Claude does. These runs look for the cause. Claude Code 2.1.325, the same harness (`spike-harness/`, from this shell, not inside a Clawddy agent, `--settings` logging hooks), the user's configured model, one-word prompts. Captures: `/Volumes/Xcode/GhosttyBuilds/ghostty/tmp/flows1/<run>/` (`steps.json`, `settings.json`, `cap/`), all in the folder `flows1/work`. `<X>` is a conversation made first for the others to resume (run `x`: `--session-id <X> --name earlier-x`, one turn, `/exit`). Only OSC 7501 and hooks are shown.
+
+**a: new session, a turn, `/resume <X>` typed with its argument, a turn** (`--session-id <A> --name "agent 1"`):
+```
+   0.249 HOOK  SessionStart sid=<A> source=startup
+   0.422 OSC   state=idle
+   8.118 OSC   state=working
+   9.669 HOOK  Stop sid=<A>
+   9.684 OSC   state=done
+  11.708 OSC   state=done  [msg='replied with the single word ok as requested']
+  16.048 KEY   enter (/resume <X>)
+  16.064 OSC   state=working
+  16.293 HOOK  SessionEnd sid=<A> reason=resume
+  16.320 HOOK  SessionStart sid=<X> source=resume
+  16.344 OSC   state=idle
+  25.549 OSC   state=working
+  25.577 HOOK  UserPromptSubmit sid=<X>
+  26.724 HOOK  Stop sid=<X>
+  26.735 OSC   state=done
+  28.432 OSC   state=done  [msg="replied 'yes' as requested"]
+```
+**a3: the same through the picker** (`/resume`, Enter, type to search, Enter, Enter): the picker's Enter reports nothing; choosing a conversation gives `SessionEnd reason=resume` (23.111), `SessionStart source=resume` for `<X>` (23.140) and `idle` (23.164). The next turn reports `working` (27.828) and `done` (29.019) as usual.
+
+**b: `--resume <A>` of a stopped agent, a turn:** `SessionStart source=resume` (0.327) runs before the `7501;?` query (0.456) and `idle` (0.503); the turn reports `working` (8.116) and `done` (9.436).
+
+**c: `/clear`, then a turn** (`--session-id <C>`): `working` (26.055), `SessionEnd reason=clear` (26.075), `idle` (26.106), `SessionStart source=clear` with a new id (26.122); the next turn reports `working` (33.533), `done` (36.715) and its summary.
+
+- **`SessionEnd` gives `reason: "resume"`** when `/resume` leaves a session; the `SessionStart` that follows has `source: "resume"` and the chosen conversation's id. Nothing in the OSC 7501 channel changes after `/resume`: the same reports, without `id`, keep coming.
+- **`/resume` typed with its argument reports `working` for 280 ms** (434 ms in the run below), longer than `AgentBridge.turnStartDelay` (250 ms), so it starts a turn that `idle` ends without a completion. Through the picker it reports no `working`.
+
+**Both `/resume` cases through the real app path** (`flows1/live-resume.log`, `flows1/live-picker.log`): a temporary test, not kept, ran a real Claude in a real Ghostty surface hosted by `AgentDetailViewController`, through a real `AgentBridge` with real timers, file watching and IO, on a temporary data root, typing through the surface's own input. After `/resume`, by argument and through the picker, each later turn showed Working, then Done (unread, as nothing viewed the agent), with the session rebound to `<X>`. The only difference from the capture above is the `working` of the typed `/resume`, which showed Working for 0.4 s and cleared the unread Done of the turn before.
+
+**Not reproduced:** an agent that stops showing its state after `/resume`. Not tried: resuming a long conversation (the owner's was an 11.8 MB transcript), which may take another path inside Claude, and a model change with `/model`, which the owner's status line shows happened in that session.
+
+## Flows 2 capture (2026-11-14): terminal titles, the list of conversations
+
+For `docs/clawddy-design/flows.md` 5 (does Claude Code title the conversation?) and 8 (`claude --resume` with no id). Claude Code 2.1.325, the same harness (`spike-harness/`, from this shell, not inside a Clawddy agent, `--settings` logging hooks, OSC 7501 answered), the user's configured model, one-word prompts. Captures: `/Volumes/Xcode/GhosttyBuilds/ghostty/tmp/flows2/<run>/` (`steps.json`, `settings.json`, `cap/`), all in the folder `flows2/work`, new before t1. `<T>` is t1's conversation. Only OSC 0 (title), OSC 7501 and hooks are shown.
+
+**t1: a new conversation with no `--name`** (`--session-id <T>`; the trust dialog accepted first):
+```
+   3.228 HOOK  SessionStart sid=<T> source=startup
+   3.258 OSC   state=idle
+   3.258 OSC   0 "Claude Code"
+  10.983 OSC   state=working
+  11.005 HOOK  UserPromptSubmit sid=<T>
+  12.075 OSC   0 "Single word reply"
+  12.111 OSC   state=done
+  18.771 OSC   state=working                (a second prompt, on another topic)
+  18.793 HOOK  UserPromptSubmit sid=<T>
+  20.234 OSC   state=done                   (no new title)
+  26.385 OSC   state=working, clear ×3, then 0 ""   (/exit)
+```
+- **Before the first prompt the title is "Claude Code"; 1.09 s after it, a few words about the conversation, which stay**: the second prompt, on another topic, changed nothing.
+- `/exit` clears the title (`OSC 0 ""`) before the launch script's exit report; a Ghostty surface then shows its working directory as its title.
+
+**t2: `--resume <T>`, no `--name`:** `0 "✳ Single word reply"` (0.311, before the status query is answered), then `idle` and `0 "Single word reply"` (0.462). The conversation keeps its title.
+
+**t5, then t6: `--resume <T> --name named-by-user`, then `--resume <T>` with no name:** both show `0 "✳ named-by-user"`, then `0 "named-by-user"`. A name given once names the conversation for good.
+
+**t3: `claude --resume` with no id** (Claude's own list of the folder's conversations, "Resume session … Esc to cancel"): `0 "claude · resume"` (0.253) and the status query; no other report and no hook while the list shows. Enter on the first row: `idle` and `0 "Single word reply"` (6.207), `SessionStart source=resume` for `<T>` (6.276). The next prompt reports `working`, `UserPromptSubmit`, `Stop`, `done` as usual.
+
+**t4: the same list, Esc:** `9;4;0` and `state=clear` (6.153), exit status 1. No `SessionStart`, no hook at all.
+
+- **Rules used:** a Clawddy agent whose name is not the user's is launched without `--name`, and the cleaned terminal title becomes its name (`AgentConversationTitle`: leading glyphs dropped; "Claude Code", "claude · resume" and a path give nothing; at most 40 characters). An agent made for "Continue an earlier conversation…" launches `claude --resume`; the `SessionStart` of the chosen conversation binds it, and an exit before the provider ever reported (t4) removes it.
+- **A prompt is a turn; a command is not.** Every prompt captured runs `UserPromptSubmit` after its `working`, usually 18 to 31 ms after it and once 311 ms (P3.5a case 1); `/resume <id>`, `/clear` and `/exit` report a `working` and run none. Clawddy now starts a Claude turn on the prompt's record (`.promptSubmitted`), and a `working` with no prompt only after 1 s (`AgentBridge.turnStartDelay`), so `/resume` shows no Working and leaves the Done before it unread.
+
+**Through the real app path** (a temporary test, not kept: real `claude` in real Ghostty surfaces hosted by `AgentDetailViewController`, through a real `AgentBridge` with real timers, file watching and IO, on a temporary data root, typing through the surface's own input; timeline `flows2/live-after-fix.log`):
+- A new agent "agent 1" showed Working 0.47 s after Enter, Done, and took the name "Single word reply" 0.5 s after Done, saved in `agents.json`, with `autoNamed` in `state.json`. Its first run also showed that at `/exit` Ghostty's fallback title, the working directory, was taken as a name; paths are now ignored, and the second run kept "Single word reply".
+- "Continue an earlier conversation…" in the same folder: Enter on the list bound the new agent to the conversation above (its binding file names it), named it "Single word reply 2", tracked its turn (Working, then Done), and after `/exit` a bring-back resumed that conversation.
+- Esc on the list removed the agent within 0.1 s, nothing notified, nothing kept in Recently removed.
+- Not tried: Codex's list (`codex resume`), whose choice binds only through Codex's hooks.

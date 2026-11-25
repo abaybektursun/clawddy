@@ -8,37 +8,39 @@ import Testing
 /// `knownWrong_emptyTurnIDKeptAsEmptyString`.
 @MainActor
 struct AgentFailLoudTests {
-    /// The run starts with no unread marks, says why, and keeps the file as
-    /// evidence until it is removed; then saving resumes.
-    @Test func corruptStateFileIsReportedAndKept() throws {
+    /// A record that cannot be read: that agent alone shows a problem
+    /// naming the file, the app says why, keeps the file as evidence and
+    /// saves nothing over it, and nothing launches it on a record of
+    /// defaults (last review ruling 2).
+    @Test func corruptRecordIsReportedAndKept() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
         try h.completeTurn(id)
+        let file = AgentRecord.url(id, h.root.statusDir)
         var corrupt = Data()
 
         try h.restart {
-            let data = try Data(contentsOf: h.root.stateFile)
+            let data = try Data(contentsOf: file)
             corrupt = data.prefix(data.count / 2)
-            try corrupt.write(to: h.root.stateFile)
+            try corrupt.write(to: file)
         }
 
         let agent = try h.agent(id)
-        #expect(agent.unreadCompletion == nil)
-        #expect(agent.displayState == .inactive)
-        let issue = try #require(h.bridge.storageErrors[h.root.stateFile])
-        #expect(issue.hasPrefix("Unread marks could not be restored from \(h.root.stateFile.path) ("))
+        #expect(!agent.record.unread)
+        #expect(agent.terminal == .notRunning)
+        #expect(agent.record.state == .problem)
+        #expect(agent.record.problem?.text?.contains(file.path) == true)
+        let issue = try #require(h.bridge.storageErrors[file])
+        #expect(issue.hasPrefix("The record of Agent could not be read ("))
         #expect(h.diagnostics.messages.contains(issue))
-        // A save that would have replaced the file leaves it alone.
-        h.config.load()
-        #expect(try Data(contentsOf: h.root.stateFile) == corrupt)
-
-        try FileManager.default.removeItem(at: h.root.stateFile)
-        h.config.load()
-        #expect(try h.persisted("unreadCompletions").isEmpty)
-        #expect(h.bridge.storageErrors.isEmpty)
+        // Nothing launches it, and the file is left alone.
+        let launches = h.providers.launchRequests.count
+        try h.activate(id)
+        #expect(h.providers.launchRequests.count == launches)
+        #expect(try Data(contentsOf: file) == corrupt)
     }
 
     /// No file means the defaults; a file that does not decode means the
@@ -79,9 +81,9 @@ struct AgentFailLoudTests {
 
         let agent = try h.agent(id)
         #expect(h.providers.launchRequests.isEmpty)
-        #expect(agent.displayState == .failed)
+        #expect(agent.shownState == .problem)
         #expect(agent.canOnlyStartFresh)
-        #expect(agent.failureMessage?.hasPrefix(
+        #expect(agent.record.problem?.text?.hasPrefix(
             "The saved Claude Code session could not be read, so the agent was not started. \(file.path) could not be read: ") == true)
         #expect(try Data(contentsOf: file) == corrupt)
         #expect(try h.launchScripts().isEmpty)
@@ -94,9 +96,8 @@ struct AgentFailLoudTests {
 
         let request = try #require(h.providers.launchRequests.first)
         #expect(request.session == nil)
-        #expect(request.pendingFork == nil)
         #expect(!h.exists(file))
-        #expect(agent.displayState == .launching)
+        #expect(agent.terminal == .starting)
         #expect(!agent.canOnlyStartFresh)
     }
 
@@ -112,9 +113,9 @@ struct AgentFailLoudTests {
         h.start()
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .failed)
+        #expect(agent.shownState == .problem)
         #expect(agent.canOnlyStartFresh)
-        #expect(agent.failureMessage?.hasPrefix(
+        #expect(agent.record.problem?.text?.hasPrefix(
             "The saved Claude Code session could not be read, so the agent was not started. \(file.path) could not be read: ") == true)
         #expect(h.providers.launchRequests.isEmpty)
     }
@@ -122,24 +123,26 @@ struct AgentFailLoudTests {
     @Test func undecodableRecordIsLoggedWithItsOffset() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent", provider: .codex)
+        let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
+        try h.osc(id, "state=working:app=claude-code")
         let events = h.statusFile(id, "events")
         let offset = try h.size(events)
         let before = h.diagnostics.messages.count
 
-        try h.append(id, h.record("UserPromptSubmit", generation: try h.generation(id), provider: .codex)
-            .replacingOccurrences(of: #""provider":"codex""#, with: #""provider":"""#))
+        try h.append(id, h.record("UserPromptSubmit", generation: try h.generation(id))
+            .replacingOccurrences(of: #""provider":"claudeCode""#, with: #""provider":"""#))
         h.poll()
 
-        #expect(try h.agent(id).displayState == .idle)
+        // The lost report is shown, not only logged.
+        #expect(try h.agent(id).record.problem == AgentRecord.Problem(kind: .reportFailed))
         let reported = Array(h.diagnostics.messages.dropFirst(before))
         #expect(reported.count == 1)
         #expect(reported.first?.hasPrefix("undecodable record in \(events.path) at byte \(offset): provider") == true)
         // The records after it apply.
         try h.hook(id, "UserPromptSubmit")
-        #expect(try h.agent(id).displayState == .thinking)
+        #expect(try h.agent(id).activityState == .reasoning)
     }
 
     /// The hook script writes "" for a field its payload did not carry.
@@ -149,14 +152,12 @@ struct AgentFailLoudTests {
         let id = try h.addAgent("Agent", provider: .codex)
         h.start()
         try h.launch(id)
+        try h.startTurn(id)
 
-        try h.hook(id, "UserPromptSubmit", turn: "")
+        try h.hook(id, "agent-turn-complete", turn: "")
         let agent = try h.agent(id)
-        #expect(agent.turnState == .active(turnID: nil))
-
-        try h.hook(id, "Stop", turn: "")
-        #expect(agent.unreadCompletion != nil)
-        #expect(agent.unreadCompletion?.turnID == nil)
+        #expect(agent.record.unread)
+        #expect(agent.lastAppliedCompletion?.turnID == nil)
         #expect(agent.lastAppliedCompletion?.turnID == nil)
         #expect(agent.metadata?.sessionID == "session-1")
         #expect(agent.metadata?.modelID == nil)
@@ -187,8 +188,9 @@ struct AgentFailLoudTests {
         #expect(try fm.contentsOfDirectory(atPath: folder.path) == ["agents.json"])
     }
 
-    /// A failed save of `agents.json` says why, and the change is undone.
-    @Test func failedConfigSaveIsShown() throws {
+    /// A failed save of `agents.json` says why; written off the main thread,
+    /// in order, as a record is, the change stays (final review part 2).
+    @Test func failedConfigSaveIsShown() async throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: h.root.url.path)
@@ -199,32 +201,36 @@ struct AgentFailLoudTests {
             }
         }
 
-        #expect(h.config.addProject(name: "Second") == nil)
+        #expect(h.config.addProject(name: "Second") != nil)
+        h.config.waitForWrites()
+        // The failure reaches the main thread's next turn.
+        try await Task.sleep(for: .milliseconds(50))
 
-        #expect(h.config.projects.map(\.name) == [AgentBridgeHarness.projectName])
+        #expect(h.config.projects.map(\.name) == [AgentBridgeHarness.projectName, "Second"])
         #expect(h.config.persistenceErrorMessage?.hasPrefix("Agents configuration could not be saved: ") == true)
     }
 
-    /// A failed save of `state.json` is listed with the configuration issue
+    /// A failed save of a record is listed with the configuration issue
     /// until a save succeeds.
-    @Test func failedStateSaveIsShown() throws {
+    @Test func failedRecordSaveIsShown() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
         let fm = FileManager.default
-        try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: h.root.url.path)
+        try fm.setAttributes([.posixPermissions: 0o500], ofItemAtPath: h.root.statusDir.path)
 
         try h.completeTurn(id)
 
-        let issue = try #require(h.bridge.storageErrors[h.root.stateFile])
-        #expect(issue.hasPrefix("Unread marks could not be saved: "))
+        let file = AgentRecord.url(id, h.root.statusDir)
+        let issue = try #require(h.bridge.storageErrors[file])
+        #expect(issue.hasPrefix("The record of Agent could not be saved: "))
         #expect(h.diagnostics.messages.contains(issue))
 
-        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: h.root.url.path)
-        h.bridge.persistState()
+        try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: h.root.statusDir.path)
+        h.view(id)
         #expect(h.bridge.storageErrors.isEmpty)
-        #expect(Set(try h.persisted("unreadCompletions").keys) == [id])
+        #expect(try h.recordedUnread().isEmpty)
     }
 }

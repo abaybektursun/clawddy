@@ -2,6 +2,16 @@ import AppKit
 import Cocoa
 import GhosttyKit
 
+// Clawddy: the process environment is final before Ghostty takes its
+// snapshot. Ghostty keeps the environment as a slice of `environ` with its
+// length, so a variable removed after `ghostty_init` leaves a null entry that
+// the first terminal's launch reads.
+AgentTerminalEnvironmentPolicy.removeInheritedAgentIdentity()
+// A harness run shows nothing on screen, from the first window on.
+if let directory = AgentHarness.directory {
+    AgentHarness.prepareProcess(directory: directory)
+}
+
 // Initialize Ghostty global state. We do this once right away because the
 // CLI APIs require it and it lets us ensure it is done immediately for the
 // rest of the app.

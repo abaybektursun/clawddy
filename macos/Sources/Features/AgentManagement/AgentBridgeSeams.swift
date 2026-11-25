@@ -133,14 +133,11 @@ protocol AgentNotifier {
     func announce(_ message: String)
 }
 
-/// The user notification center, asking for permission at the first post,
-/// and AppKit's accessibility announcements.
-struct AgentUserNotificationCenter: AgentNotifier {
-    // Nonisolated so it can be a default argument; the synthesized one
-    // would be main-actor isolated.
-    // swiftlint:disable:next unneeded_synthesized_initializer
-    nonisolated init() {}
-
+/// The user notification center and AppKit's accessibility announcements.
+/// It never asks for permission itself: the person turns notifications on
+/// in the Agent menu, which asks then (flows.md 6.11). Without permission
+/// nothing is posted.
+final class AgentUserNotificationCenter: AgentNotifier {
     func post(_ request: UNNotificationRequest) {
         let center = UNUserNotificationCenter.current()
         center.getNotificationSettings { settings in
@@ -151,19 +148,7 @@ struct AgentUserNotificationCenter: AgentNotifier {
                         logger.error("notification failed: \(error.localizedDescription)")
                     }
                 }
-            case .notDetermined:
-                center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
-                    if let error {
-                        logger.error("notification authorization failed: \(error.localizedDescription)")
-                    } else if granted {
-                        center.add(request) { error in
-                            if let error {
-                                logger.error("notification failed: \(error.localizedDescription)")
-                            }
-                        }
-                    }
-                }
-            case .denied:
+            case .notDetermined, .denied:
                 break
             @unknown default:
                 break
@@ -204,7 +189,7 @@ enum AgentDiagnostics {
 
 // MARK: - Surface host
 
-/// What presents agent terminals for the bridge; `AgentDetailViewController`
+/// What presents agent terminals for the bridge; `AgentTerminalsController`
 /// is the production host. It is passed to each activation, and the bridge
 /// keeps only a weak reference to the last one. The host is the only owner
 /// of agent surfaces: it creates each one from its own app, observes it with
@@ -212,10 +197,8 @@ enum AgentDiagnostics {
 @MainActor
 protocol AgentSurfaceHost: AnyObject {
     func hasSurface(id: UUID) -> Bool
-    func selectAgent(_ agent: AgentInstance, projectName: String)
     @discardableResult
     func showOrSwitch(
-        projectName: String,
         agent: AgentInstance,
         focusTerminal: Bool,
         select: Bool,
@@ -224,24 +207,25 @@ protocol AgentSurfaceHost: AnyObject {
     /// Presents the agent's terminal and returns whether it was newly created.
     @discardableResult
     func presentPreparedSurface(
-        projectName: String,
         agent: AgentInstance,
         createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool
-    /// Asks the user before closing the agent's terminal while its process
+    /// Asks the user before closing the agent's terminal while its provider
     /// runs, and calls `close` only if they agree.
     func confirmClose(id: UUID, then close: @escaping @MainActor () -> Void)
-    /// Whether closing the agent's terminal now would kill a running
-    /// process, as Ghostty judges it for its own terminals.
-    func closeNeedsConfirmation(id: UUID) -> Bool
     func removeSurface(id: UUID)
+    /// The agent's terminal's viewport text, read now; nil without one.
+    func screen(id: UUID) -> String?
+    /// Puts `input` into the agent's terminal, shown or not.
+    func input(_ input: AgentTerminalInput, to id: UUID)
 }
 
-extension AgentDetailViewController: AgentSurfaceHost {}
+extension AgentTerminalsController: AgentSurfaceHost {}
 
 /// Reports one agent surface to the bridge, tagged with the agent and the
 /// launch the surface was created for: its close, the exit of its process,
-/// and each program-status report. `childExited` publishes when Ghostty shows
+/// each program-status report, and each title its program sets, which
+/// `title` publishes. `childExited` publishes when Ghostty shows
 /// that the process exited, which after an abnormally short run, or with
 /// `wait-after-command`, it does without closing the terminal. The host calls
 /// this in the same main-thread turn that creates the surface, so no report
@@ -249,6 +233,7 @@ extension AgentDetailViewController: AgentSurfaceHost {}
 func observeAgentSurface(
     _ surface: AnyObject,
     childExited: some Publisher<Void, Never>,
+    title: some Publisher<String, Never>,
     agentID: UUID,
     generation: UUID?,
     bridge: AgentBridge
@@ -285,10 +270,16 @@ func observeAgentSurface(
             bridge?.programStatus(id: agentID, generation: generation, report: report)
         }
     }
+    let titles = title.sink { [weak bridge] title in
+        MainActor.assumeIsolated {
+            bridge?.surfaceTitle(id: agentID, generation: generation, title: title)
+        }
+    }
     return [
         AnyCancellable { center.removeObserver(close) },
         AnyCancellable { center.removeObserver(status) },
         exit,
+        titles,
     ]
 }
 
@@ -314,6 +305,8 @@ struct AgentStatusObservation: Equatable, Sendable {
         case surfaceClosed(processAlive: Bool)
         /// A program-status report the terminal received.
         case programStatus(Ghostty.Action.ProgramStatus)
+        /// A line of the agent's event file that is no record, saying why.
+        case unreadableRecord(String)
     }
 
     let agentID: UUID

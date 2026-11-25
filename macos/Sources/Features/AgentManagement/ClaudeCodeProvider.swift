@@ -8,11 +8,20 @@ struct ClaudeCodeProvider: Sendable {
     /// means. Claude reports its turn activity and liveness in its terminal
     /// (OSC 7501), so no hook here starts, continues or completes a turn.
     static let hookEvents: [String: AgentProviderEntry.Meaning] = [
-        // Every source (startup, resume, clear, compact, fork) names the
+        // Every source (startup, resume, clear, compact) names the
         // session the next launch resumes.
         "SessionStart": { [.sessionBound(sessionID: $0.sessionID)] },
+        // A prompt starts the turn its `working` announced, and reads the
+        // turn before. A command that submits none, such as `/resume`, is no
+        // turn.
+        "UserPromptSubmit": { [.promptSubmitted($0.text)] },
+        // The turn's `done` comes in the terminal; this brings its message.
+        "Stop": { record in record.text.map { [.messageReported($0)] } ?? [] },
         // Claude's own `error` report usually comes first; the turn fails once.
-        "StopFailure": { _ in [.turnFailed(nil)] },
+        "StopFailure": { [.turnFailed(AgentFailure(error: $0.error, text: $0.text))] },
+        // The question of an `AskUserQuestion`, in full; the terminal's
+        // `blocked` report has already said that it asks.
+        "PermissionRequest": { record in record.text.map { [.questionReported($0)] } ?? [] },
         // A manual compaction is reported as a long `working` ending in a
         // `done` that must complete nothing. An automatic one runs inside a
         // real turn, whose completion stands.
@@ -31,12 +40,20 @@ struct ClaudeCodeProvider: Sendable {
     /// `turn_id`.
     static let turnIDField = "prompt_id"
 
+    /// The payload field whose text each event carries
+    /// (`docs/clawddy-refactor/cli-facts.md`, probes of 2026-11-23).
+    static let textFields = [
+        "UserPromptSubmit": "prompt",
+        "Stop": "last_assistant_message",
+        "StopFailure": "last_assistant_message",
+        "PermissionRequest": "tool_input.questions.0.question",
+    ]
+
     /// Claude's entry in the provider table.
     var entry: AgentProviderEntry {
         AgentProviderEntry(
-            turnActivity: .surface,
+            turnStartDelay: 1,
             hookEvents: Self.hookEvents,
-            recordsExit: false,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },
             probe: { probe(environmentPath: $0) },
@@ -107,27 +124,29 @@ struct ClaudeCodeProvider: Sendable {
         // The ID of a session this launch creates, in Claude's lowercase form.
         let chosenSessionID = UUID().uuidString.lowercased()
 
-        // A fork marker stays until the fork's session is saved, at its first
-        // turn, so while it exists the fork has no session on disk, and this
-        // launch forks again rather than resuming a session that does not
-        // exist. Claude accepts `--session-id` together with `--resume` only
-        // with `--fork-session`.
-        if let pending = request.pendingFork, pending.provider == id {
-            newSessionID = chosenSessionID
-            arguments += [
-                "--resume", pending.sourceSessionID,
-                "--fork-session", "--session-id", chosenSessionID,
-            ]
-        } else if let session = request.session, session.provider == id {
+        if let session = request.session, session.provider == id {
+            // The same conversation must never run twice (flows.md 4.5).
+            let listing = request.liveSessions.listing(id) {
+                Self.runningSessions(executable: executable, environmentPath: request.environmentPath)
+            }
+            switch listing.flatMap({ Self.isLive(session.sessionID, in: $0) }) {
+            case .success(true): return .failure(.sessionOpenElsewhere(id, session.sessionID))
+            case .success(false): break
+            case .failure(let issue): return .failure(issue)
+            }
             resumedSessionID = session.sessionID
             arguments += ["--resume", session.sessionID]
         } else {
             newSessionID = chosenSessionID
             arguments += ["--session-id", chosenSessionID]
         }
-        // Claude takes the agent's label at every launch, resumes included,
-        // so a rename reaches the session at its next launch.
-        arguments += ["--name", request.name]
+        // Claude takes a name the user gave at every launch, resumes
+        // included, so a rename reaches the conversation at its next launch
+        // and names it for good. Without one, Claude titles the conversation
+        // after its first prompt, and that title becomes the agent's name.
+        if request.namedByUser {
+            arguments += ["--name", request.name]
+        }
         arguments += id.startModeArguments(request.launchProfile.startMode)
         if let model = request.launchProfile.modelID, !model.isEmpty {
             arguments += ["--model", model]
@@ -137,6 +156,11 @@ struct ClaudeCodeProvider: Sendable {
         }
         if let settingsURL = metadata.settingsURL {
             arguments += ["--settings", settingsURL.path]
+        }
+        // After `--`, a task that starts with "-" is never read as an option
+        // (Claude Code 2.1.331 takes it so, probed 2026-11-24).
+        if let prompt = request.firstPrompt {
+            arguments += ["--", prompt]
         }
 
         var environment: [String: String] = [:]
@@ -152,6 +176,46 @@ struct ClaudeCodeProvider: Sendable {
             metadataAvailability: availability,
             newSessionID: newSessionID,
             resumedSessionID: resumedSessionID))
+    }
+
+    /// Claude's own list of its running sessions (`claude agents --json`,
+    /// 0.1 s, probes.md P5), as it printed it.
+    static func runningSessions(executable: URL, environmentPath: String) -> Result<String, AgentProviderIssue> {
+        let outcome = AgentProcessProbe.run(
+            executable: executable,
+            // `--all` lists idle sessions too; without it, only busy ones.
+            arguments: ["agents", "--json", "--all"],
+            environmentPath: environmentPath,
+            additionalEnvironment: AgentConfig.claudeConfigEnvironmentOverride.map {
+                ["CLAUDE_CONFIG_DIR": $0.path]
+            } ?? [:])
+        guard let output = outcome.successfulOutput else {
+            return .failure(.launchPreparationFailed(
+                .claudeCode, "Claude Code's list of running conversations could not be read (\(outcome))."))
+        }
+        return .success(output)
+    }
+
+    /// Whether a Claude process runs `sessionID` now, by `listing`
+    /// (`runningSessions`): an interactive one whose process is alive, or a
+    /// background one.
+    static func isLive(_ sessionID: String, in listing: String) -> Result<Bool, AgentProviderIssue> {
+        guard let data = listing.data(using: .utf8),
+              let sessions = try? JSONDecoder().decode([RunningSession].self, from: data)
+        else {
+            return .failure(.launchPreparationFailed(
+                .claudeCode, "Claude Code's list of running conversations could not be read (\(listing.prefix(200)))."))
+        }
+        return .success(sessions.contains { session in
+            guard session.sessionId == sessionID else { return false }
+            guard let pid = session.pid else { return true }
+            return kill(pid_t(pid), 0) == 0
+        })
+    }
+
+    private struct RunningSession: Decodable {
+        var sessionId: String
+        var pid: Int?
     }
 
     func probe(environmentPath: String) -> AgentProviderHealth {

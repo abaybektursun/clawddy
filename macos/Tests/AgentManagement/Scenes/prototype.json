@@ -1,0 +1,2730 @@
+{
+  "selected": "tidepool/Tide chart blank at sunrise",
+  "window": [
+    1280,
+    800
+  ],
+  "projects": [
+    {
+      "name": "tidepool",
+      "agents": [
+        {
+          "name": "Tide chart blank at sunrise",
+          "provider": "claudeCode",
+          "session": "241224a5-ee28-5706-b1c1-56bb941d9847",
+          "running": true,
+          "unread": true,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": false,
+          "sentence": "Fixed it: the chart asked for the next day's tides one hour early. Added a test for it; 186 pass.",
+          "firstInstruction": "the tide chart goes blank at sunrise when the day rolls over, find out why and fix it",
+          "branch": "fix/tide-chart",
+          "ageSeconds": 240,
+          "standin": {
+            "title": "Tide chart blank at sunrise",
+            "folder": "~/projects/tidepool",
+            "context": 67,
+            "plus": 38,
+            "minus": 9,
+            "screen": [
+              "~/projects/tidepool   fix/tide-chart",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Grep(\"tide\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/TideStore.swift)",
+              "⎿ 95 lines",
+              "⏺ Bash(xcodebuild test -only-testing:TideTests)",
+              "⎿ 201 passed",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Edit(Sources/TideView.swift)",
+              "⎿ +14 −2",
+              "⏺ Read(Tests/TideTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"tide\", Sources/)",
+              "⎿ 5 files",
+              "⏺ Read(Sources/TideStore.swift)",
+              "⎿ 110 lines",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> the tide chart goes blank at sunrise when the day rolls over, find out why and fix it",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/TideView.swift)",
+              "⎿ 289 lines",
+              "⏺ Edit(Sources/TideView.swift)",
+              "⎿ +17 −5",
+              "⏺ Read(Tests/TideTests.swift)",
+              "⎿ 88 lines",
+              "",
+              "⏺ Fixed it: the chart asked for the next day's tides one hour early. Added a test for it; 186 pass."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Wind barbs drawn in knots",
+          "provider": "claudeCode",
+          "session": "d6a345f7-e70e-5749-a3e1-2d64e7131ed6",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "wind barbs ignore the units setting, make them follow knots or m/s",
+          "step": "Testing the unit switch",
+          "branch": "wind-units",
+          "ageSeconds": 130,
+          "standin": {
+            "title": "Wind barbs drawn in knots",
+            "folder": "~/projects/tidepool",
+            "context": 54,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   wind-units",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Grep(\"wind\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/WindStore.swift)",
+              "⎿ 130 lines",
+              "⏺ Bash(xcodebuild test -only-testing:WindTests)",
+              "⎿ 222 passed",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/WindView.swift)",
+              "⎿ 302 lines",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Edit(Sources/WindView.swift)",
+              "⎿ +21 −9",
+              "⏺ Read(Tests/WindTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"wind\", Sources/)",
+              "⎿ 5 files",
+              "⏺ Read(Sources/WindStore.swift)",
+              "⎿ 145 lines",
+              "⏺ Bash(xcodebuild test -only-testing:WindTests)",
+              "⎿ 231 passed",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> wind barbs ignore the units setting, make them follow knots or m/s",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/WindView.swift)",
+              "⎿ 380 lines",
+              "⏺ Edit(Sources/WindView.swift)",
+              "⎿ +24 −3",
+              "⏺ Read(Tests/WindTests.swift)",
+              "⎿ 88 lines",
+              "⏺ Grep(\"wind\", Sources/)",
+              "⎿ 8 files"
+            ],
+            "steps": [
+              {
+                "working": "Testing the unit switch",
+                "elapsed": 130
+              },
+              {
+                "wait": 9
+              },
+              {
+                "print": [
+                  "⏺ Read(Sources/WindStore.swift)",
+                  "⎿ 175 lines",
+                  "⏺ Bash(xcodebuild test -only-testing:WindTests)",
+                  "⎿ 249 passed"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 13
+              },
+              {
+                "finish": "Wind barbs now follow the units setting, in knots, m/s or Beaufort. 7 new tests all pass.",
+                "plus": 47,
+                "minus": 11
+              }
+            ]
+          }
+        },
+        {
+          "name": "Anchor alarm on lock screen",
+          "provider": "claudeCode",
+          "session": "b23550a9-61d4-5404-8e41-9713137232a4",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "asks",
+          "settled": false,
+          "sentence": "The alarm can sound the siren or only vibrate when the phone is silent. Siren even then, or vibrate only when it is silent?",
+          "firstInstruction": "the anchor alarm is hard to hear on a boat",
+          "branch": "main",
+          "ageSeconds": 70,
+          "standin": {
+            "title": "Anchor alarm on lock screen",
+            "folder": "~/projects/tidepool",
+            "context": 41,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Grep(\"anchor\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/AnchorStore.swift)",
+              "⎿ 165 lines",
+              "⏺ Bash(xcodebuild test -only-testing:AnchorTests)",
+              "⎿ 243 passed",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Edit(Sources/AnchorView.swift)",
+              "⎿ +28 −7",
+              "⏺ Read(Tests/AnchorTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"anchor\", Sources/)",
+              "⎿ 5 files",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> the anchor alarm is hard to hear on a boat",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/AnchorView.swift)",
+              "⎿ 471 lines",
+              "⏺ Edit(Sources/AnchorView.swift)",
+              "⎿ +31 −1"
+            ],
+            "steps": [
+              {
+                "working": "Checking the alarm sound"
+              },
+              {
+                "wait": 0.5
+              },
+              {
+                "ask": "The alarm can sound the siren or only vibrate when the phone is silent. Siren even then, or vibrate only when it is silent?",
+                "options": [
+                  "Siren, even with the phone silent",
+                  "Vibrate only when it is silent"
+                ],
+                "header": "Anchor alarm"
+              }
+            ]
+          }
+        },
+        {
+          "name": "Offline chart packs per region",
+          "provider": "claudeCode",
+          "session": "35a129b1-a53d-5781-ad5e-1fa0b1c98e0f",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "split the offline chart download into packs so sailors fetch only their coast",
+          "step": "Splitting the chart tile index",
+          "branch": "main",
+          "ageSeconds": 840,
+          "standin": {
+            "title": "Offline chart packs per region",
+            "folder": "~/projects/tidepool",
+            "context": 28,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Grep(\"offline\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/OfflineStore.swift)",
+              "⎿ 200 lines",
+              "⏺ Bash(xcodebuild test -only-testing:OfflineTests)",
+              "⎿ 264 passed",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Edit(Sources/OfflineView.swift)",
+              "⎿ +35 −5",
+              "⏺ Read(Tests/OfflineTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"offline\", Sources/)",
+              "⎿ 5 files",
+              "⏺ Read(Sources/OfflineStore.swift)",
+              "⎿ 215 lines",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> split the offline chart download into packs so sailors fetch only their coast",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/OfflineView.swift)",
+              "⎿ 162 lines",
+              "⏺ Edit(Sources/OfflineView.swift)",
+              "⎿ +38 −8",
+              "⏺ Read(Tests/OfflineTests.swift)",
+              "⎿ 88 lines"
+            ],
+            "steps": [
+              {
+                "working": "Splitting the chart tile index",
+                "elapsed": 840
+              },
+              {
+                "wait": 38
+              },
+              {
+                "print": [
+                  "⏺ Read(Sources/OfflineStore.swift)",
+                  "⎿ 245 lines",
+                  "⏺ Bash(xcodebuild test -only-testing:OfflineTests)",
+                  "⎿ 291 passed"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 57
+              },
+              {
+                "finish": "Charts now come as 14 regional packs. One stretch of coast takes 38 MB instead of the whole 610 MB download set.",
+                "plus": 29,
+                "minus": 17
+              }
+            ]
+          }
+        },
+        {
+          "name": "Moon phase icon set",
+          "provider": "claudeCode",
+          "session": "aa203bac-568f-5526-bbf3-faa76a1b8bc1",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": false,
+          "sentence": "Checked all 8 moon phase icons. 2 are mirrored for southern waters; I changed nothing.",
+          "firstInstruction": "check the moon phase icons, which are wrong down south",
+          "branch": "main",
+          "ageSeconds": 7200,
+          "standin": {
+            "title": "Moon phase icon set",
+            "folder": "~/projects/tidepool",
+            "context": 75,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Grep(\"moon\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/MoonStore.swift)",
+              "⎿ 235 lines",
+              "⏺ Bash(xcodebuild test -only-testing:MoonTests)",
+              "⎿ 285 passed",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/MoonView.swift)",
+              "⎿ 175 lines",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Edit(Sources/MoonView.swift)",
+              "⎿ +42 −3",
+              "⏺ Read(Tests/MoonTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"moon\", Sources/)",
+              "⎿ 5 files",
+              "⏺ Read(Sources/MoonStore.swift)",
+              "⎿ 250 lines",
+              "⏺ Bash(xcodebuild test -only-testing:MoonTests)",
+              "⎿ 294 passed",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> check the moon phase icons, which are wrong down south",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/MoonView.swift)",
+              "⎿ 253 lines",
+              "⏺ Edit(Sources/MoonView.swift)",
+              "⎿ +5 −6",
+              "⏺ Read(Tests/MoonTests.swift)",
+              "⎿ 88 lines",
+              "⏺ Grep(\"moon\", Sources/)",
+              "⎿ 8 files",
+              "",
+              "⏺ Checked all 8 moon phase icons. 2 are mirrored for southern waters; I changed nothing."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Logbook export to GPX",
+          "provider": "claudeCode",
+          "session": "f63a5eac-99bb-548e-b5c6-df4d98307493",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "paused",
+          "settled": false,
+          "sentence": "Usage limit reached. It resets at 3:00 pm.",
+          "firstInstruction": "add an export of the logbook as a GPX track file",
+          "branch": "main",
+          "ageSeconds": 1500,
+          "standin": {
+            "title": "Logbook export to GPX",
+            "folder": "~/projects/tidepool",
+            "context": 62,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Grep(\"logbook\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/LogbookStore.swift)",
+              "⎿ 70 lines",
+              "⏺ Bash(xcodebuild test -only-testing:LogbookTests)",
+              "⎿ 306 passed",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Edit(Sources/LogbookView.swift)",
+              "⎿ +9 −1",
+              "⏺ Read(Tests/LogbookTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"logbook\", Sources/)",
+              "⎿ 5 files",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> add an export of the logbook as a GPX track file",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/LogbookView.swift)",
+              "⎿ 344 lines",
+              "⏺ Edit(Sources/LogbookView.swift)",
+              "⎿ +12 −4"
+            ],
+            "steps": [
+              {
+                "working": "Writing the GPX export"
+              },
+              {
+                "wait": 0.5
+              },
+              {
+                "fail": "usage",
+                "resets": "3pm"
+              }
+            ]
+          }
+        },
+        {
+          "name": "Marine forecast sign-in",
+          "provider": "claudeCode",
+          "session": "12f4c782-2abc-5519-95e4-00f699beedc2",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "failed",
+          "settled": false,
+          "sentence": "Login expired. Open it and run /login.",
+          "firstInstruction": "the marine forecast returns 403 since this morning",
+          "branch": "main",
+          "ageSeconds": 600,
+          "standin": {
+            "title": "Marine forecast sign-in",
+            "folder": "~/projects/tidepool",
+            "context": 49,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Grep(\"marine\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/MarineStore.swift)",
+              "⎿ 105 lines",
+              "⏺ Bash(xcodebuild test -only-testing:MarineTests)",
+              "⎿ 327 passed",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Edit(Sources/MarineView.swift)",
+              "⎿ +16 −8",
+              "⏺ Read(Tests/MarineTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"marine\", Sources/)",
+              "⎿ 5 files",
+              "⏺ Read(Sources/MarineStore.swift)",
+              "⎿ 120 lines",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> the marine forecast returns 403 since this morning",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/MarineView.swift)",
+              "⎿ 435 lines",
+              "⏺ Edit(Sources/MarineView.swift)",
+              "⎿ +19 −2",
+              "⏺ Read(Tests/MarineTests.swift)",
+              "⎿ 88 lines"
+            ],
+            "steps": [
+              {
+                "working": "Calling the forecast service"
+              },
+              {
+                "wait": 0.5
+              },
+              {
+                "fail": "login"
+              }
+            ]
+          }
+        },
+        {
+          "name": "Sunset time rounding",
+          "provider": "claudeCode",
+          "session": "00a7dcb6-399b-577b-9a21-08278e35754c",
+          "running": false,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": true,
+          "sentence": "Finished and merged.",
+          "firstInstruction": "sunset time rounding",
+          "branch": "main",
+          "ageSeconds": 777600,
+          "standin": {
+            "title": "Sunset time rounding",
+            "folder": "~/projects/tidepool",
+            "context": 36,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Grep(\"sunset\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/SunsetStore.swift)",
+              "⎿ 140 lines",
+              "⏺ Bash(xcodebuild test -only-testing:SunsetTests)",
+              "⎿ 198 passed",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/SunsetView.swift)",
+              "⎿ 448 lines",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Edit(Sources/SunsetView.swift)",
+              "⎿ +23 −6",
+              "⏺ Read(Tests/SunsetTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"sunset\", Sources/)",
+              "⎿ 5 files",
+              "⏺ Read(Sources/SunsetStore.swift)",
+              "⎿ 155 lines",
+              "⏺ Bash(xcodebuild test -only-testing:SunsetTests)",
+              "⎿ 207 passed",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> sunset time rounding",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/SunsetView.swift)",
+              "⎿ 126 lines",
+              "⏺ Edit(Sources/SunsetView.swift)",
+              "⎿ +26 −9",
+              "⏺ Read(Tests/SunsetTests.swift)",
+              "⎿ 88 lines",
+              "⏺ Grep(\"sunset\", Sources/)",
+              "⎿ 8 files",
+              "",
+              "⏺ Finished and merged."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Harbour search by name",
+          "provider": "claudeCode",
+          "session": "d5b68c6f-2449-5724-a2dd-c1d8794bf701",
+          "running": false,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": true,
+          "sentence": "Finished and merged.",
+          "firstInstruction": "harbour search by name",
+          "branch": "main",
+          "ageSeconds": 864000,
+          "standin": {
+            "title": "Harbour search by name",
+            "folder": "~/projects/tidepool",
+            "context": 23,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Grep(\"harbour\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/HarbourStore.swift)",
+              "⎿ 175 lines",
+              "⏺ Bash(xcodebuild test -only-testing:HarbourTests)",
+              "⎿ 219 passed",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Edit(Sources/HarbourView.swift)",
+              "⎿ +30 −4",
+              "⏺ Read(Tests/HarbourTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"harbour\", Sources/)",
+              "⎿ 5 files",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> harbour search by name",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/HarbourView.swift)",
+              "⎿ 217 lines",
+              "⏺ Edit(Sources/HarbourView.swift)",
+              "⎿ +33 −7",
+              "",
+              "⏺ Finished and merged."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Swell legend colours",
+          "provider": "claudeCode",
+          "session": "85329493-7880-5049-82a0-6b70680c9f1e",
+          "running": false,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": true,
+          "sentence": "Finished and merged.",
+          "firstInstruction": "swell legend colours",
+          "branch": "main",
+          "ageSeconds": 172800,
+          "standin": {
+            "title": "Swell legend colours",
+            "folder": "~/projects/tidepool",
+            "context": 70,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Grep(\"swell\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/SwellStore.swift)",
+              "⎿ 210 lines",
+              "⏺ Bash(xcodebuild test -only-testing:SwellTests)",
+              "⎿ 240 passed",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Edit(Sources/SwellView.swift)",
+              "⎿ +37 −2",
+              "⏺ Read(Tests/SwellTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"swell\", Sources/)",
+              "⎿ 5 files",
+              "⏺ Read(Sources/SwellStore.swift)",
+              "⎿ 225 lines",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> swell legend colours",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/SwellView.swift)",
+              "⎿ 308 lines",
+              "⏺ Edit(Sources/SwellView.swift)",
+              "⎿ +40 −5",
+              "⏺ Read(Tests/SwellTests.swift)",
+              "⎿ 88 lines",
+              "",
+              "⏺ Finished and merged."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Lighthouse list sort order",
+          "provider": "claudeCode",
+          "session": "e325ea63-1e9c-55e5-a95b-71bd7181dd91",
+          "running": false,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": true,
+          "sentence": "Finished and merged.",
+          "firstInstruction": "lighthouse list sort order",
+          "branch": "main",
+          "ageSeconds": 259200,
+          "standin": {
+            "title": "Lighthouse list sort order",
+            "folder": "~/projects/tidepool",
+            "context": 57,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Grep(\"lighthouse\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/LighthouseStore.swift)",
+              "⎿ 245 lines",
+              "⏺ Bash(xcodebuild test -only-testing:LighthouseTests)",
+              "⎿ 261 passed",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/LighthouseView.swift)",
+              "⎿ 321 lines",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Edit(Sources/LighthouseView.swift)",
+              "⎿ +4 −9",
+              "⏺ Read(Tests/LighthouseTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"lighthouse\", Sources/)",
+              "⎿ 5 files",
+              "⏺ Read(Sources/LighthouseStore.swift)",
+              "⎿ 60 lines",
+              "⏺ Bash(xcodebuild test -only-testing:LighthouseTests)",
+              "⎿ 270 passed",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> lighthouse list sort order",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/LighthouseView.swift)",
+              "⎿ 399 lines",
+              "⏺ Edit(Sources/LighthouseView.swift)",
+              "⎿ +7 −3",
+              "⏺ Read(Tests/LighthouseTests.swift)",
+              "⎿ 88 lines",
+              "⏺ Grep(\"lighthouse\", Sources/)",
+              "⎿ 8 files",
+              "",
+              "⏺ Finished and merged."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Depth alarm sound",
+          "provider": "claudeCode",
+          "session": "107a7362-a019-5af1-b2e4-ffa6388f4037",
+          "running": false,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": true,
+          "sentence": "Finished and merged.",
+          "firstInstruction": "depth alarm sound",
+          "branch": "main",
+          "ageSeconds": 345600,
+          "standin": {
+            "title": "Depth alarm sound",
+            "folder": "~/projects/tidepool",
+            "context": 44,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/tidepool   main",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Grep(\"depth\", Sources/)",
+              "⎿ 2 files",
+              "⏺ Read(Sources/DepthStore.swift)",
+              "⎿ 80 lines",
+              "⏺ Bash(xcodebuild test -only-testing:DepthTests)",
+              "⎿ 282 passed",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Edit(Sources/DepthView.swift)",
+              "⎿ +11 −7",
+              "⏺ Read(Tests/DepthTests.swift)",
+              "⎿ 58 lines",
+              "⏺ Grep(\"depth\", Sources/)",
+              "⎿ 5 files",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> depth alarm sound",
+              "",
+              "⏺ Bash(swiftlint lint --strict)",
+              "⎿ no violations",
+              "⏺ Read(Sources/DepthView.swift)",
+              "⎿ 490 lines",
+              "⏺ Edit(Sources/DepthView.swift)",
+              "⎿ +14 −1",
+              "",
+              "⏺ Finished and merged."
+            ],
+            "steps": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "field_notes",
+      "agents": [
+        {
+          "name": "Totals for the north marsh",
+          "provider": "claudeCode",
+          "session": "04284280-756b-50bd-930d-30372164e5c1",
+          "running": true,
+          "unread": true,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": false,
+          "sentence": "Spring totals for the north marsh: 41 species and 2,318 birds. Teal are up by a third.",
+          "firstInstruction": "add up the spring counts for the north marsh",
+          "branch": "main",
+          "ageSeconds": 360,
+          "standin": {
+            "title": "Totals for the north marsh",
+            "folder": "~/projects/field_notes",
+            "context": 31,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/field_notes   main",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Grep(\"totals\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.totals --check)",
+              "⎿ 1152 items checked",
+              "⏺ Edit(src/totals.py)",
+              "⎿ +15 −2",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 2.2s",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Read(build/totals.log)",
+              "⎿ 312 lines",
+              "⏺ Bash(python src/report.py totals)",
+              "⎿ 312 rows written",
+              "⏺ Grep(\"totals\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.totals --check)",
+              "⎿ 1305 items checked",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> add up the spring counts for the north marsh",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 8.8s",
+              "⏺ Read(src/totals.py)",
+              "⎿ 181 lines",
+              "⏺ Read(build/totals.log)",
+              "⎿ 321 lines",
+              "⏺ Bash(python src/report.py totals)",
+              "⎿ 321 rows written",
+              "",
+              "⏺ Spring totals for the north marsh: 41 species and 2,318 birds. Teal are up by a third."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Merge duplicate observer sheets",
+          "provider": "claudeCode",
+          "session": "8855fdd8-94ad-5990-8963-fbd00c0f805e",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "two observers sent the same transect twice, merge the copies",
+          "step": "Matching sheets by site and date",
+          "branch": "main",
+          "ageSeconds": 400,
+          "standin": {
+            "title": "Merge duplicate observer sheets",
+            "folder": "~/projects/field_notes",
+            "context": 78,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/field_notes   main",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Grep(\"merge\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.merge --check)",
+              "⎿ 1502 items checked",
+              "⏺ Edit(src/merge.py)",
+              "⎿ +22 −9",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 9.2s",
+              "⏺ Read(src/merge.py)",
+              "⎿ 194 lines",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Read(build/merge.log)",
+              "⎿ 183 lines",
+              "⏺ Bash(python src/report.py merge)",
+              "⎿ 183 rows written",
+              "⏺ Grep(\"merge\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.merge --check)",
+              "⎿ 1655 items checked",
+              "⏺ Edit(src/merge.py)",
+              "⎿ +25 −3",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> two observers sent the same transect twice, merge the copies",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 6.8s",
+              "⏺ Read(src/merge.py)",
+              "⎿ 272 lines",
+              "⏺ Read(build/merge.log)",
+              "⎿ 192 lines",
+              "⏺ Bash(python src/report.py merge)",
+              "⎿ 192 rows written",
+              "⏺ Grep(\"merge\", src/)",
+              "⎿ 8 files"
+            ],
+            "steps": [
+              {
+                "working": "Matching sheets by site and date",
+                "elapsed": 400
+              },
+              {
+                "wait": 23
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.merge --check)",
+                  "⎿ 1954 items checked",
+                  "⏺ Edit(src/merge.py)",
+                  "⎿ +31 −9"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 35
+              },
+              {
+                "finish": "Merged 23 duplicate sheets. Each transect now has exactly one sheet per visit.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Map of the counting sites",
+          "provider": "claudeCode",
+          "session": "14917f6c-7e67-5fe7-857f-cb22467b3f99",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "draw a map of every counting site, shaded by its total for the whole season",
+          "step": "141 of 260 sites plotted",
+          "branch": "main",
+          "ageSeconds": 1500,
+          "standin": {
+            "title": "Map of the counting sites",
+            "folder": "~/projects/field_notes",
+            "context": 65,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/field_notes   main",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Grep(\"map\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.map --check)",
+              "⎿ 1852 items checked",
+              "⏺ Edit(src/map.py)",
+              "⎿ +29 −7",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Read(build/map.log)",
+              "⎿ 204 lines",
+              "⏺ Bash(python src/report.py map)",
+              "⎿ 204 rows written",
+              "⏺ Grep(\"map\", src/)",
+              "⎿ 5 files",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> draw a map of every counting site, shaded by its total for the whole season",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 4.8s",
+              "⏺ Read(src/map.py)",
+              "⎿ 363 lines",
+              "⏺ Read(build/map.log)",
+              "⎿ 213 lines"
+            ],
+            "steps": [
+              {
+                "working": "141 of 260 sites plotted",
+                "elapsed": 1500
+              },
+              {
+                "wait": 60
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.map --check)",
+                  "⎿ 2304 items checked",
+                  "⏺ Edit(src/map.py)",
+                  "⎿ +38 −7"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 90
+              },
+              {
+                "finish": "The map shows all 260 sites, shaded by season total. It is saved as maps/season.png.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Species name cleanup",
+          "provider": "claudeCode",
+          "session": "3c1cba1e-9138-5360-a729-f0582c0d7e4f",
+          "running": true,
+          "unread": true,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": false,
+          "sentence": "Found 37 spellings of 19 species. Each now maps to one standard name; the originals stay.",
+          "firstInstruction": "clean up how species names are spelled",
+          "branch": "main",
+          "ageSeconds": 21600,
+          "standin": {
+            "title": "Species name cleanup",
+            "folder": "~/projects/field_notes",
+            "context": 52,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/field_notes   main",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Grep(\"species\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.species --check)",
+              "⎿ 2202 items checked",
+              "⏺ Edit(src/species.py)",
+              "⎿ +36 −5",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 5.2s",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Read(build/species.log)",
+              "⎿ 225 lines",
+              "⏺ Bash(python src/report.py species)",
+              "⎿ 225 rows written",
+              "⏺ Grep(\"species\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.species --check)",
+              "⎿ 2355 items checked",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> clean up how species names are spelled",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 2.8s",
+              "⏺ Read(src/species.py)",
+              "⎿ 454 lines",
+              "⏺ Read(build/species.log)",
+              "⎿ 234 lines",
+              "⏺ Bash(python src/report.py species)",
+              "⎿ 234 rows written",
+              "",
+              "⏺ Found 37 spellings of 19 species. Each now maps to one standard name; the originals stay."
+            ],
+            "steps": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "paper-kite",
+      "agents": [
+        {
+          "name": "Themes",
+          "provider": "claudeCode",
+          "session": "6b5fedd6-a54b-51ab-81d4-45d8b1852b02",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "themes, report when done",
+          "step": "Reading the templates",
+          "branch": "main",
+          "ageSeconds": 200,
+          "standin": {
+            "title": "Themes",
+            "folder": "~/projects/paper-kite",
+            "context": 39,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Grep(\"themes\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.themes --check)",
+              "⎿ 2552 items checked",
+              "⏺ Edit(src/themes.py)",
+              "⎿ +43 −3",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 3.2s",
+              "⏺ Read(src/themes.py)",
+              "⎿ 467 lines",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Read(build/themes.log)",
+              "⎿ 246 lines",
+              "⏺ Bash(python src/report.py themes)",
+              "⎿ 246 rows written",
+              "⏺ Grep(\"themes\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.themes --check)",
+              "⎿ 705 items checked",
+              "⏺ Edit(src/themes.py)",
+              "⎿ +6 −6",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> themes, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 9.8s",
+              "⏺ Read(src/themes.py)",
+              "⎿ 145 lines",
+              "⏺ Read(build/themes.log)",
+              "⎿ 255 lines",
+              "⏺ Bash(python src/report.py themes)",
+              "⎿ 255 rows written",
+              "⏺ Grep(\"themes\", src/)",
+              "⎿ 8 files"
+            ],
+            "steps": [
+              {
+                "working": "Reading the templates",
+                "elapsed": 200
+              },
+              {
+                "wait": 16
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.themes --check)",
+                  "⎿ 1004 items checked",
+                  "⏺ Edit(src/themes.py)",
+                  "⎿ +12 −3"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 24
+              },
+              {
+                "finish": "Themes: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Broken link checker",
+          "provider": "claudeCode",
+          "session": "431b589a-06a3-56b4-a27b-a356db0ab675",
+          "running": true,
+          "unread": true,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": false,
+          "sentence": "The checker found 9 broken links, all to pages renamed in March. They are listed in links.txt.",
+          "firstInstruction": "broken link checker, report when done",
+          "branch": "main",
+          "ageSeconds": 110,
+          "standin": {
+            "title": "Broken link checker",
+            "folder": "~/projects/paper-kite",
+            "context": 26,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Grep(\"broken\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.broken --check)",
+              "⎿ 902 items checked",
+              "⏺ Edit(src/broken.py)",
+              "⎿ +10 −1",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Read(build/broken.log)",
+              "⎿ 267 lines",
+              "⏺ Bash(python src/report.py broken)",
+              "⎿ 267 rows written",
+              "⏺ Grep(\"broken\", src/)",
+              "⎿ 5 files",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> broken link checker, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 7.8s",
+              "⏺ Read(src/broken.py)",
+              "⎿ 236 lines",
+              "⏺ Read(build/broken.log)",
+              "⎿ 276 lines",
+              "",
+              "⏺ The checker found 9 broken links, all to pages renamed in March. They are listed in links.txt."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Feeds",
+          "provider": "claudeCode",
+          "session": "2ab1bd86-9b02-5b90-a252-3ad8ab813a85",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "feeds, report when done",
+          "step": "Checking 214 pages",
+          "branch": "main",
+          "ageSeconds": 380,
+          "standin": {
+            "title": "Feeds",
+            "folder": "~/projects/paper-kite",
+            "context": 73,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Grep(\"feeds\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.feeds --check)",
+              "⎿ 1252 items checked",
+              "⏺ Edit(src/feeds.py)",
+              "⎿ +17 −8",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 8.2s",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Read(build/feeds.log)",
+              "⎿ 288 lines",
+              "⏺ Bash(python src/report.py feeds)",
+              "⎿ 288 rows written",
+              "⏺ Grep(\"feeds\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.feeds --check)",
+              "⎿ 1405 items checked",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> feeds, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 5.8s",
+              "⏺ Read(src/feeds.py)",
+              "⎿ 327 lines",
+              "⏺ Read(build/feeds.log)",
+              "⎿ 297 lines",
+              "⏺ Bash(python src/report.py feeds)",
+              "⎿ 297 rows written"
+            ],
+            "steps": [
+              {
+                "working": "Checking 214 pages",
+                "elapsed": 380
+              },
+              {
+                "wait": 46
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.feeds --check)",
+                  "⎿ 1704 items checked",
+                  "⏺ Edit(src/feeds.py)",
+                  "⎿ +26 −8"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 68
+              },
+              {
+                "finish": "Feeds: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Markdown tables",
+          "provider": "claudeCode",
+          "session": "d0a2e0a4-2c24-514d-bad3-742ceaab380d",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "markdown tables, report when done",
+          "step": "Writing the tests",
+          "branch": "main",
+          "ageSeconds": 470,
+          "standin": {
+            "title": "Markdown tables",
+            "folder": "~/projects/paper-kite",
+            "context": 60,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Grep(\"markdown\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.markdown --check)",
+              "⎿ 1602 items checked",
+              "⏺ Edit(src/markdown.py)",
+              "⎿ +24 −6",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 6.2s",
+              "⏺ Read(src/markdown.py)",
+              "⎿ 340 lines",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Read(build/markdown.log)",
+              "⎿ 309 lines",
+              "⏺ Bash(python src/report.py markdown)",
+              "⎿ 309 rows written",
+              "⏺ Grep(\"markdown\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.markdown --check)",
+              "⎿ 1755 items checked",
+              "⏺ Edit(src/markdown.py)",
+              "⎿ +27 −9",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> markdown tables, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 3.8s",
+              "⏺ Read(src/markdown.py)",
+              "⎿ 418 lines",
+              "⏺ Read(build/markdown.log)",
+              "⎿ 318 lines",
+              "⏺ Bash(python src/report.py markdown)",
+              "⎿ 318 rows written",
+              "⏺ Grep(\"markdown\", src/)",
+              "⎿ 8 files"
+            ],
+            "steps": [
+              {
+                "working": "Writing the tests",
+                "elapsed": 470
+              },
+              {
+                "wait": 60
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.markdown --check)",
+                  "⎿ 2054 items checked",
+                  "⏺ Edit(src/markdown.py)",
+                  "⎿ +33 −6"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 91
+              },
+              {
+                "finish": "Markdown tables: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Image resizing",
+          "provider": "claudeCode",
+          "session": "0b8160ff-f589-51bf-a2ad-63adfd7b5b99",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "image resizing, report when done",
+          "step": "Waiting on the build",
+          "branch": "main",
+          "ageSeconds": 560,
+          "standin": {
+            "title": "Image resizing",
+            "folder": "~/projects/paper-kite",
+            "context": 47,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Grep(\"image\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.image --check)",
+              "⎿ 1952 items checked",
+              "⏺ Edit(src/image.py)",
+              "⎿ +31 −4",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Read(build/image.log)",
+              "⎿ 180 lines",
+              "⏺ Bash(python src/report.py image)",
+              "⎿ 180 rows written",
+              "⏺ Grep(\"image\", src/)",
+              "⎿ 5 files",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> image resizing, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 1.8s",
+              "⏺ Read(src/image.py)",
+              "⎿ 509 lines",
+              "⏺ Read(build/image.log)",
+              "⎿ 189 lines"
+            ],
+            "steps": [
+              {
+                "working": "Waiting on the build",
+                "elapsed": 560
+              },
+              {
+                "wait": 75
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.image --check)",
+                  "⎿ 2404 items checked",
+                  "⏺ Edit(src/image.py)",
+                  "⎿ +40 −4"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 113
+              },
+              {
+                "finish": "Image resizing: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Sitemap generator",
+          "provider": "claudeCode",
+          "session": "ec8c40d0-90d8-560d-96b4-410ea175274e",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "sitemap generator, report when done",
+          "step": "Reading the templates",
+          "branch": "main",
+          "ageSeconds": 650,
+          "standin": {
+            "title": "Sitemap generator",
+            "folder": "~/projects/paper-kite",
+            "context": 34,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Grep(\"sitemap\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.sitemap --check)",
+              "⎿ 2302 items checked",
+              "⏺ Edit(src/sitemap.py)",
+              "⎿ +38 −2",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 2.2s",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Read(build/sitemap.log)",
+              "⎿ 201 lines",
+              "⏺ Bash(python src/report.py sitemap)",
+              "⎿ 201 rows written",
+              "⏺ Grep(\"sitemap\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.sitemap --check)",
+              "⎿ 2455 items checked",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> sitemap generator, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 8.8s",
+              "⏺ Read(src/sitemap.py)",
+              "⎿ 200 lines",
+              "⏺ Read(build/sitemap.log)",
+              "⎿ 210 lines",
+              "⏺ Bash(python src/report.py sitemap)",
+              "⎿ 210 rows written"
+            ],
+            "steps": [
+              {
+                "working": "Reading the templates",
+                "elapsed": 650
+              },
+              {
+                "wait": 90
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.sitemap --check)",
+                  "⎿ 754 items checked",
+                  "⏺ Edit(src/sitemap.py)",
+                  "⎿ +7 −2"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 135
+              },
+              {
+                "finish": "Sitemap generator: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Syntax colours",
+          "provider": "claudeCode",
+          "session": "556419d6-19bc-5fac-8a40-c19956125f4f",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "syntax colours, report when done",
+          "step": "Building the site",
+          "branch": "main",
+          "ageSeconds": 740,
+          "standin": {
+            "title": "Syntax colours",
+            "folder": "~/projects/paper-kite",
+            "context": 21,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Grep(\"syntax\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.syntax --check)",
+              "⎿ 652 items checked",
+              "⏺ Edit(src/syntax.py)",
+              "⎿ +5 −9",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 9.2s",
+              "⏺ Read(src/syntax.py)",
+              "⎿ 213 lines",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Read(build/syntax.log)",
+              "⎿ 222 lines",
+              "⏺ Bash(python src/report.py syntax)",
+              "⎿ 222 rows written",
+              "⏺ Grep(\"syntax\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.syntax --check)",
+              "⎿ 805 items checked",
+              "⏺ Edit(src/syntax.py)",
+              "⎿ +8 −3",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> syntax colours, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 6.8s",
+              "⏺ Read(src/syntax.py)",
+              "⎿ 291 lines",
+              "⏺ Read(build/syntax.log)",
+              "⎿ 231 lines",
+              "⏺ Bash(python src/report.py syntax)",
+              "⎿ 231 rows written",
+              "⏺ Grep(\"syntax\", src/)",
+              "⎿ 8 files"
+            ],
+            "steps": [
+              {
+                "working": "Building the site",
+                "elapsed": 740
+              },
+              {
+                "wait": 105
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.syntax --check)",
+                  "⎿ 1104 items checked",
+                  "⏺ Edit(src/syntax.py)",
+                  "⎿ +14 −9"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 157
+              },
+              {
+                "finish": "Syntax colours: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Footnote links",
+          "provider": "claudeCode",
+          "session": "1c0c3350-f584-5cc9-b43a-d30c15b28a31",
+          "running": true,
+          "unread": true,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": false,
+          "sentence": "Footnotes now link both ways. Two pages had the same label twice: about and colophon.",
+          "firstInstruction": "footnote links, report when done",
+          "branch": "main",
+          "ageSeconds": 410,
+          "standin": {
+            "title": "Footnote links",
+            "folder": "~/projects/paper-kite",
+            "context": 68,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Grep(\"footnote\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.footnote --check)",
+              "⎿ 1002 items checked",
+              "⏺ Edit(src/footnote.py)",
+              "⎿ +12 −7",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Read(build/footnote.log)",
+              "⎿ 243 lines",
+              "⏺ Bash(python src/report.py footnote)",
+              "⎿ 243 rows written",
+              "⏺ Grep(\"footnote\", src/)",
+              "⎿ 5 files",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> footnote links, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 4.8s",
+              "⏺ Read(src/footnote.py)",
+              "⎿ 382 lines",
+              "⏺ Read(build/footnote.log)",
+              "⎿ 252 lines",
+              "",
+              "⏺ Footnotes now link both ways. Two pages had the same label twice: about and colophon."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Incremental build cache",
+          "provider": "claudeCode",
+          "session": "5b273366-129e-5169-aae1-6602eb4184ca",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "incremental build cache, report when done",
+          "step": "Writing the tests",
+          "branch": "main",
+          "ageSeconds": 920,
+          "standin": {
+            "title": "Incremental build cache",
+            "folder": "~/projects/paper-kite",
+            "context": 55,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Grep(\"incremental\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.incremental --check)",
+              "⎿ 1352 items checked",
+              "⏺ Edit(src/incremental.py)",
+              "⎿ +19 −5",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 5.2s",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Read(build/incremental.log)",
+              "⎿ 264 lines",
+              "⏺ Bash(python src/report.py incremental)",
+              "⎿ 264 rows written",
+              "⏺ Grep(\"incremental\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.incremental --check)",
+              "⎿ 1505 items checked",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> incremental build cache, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 2.8s",
+              "⏺ Read(src/incremental.py)",
+              "⎿ 473 lines",
+              "⏺ Read(build/incremental.log)",
+              "⎿ 273 lines",
+              "⏺ Bash(python src/report.py incremental)",
+              "⎿ 273 rows written"
+            ],
+            "steps": [
+              {
+                "working": "Writing the tests",
+                "elapsed": 920
+              },
+              {
+                "wait": 134
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.incremental --check)",
+                  "⎿ 1804 items checked",
+                  "⏺ Edit(src/incremental.py)",
+                  "⎿ +28 −5"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 202
+              },
+              {
+                "finish": "Incremental build cache: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Search indexer",
+          "provider": "claudeCode",
+          "session": "a1a122cf-731b-54c8-bb2c-f78c0c3fdff1",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "search indexer, report when done",
+          "step": "Waiting on the build",
+          "branch": "main",
+          "ageSeconds": 1010,
+          "standin": {
+            "title": "Search indexer",
+            "folder": "~/projects/paper-kite",
+            "context": 42,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Grep(\"search\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.search --check)",
+              "⎿ 1702 items checked",
+              "⏺ Edit(src/search.py)",
+              "⎿ +26 −3",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 3.2s",
+              "⏺ Read(src/search.py)",
+              "⎿ 486 lines",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Read(build/search.log)",
+              "⎿ 285 lines",
+              "⏺ Bash(python src/report.py search)",
+              "⎿ 285 rows written",
+              "⏺ Grep(\"search\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.search --check)",
+              "⎿ 1855 items checked",
+              "⏺ Edit(src/search.py)",
+              "⎿ +29 −6",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> search indexer, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 9.8s",
+              "⏺ Read(src/search.py)",
+              "⎿ 164 lines",
+              "⏺ Read(build/search.log)",
+              "⎿ 294 lines",
+              "⏺ Bash(python src/report.py search)",
+              "⎿ 294 rows written",
+              "⏺ Grep(\"search\", src/)",
+              "⎿ 8 files"
+            ],
+            "steps": [
+              {
+                "working": "Waiting on the build",
+                "elapsed": 1010
+              },
+              {
+                "wait": 149
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.search --check)",
+                  "⎿ 2154 items checked",
+                  "⏺ Edit(src/search.py)",
+                  "⎿ +35 −3"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 224
+              },
+              {
+                "finish": "Search indexer: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Front matter parser",
+          "provider": "claudeCode",
+          "session": "86751e30-27ef-5076-a226-c5a1eb1da06f",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "front matter parser, report when done",
+          "step": "Reading the templates",
+          "branch": "main",
+          "ageSeconds": 1100,
+          "standin": {
+            "title": "Front matter parser",
+            "folder": "~/projects/paper-kite",
+            "context": 29,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Grep(\"front\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.front --check)",
+              "⎿ 2052 items checked",
+              "⏺ Edit(src/front.py)",
+              "⎿ +33 −1",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Read(build/front.log)",
+              "⎿ 306 lines",
+              "⏺ Bash(python src/report.py front)",
+              "⎿ 306 rows written",
+              "⏺ Grep(\"front\", src/)",
+              "⎿ 5 files",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> front matter parser, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 7.8s",
+              "⏺ Read(src/front.py)",
+              "⎿ 255 lines",
+              "⏺ Read(build/front.log)",
+              "⎿ 315 lines"
+            ],
+            "steps": [
+              {
+                "working": "Reading the templates",
+                "elapsed": 1100
+              },
+              {
+                "wait": 164
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.front --check)",
+                  "⎿ 2504 items checked",
+                  "⏺ Edit(src/front.py)",
+                  "⎿ +42 −1"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 246
+              },
+              {
+                "finish": "Front matter parser: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Shortcode library",
+          "provider": "claudeCode",
+          "session": "1e04c3c3-4473-52b1-a9af-6a03e39b9aba",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "shortcode library, report when done",
+          "step": "Building the site",
+          "branch": "main",
+          "ageSeconds": 1190,
+          "standin": {
+            "title": "Shortcode library",
+            "folder": "~/projects/paper-kite",
+            "context": 76,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Grep(\"shortcode\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.shortcode --check)",
+              "⎿ 2402 items checked",
+              "⏺ Edit(src/shortcode.py)",
+              "⎿ +40 −8",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 8.2s",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Read(build/shortcode.log)",
+              "⎿ 327 lines",
+              "⏺ Bash(python src/report.py shortcode)",
+              "⎿ 327 rows written",
+              "⏺ Grep(\"shortcode\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.shortcode --check)",
+              "⎿ 2555 items checked",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> shortcode library, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 5.8s",
+              "⏺ Read(src/shortcode.py)",
+              "⎿ 346 lines",
+              "⏺ Read(build/shortcode.log)",
+              "⎿ 186 lines",
+              "⏺ Bash(python src/report.py shortcode)",
+              "⎿ 186 rows written"
+            ],
+            "steps": [
+              {
+                "working": "Building the site",
+                "elapsed": 1190
+              },
+              {
+                "wait": 179
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.shortcode --check)",
+                  "⎿ 854 items checked",
+                  "⏺ Edit(src/shortcode.py)",
+                  "⎿ +9 −8"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 268
+              },
+              {
+                "finish": "Shortcode library: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Dark mode styles",
+          "provider": "claudeCode",
+          "session": "2014b26b-ada3-5897-9fae-a9ea6d7127cb",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "dark mode styles, report when done",
+          "step": "Checking 214 pages",
+          "branch": "main",
+          "ageSeconds": 1280,
+          "standin": {
+            "title": "Dark mode styles",
+            "folder": "~/projects/paper-kite",
+            "context": 63,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Grep(\"dark\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.dark --check)",
+              "⎿ 752 items checked",
+              "⏺ Edit(src/dark.py)",
+              "⎿ +7 −6",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 6.2s",
+              "⏺ Read(src/dark.py)",
+              "⎿ 359 lines",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Read(build/dark.log)",
+              "⎿ 198 lines",
+              "⏺ Bash(python src/report.py dark)",
+              "⎿ 198 rows written",
+              "⏺ Grep(\"dark\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.dark --check)",
+              "⎿ 905 items checked",
+              "⏺ Edit(src/dark.py)",
+              "⎿ +10 −9",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> dark mode styles, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 3.8s",
+              "⏺ Read(src/dark.py)",
+              "⎿ 437 lines",
+              "⏺ Read(build/dark.log)",
+              "⎿ 207 lines",
+              "⏺ Bash(python src/report.py dark)",
+              "⎿ 207 rows written",
+              "⏺ Grep(\"dark\", src/)",
+              "⎿ 8 files"
+            ],
+            "steps": [
+              {
+                "working": "Checking 214 pages",
+                "elapsed": 1280
+              },
+              {
+                "wait": 194
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.dark --check)",
+                  "⎿ 1204 items checked",
+                  "⏺ Edit(src/dark.py)",
+                  "⎿ +16 −6"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 290
+              },
+              {
+                "finish": "Dark mode styles: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Permalink rules",
+          "provider": "claudeCode",
+          "session": "0a5d729f-992f-5539-aabe-358b4698759e",
+          "running": true,
+          "unread": true,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "finished",
+          "settled": false,
+          "sentence": "Old addresses now redirect to the new permalinks. All 412 redirects are in redirects.txt.",
+          "firstInstruction": "permalink rules, report when done",
+          "branch": "main",
+          "ageSeconds": 710,
+          "standin": {
+            "title": "Permalink rules",
+            "folder": "~/projects/paper-kite",
+            "context": 50,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Grep(\"permalink\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.permalink --check)",
+              "⎿ 1102 items checked",
+              "⏺ Edit(src/permalink.py)",
+              "⎿ +14 −4",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Read(build/permalink.log)",
+              "⎿ 219 lines",
+              "⏺ Bash(python src/report.py permalink)",
+              "⎿ 219 rows written",
+              "⏺ Grep(\"permalink\", src/)",
+              "⎿ 5 files",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> permalink rules, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 1.8s",
+              "⏺ Read(src/permalink.py)",
+              "⎿ 128 lines",
+              "⏺ Read(build/permalink.log)",
+              "⎿ 228 lines",
+              "",
+              "⏺ Old addresses now redirect to the new permalinks. All 412 redirects are in redirects.txt."
+            ],
+            "steps": []
+          }
+        },
+        {
+          "name": "Asset hashing",
+          "provider": "claudeCode",
+          "session": "4d551a97-1795-50b3-92e3-63f2381c8b4f",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "asset hashing, report when done",
+          "step": "Waiting on the build",
+          "branch": "main",
+          "ageSeconds": 1460,
+          "standin": {
+            "title": "Asset hashing",
+            "folder": "~/projects/paper-kite",
+            "context": 37,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> run the tests and tell me what breaks",
+              "",
+              "⏺ Grep(\"asset\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.asset --check)",
+              "⎿ 1452 items checked",
+              "⏺ Edit(src/asset.py)",
+              "⎿ +21 −2",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 2.2s",
+              "",
+              "⏺ Two tests break, both when the clock moves for summer time.",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Read(build/asset.log)",
+              "⎿ 240 lines",
+              "⏺ Bash(python src/report.py asset)",
+              "⎿ 240 rows written",
+              "⏺ Grep(\"asset\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.asset --check)",
+              "⎿ 1605 items checked",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> asset hashing, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 8.8s",
+              "⏺ Read(src/asset.py)",
+              "⎿ 219 lines",
+              "⏺ Read(build/asset.log)",
+              "⎿ 249 lines",
+              "⏺ Bash(python src/report.py asset)",
+              "⎿ 249 rows written"
+            ],
+            "steps": [
+              {
+                "working": "Waiting on the build",
+                "elapsed": 1460
+              },
+              {
+                "wait": 223
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.asset --check)",
+                  "⎿ 1904 items checked",
+                  "⏺ Edit(src/asset.py)",
+                  "⎿ +30 −2"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 335
+              },
+              {
+                "finish": "Asset hashing: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Build timing",
+          "provider": "claudeCode",
+          "session": "e696dbc2-3026-5467-a2a2-ba858314349a",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "build timing, report when done",
+          "step": "Reading the templates",
+          "branch": "main",
+          "ageSeconds": 1550,
+          "standin": {
+            "title": "Build timing",
+            "folder": "~/projects/paper-kite",
+            "context": 24,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> fix just those two, nothing else",
+              "",
+              "⏺ Grep(\"build\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.build --check)",
+              "⎿ 1802 items checked",
+              "⏺ Edit(src/build.py)",
+              "⎿ +28 −9",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 21 passed in 9.2s",
+              "⏺ Read(src/build.py)",
+              "⎿ 232 lines",
+              "",
+              "⏺ Fixed both. Every other test still passes.",
+              "",
+              "> note down what you changed",
+              "",
+              "⏺ Read(build/build.log)",
+              "⎿ 261 lines",
+              "⏺ Bash(python src/report.py build)",
+              "⎿ 261 rows written",
+              "⏺ Grep(\"build\", src/)",
+              "⎿ 5 files",
+              "⏺ Bash(python -m src.build --check)",
+              "⎿ 1955 items checked",
+              "⏺ Edit(src/build.py)",
+              "⎿ +31 −3",
+              "",
+              "⏺ Added two lines to the changelog, each with the reason for it.",
+              "",
+              "> build timing, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 6.8s",
+              "⏺ Read(src/build.py)",
+              "⎿ 310 lines",
+              "⏺ Read(build/build.log)",
+              "⎿ 270 lines",
+              "⏺ Bash(python src/report.py build)",
+              "⎿ 270 rows written",
+              "⏺ Grep(\"build\", src/)",
+              "⎿ 8 files"
+            ],
+            "steps": [
+              {
+                "working": "Reading the templates",
+                "elapsed": 1550
+              },
+              {
+                "wait": 238
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.build --check)",
+                  "⎿ 2254 items checked",
+                  "⏺ Edit(src/build.py)",
+                  "⎿ +37 −9"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 357
+              },
+              {
+                "finish": "Build timing: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        },
+        {
+          "name": "Release notes",
+          "provider": "claudeCode",
+          "session": "0a0593f8-df64-5edb-b1c9-852816d02fdb",
+          "running": true,
+          "unread": false,
+          "launchProfile": {
+            "startMode": "unrestricted",
+            "modelID": null,
+            "reasoningEffort": null
+          },
+          "state": "working",
+          "settled": false,
+          "sentence": "",
+          "firstInstruction": "release notes, report when done",
+          "step": "Building the site",
+          "branch": "main",
+          "ageSeconds": 1640,
+          "standin": {
+            "title": "Release notes",
+            "folder": "~/projects/paper-kite",
+            "context": 71,
+            "plus": 0,
+            "minus": 0,
+            "screen": [
+              "~/projects/paper-kite   main",
+              "",
+              "> what takes the most time on start",
+              "",
+              "⏺ Grep(\"release\", src/)",
+              "⎿ 2 files",
+              "⏺ Bash(python -m src.release --check)",
+              "⎿ 2152 items checked",
+              "⏺ Edit(src/release.py)",
+              "⎿ +35 −7",
+              "",
+              "⏺ Most of the start goes to parsing the same file twice.",
+              "",
+              "> what does this file do, in one sentence",
+              "",
+              "⏺ Read(build/release.log)",
+              "⎿ 282 lines",
+              "⏺ Bash(python src/report.py release)",
+              "⎿ 282 rows written",
+              "⏺ Grep(\"release\", src/)",
+              "⎿ 5 files",
+              "",
+              "⏺ It reads the settings, builds the list and draws it. Nothing is saved to disk.",
+              "",
+              "> release notes, report when done",
+              "",
+              "⏺ Bash(pytest tests -q)",
+              "⎿ 81 passed in 4.8s",
+              "⏺ Read(src/release.py)",
+              "⎿ 401 lines",
+              "⏺ Read(build/release.log)",
+              "⎿ 291 lines"
+            ],
+            "steps": [
+              {
+                "working": "Building the site",
+                "elapsed": 1640
+              },
+              {
+                "wait": 253
+              },
+              {
+                "print": [
+                  "⏺ Bash(python -m src.release --check)",
+                  "⎿ 604 items checked",
+                  "⏺ Edit(src/release.py)",
+                  "⎿ +4 −7"
+                ],
+                "rate": 1
+              },
+              {
+                "wait": 379
+              },
+              {
+                "finish": "Release notes: finished the change and checked every page of the built site.",
+                "plus": 0,
+                "minus": 0
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

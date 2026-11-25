@@ -53,4 +53,24 @@ struct AgentEventJournalTests {
             lockURL: lock,
             acknowledgedOffset: suffix.count + 1))
     }
+
+    /// A record carrying 200 KB of text decodes whole; while only part of it
+    /// is written, nothing of it is read, and the read resumes at its start.
+    @Test func longTextRecordDecodesWholeAndAPartialWriteWaits() throws {
+        let text = String(repeating: "line with \"quotes\" 🧪\n", count: 9_000)
+        let line = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 1, "provider": "claudeCode", "launchGeneration": UUID().uuidString,
+            "hookEventName": "Stop", "text": text,
+        ])
+        #expect(line.count > 200_000)
+        let before = Data("{}\n".utf8)
+
+        let partial = AgentEventJournal.read(before + line.prefix(150_000), from: 0)
+        #expect(partial.records == [Data("{}".utf8)])
+        #expect(partial.endOffset == before.count)
+
+        let whole = AgentEventJournal.read(before + line + Data("\n".utf8), from: partial.endOffset)
+        let record = try JSONDecoder().decode(AgentRawProviderEvent.self, from: #require(whole.records.first))
+        #expect(record.text == text)
+    }
 }

@@ -15,8 +15,12 @@ import UserNotifications
 /// A clock that moves only when a test advances it.
 @MainActor
 final class ManualScheduler: AgentScheduler {
-    private(set) var now = Date(timeIntervalSinceReferenceDate: 800_000_000)
+    private(set) var now: Date
     private var scheduled: [ScheduledCall] = []
+
+    init(now: Date) {
+        self.now = now
+    }
 
     func timer(
         interval: TimeInterval,
@@ -178,6 +182,8 @@ final class FakeProviders: @unchecked Sendable {
 @MainActor
 final class FakeSurface {
     let childExited = PassthroughSubject<Void, Never>()
+    /// The titles its program sets, as Ghostty publishes the surface's.
+    let title = PassthroughSubject<String, Never>()
     let configuration: Ghostty.SurfaceConfiguration
     /// The launch the surface was created for.
     let generation: UUID?
@@ -195,7 +201,6 @@ final class FakeSurface {
 @MainActor
 final class FakeSurfaceHost: AgentSurfaceHost {
     enum Call: Equatable {
-        case select(UUID)
         case show(UUID)
         case present(UUID)
         case confirmClose(UUID)
@@ -204,9 +209,6 @@ final class FakeSurfaceHost: AgentSurfaceHost {
 
     /// Makes `presentPreparedSurface` create nothing and return false.
     var refusesPresent = false
-    /// Agents whose terminal runs a process that closing it would kill,
-    /// as Ghostty's `needsConfirmQuit` reports it.
-    var processRunning: Set<UUID> = []
     /// Where the surfaces' closes and program status are reported.
     weak var bridge: AgentBridge?
     private(set) var calls: [Call] = []
@@ -215,12 +217,7 @@ final class FakeSurfaceHost: AgentSurfaceHost {
 
     func hasSurface(id: UUID) -> Bool { surfaces[id] != nil }
 
-    func selectAgent(_ agent: AgentInstance, projectName: String) {
-        calls.append(.select(agent.id))
-    }
-
     func showOrSwitch(
-        projectName: String,
         agent: AgentInstance,
         focusTerminal: Bool,
         select: Bool,
@@ -231,7 +228,6 @@ final class FakeSurfaceHost: AgentSurfaceHost {
     }
 
     func presentPreparedSurface(
-        projectName: String,
         agent: AgentInstance,
         createConfig: () -> Ghostty.SurfaceConfiguration?
     ) -> Bool {
@@ -246,15 +242,25 @@ final class FakeSurfaceHost: AgentSurfaceHost {
         pendingClose = close
     }
 
-    func closeNeedsConfirmation(id: UUID) -> Bool {
-        surfaces[id] != nil && processRunning.contains(id)
-    }
-
     /// Answers the open close question: Close when `confirmed`, else Cancel.
     func answerClose(confirmed: Bool) {
         let close = pendingClose
         pendingClose = nil
         if confirmed { close?() }
+    }
+
+    /// What each terminal shows, as `screen` reads it.
+    var screens: [UUID: String] = [:]
+    /// What was put into each terminal, in order.
+    private(set) var inputs: [UUID: [AgentTerminalInput]] = [:]
+    /// Called after each input, to show what the CLI does with it.
+    var onInput: ((UUID, AgentTerminalInput) -> Void)?
+
+    func screen(id: UUID) -> String? { surfaces[id] == nil ? nil : screens[id] ?? "" }
+
+    func input(_ input: AgentTerminalInput, to id: UUID) {
+        inputs[id, default: []].append(input)
+        onInput?(id, input)
     }
 
     func removeSurface(id: UUID) {
@@ -272,6 +278,7 @@ final class FakeSurfaceHost: AgentSurfaceHost {
             surface.observers = observeAgentSurface(
                 surface,
                 childExited: surface.childExited,
+                title: surface.title,
                 agentID: agent.id,
                 generation: agent.launchGeneration,
                 bridge: bridge)
@@ -286,17 +293,16 @@ func shellCommand(_ arguments: [String]) -> String {
     arguments.map(AgentHookRuntime.shellQuote).joined(separator: " ")
 }
 
-/// A bridge on a temporary root with one project holding one task, wired as
+/// A bridge on a temporary root with one project, wired as
 /// `ClawddyController` wires it. Add agents, then `start()`; call `remove()`
 /// at the end.
 @MainActor
 final class AgentBridgeHarness {
     static let projectName = "Project"
-    static let taskName = "Task"
 
     let folder: URL
     let root: AgentDataRoot
-    let scheduler = ManualScheduler()
+    let scheduler: ManualScheduler
     let io = InlineIO()
     let notifier = RecordingNotifier()
     private(set) var host = FakeSurfaceHost()
@@ -304,17 +310,20 @@ final class AgentBridgeHarness {
     let providers: FakeProviders
     private(set) var config: AgentConfig
     private(set) var bridge: AgentBridge
-    /// The workspace's selection and its one record of viewing, as
+    /// What the window shows and its one record of viewing, as
     /// `ClawddyController` keeps them.
-    private(set) var workspace = AgentWorkspaceModel(defaults: nil)
+    private(set) var workspace: AgentWorkspaceModel
     /// Whether the workspace window is key. It is visible and not
-    /// minimized throughout, and its pane presents the selected agent.
+    /// minimized throughout, and its screen presents the shown agent.
     private(set) var windowIsKey = true
-    private(set) var aggregateChanges: [AggregateState] = []
+    private(set) var waitingCounts: [Int] = []
     private(set) var surfaceDeaths: [UUID] = []
     private(set) var presentationChanges: [UUID] = []
 
-    init() throws {
+    /// `now` is where the harness's clock starts.
+    init(now: Date = Date(timeIntervalSinceReferenceDate: 800_000_000)) throws {
+        scheduler = ManualScheduler(now: now)
+        workspace = AgentWorkspaceModel(defaults: nil)
         folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("clawddy-bridge-tests-\(UUID().uuidString)", isDirectory: true)
         root = AgentDataRoot(url: folder.appendingPathComponent("root", isDirectory: true))
@@ -325,8 +334,7 @@ final class AgentBridgeHarness {
         }
         providers = FakeProviders(real: AgentProviderTable(
             root: root,
-            codexHooksFile: folder.appendingPathComponent("home/.codex/hooks.json"),
-            isProduction: false))
+            codexConfigFile: folder.appendingPathComponent("home/.codex/config.toml")))
         config = AgentConfig(root: root)
         bridge = AgentBridge(
             root: root,
@@ -337,7 +345,6 @@ final class AgentBridgeHarness {
             diagnose: diagnostics.sink)
         wire()
         try #require(config.addProject(name: Self.projectName) != nil)
-        try #require(config.addTask(project: Self.projectName, name: Self.taskName) != nil)
     }
 
     /// An empty folder: no provider executable is found on this PATH.
@@ -350,7 +357,7 @@ final class AgentBridgeHarness {
     /// writes only under the harness root.
     func useRealClaudeLaunch() throws {
         let executable = binFolder.appendingPathComponent("claude")
-        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: executable)
+        try Data("#!/bin/sh\n[ \"$1\" = agents ] && echo '[]'\nexit 0\n".utf8).write(to: executable)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let claude = ClaudeCodeProvider(root: root)
         providers.prepareLaunch = { claude.prepareLaunch($0) }
@@ -360,7 +367,6 @@ final class AgentBridgeHarness {
     func addAgent(_ name: String, provider: AgentProviderID = .claudeCode) throws -> UUID {
         try #require(config.addAgent(
             project: Self.projectName,
-            task: Self.taskName,
             name: name,
             provider: provider)).id
     }
@@ -376,11 +382,12 @@ final class AgentBridgeHarness {
     /// has no terminals. The callback records start empty again.
     func restart(_ betweenRuns: () throws -> Void = {}) throws {
         bridge.shutdown()
+        config.waitForWrites()
         try betweenRuns()
         config = AgentConfig(root: root)
         host = FakeSurfaceHost()
         workspace = AgentWorkspaceModel(defaults: nil)
-        aggregateChanges = []
+        waitingCounts = []
         surfaceDeaths = []
         presentationChanges = []
         bridge = AgentBridge(
@@ -396,6 +403,7 @@ final class AgentBridgeHarness {
 
     func remove() {
         bridge.shutdown()
+        config.waitForWrites()
         do {
             try FileManager.default.removeItem(at: folder)
         } catch {
@@ -404,31 +412,42 @@ final class AgentBridgeHarness {
     }
 
     /// Wires the bridge as `ClawddyController` does: every callback is set
-    /// before `start`, which publishes the aggregate state.
+    /// before `start`, which publishes the waiting count.
     private func wire() {
         host.bridge = bridge
         bridge.environmentPath = binFolder.path
-        bridge.onAggregateStateChanged = { [weak self] in self?.aggregateChanges.append($0) }
+        bridge.onWaitingCountChanged = { [weak self] in self?.waitingCounts.append($0) }
         bridge.onSurfaceDeath = { [weak self] id in
             self?.surfaceDeaths.append(id)
             self?.host.removeSurface(id: id)
         }
         bridge.onSurfacePresentationChanged = { [weak self] in self?.presentationChanges.append($0) }
         bridge.isViewed = { [weak self] id in self?.viewedAgent() == id }
+        bridge.project = { [weak self] id in self?.config.project(forAgent: id) }
+        bridge.onConversationTitle = { [weak self] id, title in
+            guard let self else { return }
+            AgentWorkspaceTransactions.adoptTitle(title, of: id, config: self.config, bridge: self.bridge)
+        }
         config.onReloaded = { [weak self] in
             guard let self else { return }
             self.bridge.reconcileWithConfig(self.config)
-            self.workspace.reconcile(with: self.config)
+            self.reconcileWorkspace()
         }
+    }
+
+    /// The workspace forgets what the configuration no longer has, as the
+    /// controller's does.
+    func reconcileWorkspace() {
+        workspace.reconcile(with: config) { [bridge] id in bridge.agents[id]?.record.settledAt == nil }
     }
 
     /// The agent whose completions count as seen, read as the controller
     /// reads it.
     private func viewedAgent() -> UUID? {
-        let presented = workspace.selectedAgentID
+        let presented = workspace.shownAgentID
         return workspace.viewedAgent(
             presentedAgentID: presented,
-            presentedSurfaceIsLive: presented.map(host.hasSurface(id:)) ?? false,
+            personCanSee: true,
             windowIsVisible: true,
             windowIsKey: windowIsKey,
             windowIsMiniaturized: false)
@@ -455,12 +474,12 @@ final class AgentBridgeHarness {
         bridge.activateAgent(id: id, host: host ?? self.host, project: project)
     }
 
-    /// The user clicks the agent in the list, as `ClawddyController`
-    /// handles it: the agent is selected, and viewed once its terminal is
-    /// open.
+    /// The person enters the agent, as `ClawddyController` handles it: it
+    /// is shown inside, and viewed once its terminal is open.
     func view(_ id: UUID) {
-        workspace.apply(.userSelectedAgent(id))
-        if host.hasSurface(id: id) { workspace.setViewingSelectedAgent(true) }
+        guard let project = config.project(forAgent: id) else { return }
+        workspace.show(.inside(id), in: project.id)
+        if host.hasSurface(id: id) { workspace.setViewingShownAgent(true) }
         updateViewing()
     }
 
@@ -471,15 +490,17 @@ final class AgentBridgeHarness {
         if key { updateViewing() }
     }
 
-    /// Activates the agent and brings it up as its provider does: Claude
-    /// reports `idle` in its terminal once ready, and its `SessionStart`
-    /// hook binds the session; Codex's `SessionStart` hook does both.
+    /// Activates the agent and brings it up as its provider does: it
+    /// reports `idle` in its terminal once ready, and Claude's
+    /// `SessionStart` hook binds the session.
     func launch(_ id: UUID, session: String = "session-1") throws {
         try activate(id)
         if try agent(id).provider == .claudeCode {
             try osc(id, "state=idle:app=claude-code")
+            try hook(id, "SessionStart", session: session)
+        } else {
+            try osc(id, "state=idle:app=codex")
         }
-        try hook(id, "SessionStart", session: session)
     }
 
     /// One event record exactly as the hook script writes it: every field a
@@ -491,9 +512,15 @@ final class AgentBridgeHarness {
         session: String = "session-1",
         turn: String = "",
         trigger: String = "",
+        text: String? = nil,
         eventID: String = UUID().uuidString
     ) -> String {
-        #"{"schemaVersion":1,"eventID":"\#(eventID)","provider":"\#(provider.rawValue)","launchGeneration":"\#(generation.uuidString)","hookEventName":"\#(event)","sessionID":"\#(session)","turnID":"\#(turn)","model":"","permissionMode":"","trigger":"\#(trigger)"}"#
+        let escaped = text.map {
+            $0.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+                .replacingOccurrences(of: "\n", with: "\\n")
+        }
+        let texts = escaped.map { ",\"text\":\"\($0)\"" } ?? ""
+        return #"{"schemaVersion":1,"eventID":"\#(eventID)","provider":"\#(provider.rawValue)","launchGeneration":"\#(generation.uuidString)","hookEventName":"\#(event)","sessionID":"\#(session)","turnID":"\#(turn)","model":"","permissionMode":"","trigger":"\#(trigger)""# + texts + "}"
     }
 
     /// Appends `text` to the agent's event file as it is.
@@ -520,6 +547,7 @@ final class AgentBridgeHarness {
         session: String = "session-1",
         turn: String = "",
         trigger: String = "",
+        text: String? = nil,
         eventID: String = UUID().uuidString
     ) throws {
         let provider = try agent(id).provider
@@ -531,6 +559,7 @@ final class AgentBridgeHarness {
             session: session,
             turn: turn,
             trigger: trigger,
+            text: text,
             eventID: eventID))
         poll()
     }
@@ -546,10 +575,12 @@ final class AgentBridgeHarness {
             userInfo: [Notification.Name.ProgramStatusKey: try programStatus(body)])
     }
 
-    /// Claude starts a turn: `working`, standing for the turn-start delay.
+    /// The agent starts a turn: `working`, standing for its provider's
+    /// turn-start delay.
     func startTurn(_ id: UUID) throws {
-        try osc(id, "state=working:app=claude-code")
-        scheduler.advance(by: AgentBridge.turnStartDelay)
+        let provider = try agent(id).provider
+        try osc(id, "state=working:app=\(provider == .codex ? "codex" : "claude-code")")
+        scheduler.advance(by: providers.table[provider].turnStartDelay)
     }
 
     /// Claude starts a turn and completes it with a bare `done`.
@@ -592,15 +623,19 @@ final class AgentBridgeHarness {
         try osc(id, exitReport(status))
     }
 
-    /// Appends the `ProviderExited` record that Codex's launch script still
-    /// writes, until gate G4, just before its exit report, and polls.
-    func providerExitRecord(_ id: UUID, status: Int) throws {
-        let provider = try agent(id).provider
-        let launch = try generation(id)
-        try append(
-            id,
-            #"{"schemaVersion":1,"eventID":"\#(UUID().uuidString)","provider":"\#(provider.rawValue)","launchGeneration":"\#(launch.uuidString)","hookEventName":"ProviderExited","exitStatus":\#(status)}"#)
-        poll()
+    /// The agent's terminal closes with no process left in it, as Ghostty
+    /// closes it when the launch script ends or the process dies; what the
+    /// bridge does next runs at once.
+    func terminalClosed(_ id: UUID) throws {
+        bridge.surfaceClosed(id: id, generation: try generation(id), processAlive: false)
+        scheduler.advance(by: 0)
+    }
+
+    /// The provider returns with `status` and its terminal closes, as the
+    /// launch script ends.
+    func providerQuit(_ id: UUID, status: Int) throws {
+        try providerExited(id, status: status)
+        try terminalClosed(id)
     }
 
     /// Reads the status folder now, as the watcher asks the journal source
@@ -609,13 +644,14 @@ final class AgentBridgeHarness {
         bridge.journal?.read()
     }
 
-    /// Rewrites the task's agents in `agents.json` as an editor would, then
+    /// Rewrites the project's agents in `agents.json` as an editor would, then
     /// loads the file as the config watcher does.
     func editConfigExternally(_ edit: (inout [AgentEntry]) -> Void) throws {
         var projects = config.projects
-        edit(&projects[0].tasks[0].agents)
+        edit(&projects[0].agents)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        config.waitForWrites()
         try encoder.encode(AgentConfigFile(projects: projects)).write(to: root.agentsFile, options: .atomic)
         config.load()
     }
@@ -646,20 +682,11 @@ final class AgentBridgeHarness {
         try #require(FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber).intValue
     }
 
-    /// One `[UUID: X]` field of `state.json`, which JSONEncoder writes as a
-    /// flat `[key, value, key, value, …]` array. Empty while nothing has
-    /// been saved.
-    func persisted(_ key: String) throws -> [UUID: Any] {
-        guard exists(root.stateFile) else { return [:] }
-        let object = try #require(
-            JSONSerialization.jsonObject(with: Data(contentsOf: root.stateFile)) as? [String: Any])
-        let flat = try #require(object[key] as? [Any])
-        var result: [UUID: Any] = [:]
-        for index in stride(from: 0, to: flat.count, by: 2) {
-            let key = try #require(flat[index] as? String)
-            result[try #require(UUID(uuidString: key))] = flat[index + 1]
-        }
-        return result
+    /// The agents whose stored record is unread, as the files say.
+    func recordedUnread() throws -> Set<UUID> {
+        Set(try config.allAgentEntries.map(\.id).filter {
+            try AgentRecord.load($0, from: root.statusDir)?.unread == true
+        })
     }
 
     func binding(_ id: UUID) throws -> AgentSessionBinding {
@@ -709,5 +736,32 @@ func exitReport(_ status: Int) -> String {
 func yieldToMainActor(until condition: () -> Bool, limit: Int = 100) async {
     for _ in 0..<limit where !condition() {
         await Task.yield()
+    }
+}
+
+extension AgentInstance {
+    /// What runs under an agent, as the engine's tests check it: its
+    /// terminal, its CLI and what the CLI reports doing. The window shows
+    /// none of this but the screen's quiet line; its states are the record's.
+    enum Terminal: Equatable {
+        case notRunning, starting, failed, noStatus, idle, busy, compacting
+    }
+
+    var terminal: Terminal {
+        switch surfaceState {
+        case .inactive, .closed: return .notRunning
+        case .opening: return .starting
+        case .failed: return .failed
+        case .open: break
+        }
+        if processState == .exited { return .notRunning }
+        switch activityState {
+        case .unknown:
+            if case .unavailable = telemetryHealth { return .noStatus }
+            return .starting
+        case .idle: return .idle
+        case .reasoning, .executing: return .busy
+        case .compacting: return .compacting
+        }
     }
 }

@@ -35,6 +35,14 @@ protocol TerminalViewModel: ObservableObject {
 
     /// The update overlay should be visible.
     var updateOverlayIsVisible: Bool { get }
+
+    /// The view takes the keys when it appears. A window that decides
+    /// itself which view has the keys, as Clawddy's workspace does, says no.
+    var focusesOnAppear: Bool { get }
+}
+
+extension TerminalViewModel {
+    var focusesOnAppear: Bool { true }
 }
 
 /// The main terminal view. This terminal view supports splits.
@@ -85,7 +93,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                         .environmentObject(ghostty)
                         .ghosttyLastFocusedSurface(lastFocusedSurface)
                         .focused($focused)
-                        .onAppear { self.focused = true }
+                        .onAppear { if viewModel.focusesOnAppear { self.focused = true } }
                         .onChange(of: focusedSurface) { newValue in
                             // We want to keep track of our last focused surface so even if
                             // we lose focus we keep this set to the last non-nil value.

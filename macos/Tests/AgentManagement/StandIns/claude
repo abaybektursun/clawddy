@@ -1,0 +1,1517 @@
+#!/usr/bin/env -S python3 -I
+"""Stand-in for the `claude` CLI. Run under the name `codex` (the `codex` file
+beside it is a link to this one) it stands in for the `codex` CLI instead.
+
+It looks and reports like the real CLI towards the app and towards a person
+looking at the terminal, and never calls a model or the network. It writes no
+file, except one when <dir>/keylog exists (see "Key log"). Observed behaviour of the real CLIs: docs/clawddy-refactor/cli-facts.md,
+and the probes of 2026-11-23 against Claude Code 2.1.331 and Codex 0.169.0
+(screens, reports, hook payloads, queueing and interrupts as described below).
+
+What it does
+- Arguments the app passes. claude: --session-id ID, --resume [ID],
+  --fork-session, --name NAME, --settings FILE, --dangerously-skip-permissions,
+  --model, --effort, and a positional first prompt. codex: `resume ID`,
+  `fork ID`, -c/--config key=value (notify=[...] and model_reasoning_effort are
+  read), --dangerously-bypass-approvals-and-sandbox, --model, a positional
+  first prompt. Unknown flags are accepted and ignored. `--version`,
+  `claude auth status` and `codex login status` answer as the real CLIs do.
+  `claude agents --json` lists the running stand-in claude sessions, found by
+  their --resume or --session-id argument in the process list, as the real
+  one lists its running interactive sessions.
+- Terminal: raw mode, bracketed paste, a transcript above a bottom area with
+  the spinner, queued prompts, the input line and the footer. claude's input
+  line sits between two full-width rules: "❯" and a no-break space, then the
+  text; empty it shows nothing, or `Try "edit <filepath> to…"` before the
+  first prompt, or "Press up to edit queued messages" while a prompt is
+  queued. codex's composer is "› " and the text, or "Ask Codex to do
+  anything". Resize clears the screen and draws everything again.
+- Status reports (OSC 7501): claude asks `7501;?` at start and reports only
+  once the terminal answers (BEL-terminated, app=claude-code); codex reports
+  always (ESC-backslash-terminated, app=codex). The first report is the sign
+  the CLI reads keys: claude `idle` (or `working` with a first prompt, or
+  `blocked kind=permission` on the folder-trust dialog); codex `idle` after
+  its start-up `working`, none while its update dialog shows.
+- claude runs the hook commands and the statusLine command of the --settings
+  file with the real payload JSON on stdin: SessionStart, UserPromptSubmit,
+  PreToolUse/PostToolUse (tool lines), PermissionRequest (a question), Stop,
+  StopFailure, PreCompact/PostCompact (/compact), Notification (idle_prompt,
+  60 s after a turn ends), SessionEnd. codex runs the notify program at the
+  end of each completed turn with the JSON as its last argument, and once more
+  for the title it makes after the first prompt (another thread-id).
+- Keys: typing edits the line; paste inserts (newlines stay in one message);
+  Return submits. While working a submitted prompt is queued: claude fires
+  UserPromptSubmit for it at once, with the running turn's prompt_id; both
+  CLIs fold it into the running turn at its next tool line (or its end), so
+  the turn ends once, answering the latest prompt. Escape (or Ctrl-C) while
+  working interrupts: claude puts the prompt back in the line only when the
+  turn has shown nothing yet (and drops it from the transcript), codex never;
+  codex with queued prompts submits them at once instead. With text in an idle
+  line: claude clears it on Escape twice (within 0.8 s) or on Ctrl-C, which
+  also arms "Press Ctrl-C again to exit"; codex clears it on Ctrl-C and
+  ignores Escape. Ctrl-C twice or Ctrl-D on an empty line exits; /exit (codex
+  also /quit), /login, /clear and /compact (claude) work. SIGTERM and SIGHUP
+  end the session (SessionEnd reason "other") and restore the terminal.
+
+Key log
+When <dir>/keylog exists, where <dir>/bin holds this program, every key and
+paste the stand-in reads is appended to <dir>/keylog/<session-id>.log, one per
+line, as it decodes them: a key's name (enter, esc, ctrl-c, up, left, ...),
+"char <c>" for a typed character, "paste <json string>" for a paste. The
+harness's key-routing soak reads it to see which terminal each key reached.
+
+The script file
+Optional: <dir>/standin/<session-id>.json, where <dir>/bin holds this program.
+claude looks under its --session-id, then its --resume id; codex under its
+`resume`/`fork` id. If none exists, <dir>/standin/default.json is used if
+present. Format (every key optional):
+
+  {
+    "title":   "Tide chart blank",    terminal title once a prompt is seen
+                                      (default: the first words of the prompt)
+    "folder":  "~/projects/tidepool", folder shown in the header (default: cwd)
+    "context": 83,                    "% context left" in the footer
+    "plus": 38, "minus": 9,           lines added/removed so far (status line)
+    "screen":  [LINE, ...],           on screen at start, as if resumed
+    "escapeAsks": {"ask": "Stop?", "options": ["Yes", "No"]}
+                                      the first Escape in a turn shows this
+                                      question instead of interrupting
+    "trust":   true,                  claude: the folder-trust dialog first
+                                      ("No, exit" selected, as the real one)
+    "update":  true,                  codex: the update dialog first (Escape
+                                      skips; Return on "Update now" exits)
+    "steps":   [STEP, ...]            run in order, then the default behaviour
+  }
+
+  LINE is the text as it appears on screen; its first characters say what it is:
+    "> text"         the person's prompt
+    "⏺ Name(args)"   a tool call (a capitalised name right before "(")
+    "⏺ text"         the agent's text
+    "⎿ text"         a tool's result, under the call before it
+    "! text"         an error
+    anything else    plain text ("" is a blank line)
+
+  STEP is one of:
+    {"print": [LINE, ...], "rate": 5}      print at RATE lines a second (default 5);
+                                           tool lines run PreToolUse/PostToolUse
+    {"working": "Running the tests", "elapsed": 130}
+                                           report working (opens a turn if none is
+                                           open); spinner text; seconds already spent
+    {"finish": "message", "summary": "...", "plus": 3, "minus": 1}
+                                           final message: Stop hook / notify, `done`;
+                                           summary is the later `done` msg (claude)
+    {"ask": "Question?", "options": ["A", "B"], "header": "Layout"}
+                                           blocked on a question until answered (digit,
+                                           arrows + Return, or typed text + Return)
+    {"fail": "login" | "usage" | "error", "text": "...", "resets": "3pm"}
+                                           the turn fails: login is `blocked kind=auth`
+                                           (claude), usage and error are `error`
+    {"wait": 2.5}                          wait this long (ends early if a prompt
+                                           starts a turn)
+    {"wait": "prompt"}                     wait for a prompt; it opens the turn the
+                                           next steps belong to
+
+  A prompt submitted while no turn is open always opens a turn at once. Its
+  work is the next steps, or, when no steps are left, the default turn: about
+  4 seconds of tool lines, then a short message that mentions the prompt. If
+  the steps run out while a turn is open, that turn ends with the default
+  message. An interrupt skips the rest of the turn's steps up to and including
+  its "finish" or "fail".
+"""
+import base64
+import collections
+import errno
+import json
+import os
+import random
+import re
+import select
+import signal
+import subprocess
+import sys
+import termios
+import time
+import tty
+import unicodedata
+import uuid
+
+PROG = os.path.basename(sys.argv[0])
+CODEX = PROG == "codex"
+HARNESS = os.path.dirname(os.path.dirname(os.path.abspath(sys.argv[0])))
+VERSION = "0.169.0" if CODEX else "2.1.331"
+APP = "codex" if CODEX else "claude-code"
+ST = "\x1b\\" if CODEX else "\x07"  # what ends an OSC 7501 report
+
+def rgb(r, g, b):
+    return f"\x1b[38;2;{r};{g};{b}m"
+
+RESET, BOLD, INV = "\x1b[0m", "\x1b[1m", "\x1b[7m"
+ORANGE, GREEN, GREY = rgb(215, 119, 87), rgb(78, 186, 101), rgb(153, 153, 153)
+RED, BLUE, WHITE, PINK = rgb(255, 107, 128), rgb(177, 185, 249), rgb(255, 255, 255), rgb(253, 93, 177)
+NBSP = "\u00a0"  # claude puts a no-break space after its "❯"
+TITLE_PROMPT = ("Generate a concise, single-line task title of at most 36 characters and under five words where "
+                "possible. Start with an imperative verb. Do not answer the request.\n\nUser prompt:\n")
+SHADE = "\x1b[48;2;44;47;54m"
+SPIN = "·✢✳✶✻✽✻✶✳✢"
+BRAILLE = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+
+# ---- arguments -------------------------------------------------------------
+
+CLAUDE_VALUES = {"--session-id": "session", "--name": "name", "-n": "name", "--settings": "settings",
+                 "--model": "model", "--effort": "effort", "--permission-mode": None, "--debug-file": None,
+                 "--allowedTools": None, "--disallowedTools": None, "--add-dir": None, "--mcp-config": None,
+                 "--append-system-prompt": None, "--system-prompt": None, "--fallback-model": None,
+                 "--output-format": None, "--input-format": None, "--setting-sources": None}
+CODEX_VALUES = {"-c": "config", "--config": "config", "-m": "model", "--model": "model", "-s": None,
+                "--sandbox": None, "-a": None, "--ask-for-approval": None, "-C": None, "--cd": None,
+                "-p": None, "--profile": None, "-i": None, "--image": None, "--enable": None,
+                "--disable": None, "--add-dir": None}
+
+
+def toml_strings(value):
+    """The strings of a TOML array of strings, such as notify=["a", 'b']."""
+    out = []
+    for m in re.finditer(r'"((?:[^"\\]|\\.)*)"|\'([^\']*)\'', value):
+        out.append(json.loads('"' + m.group(1) + '"') if m.group(1) is not None else m.group(2))
+    return out
+
+
+def parse_args(argv):
+    o = {"session": None, "resume": None, "fork": False, "name": None, "settings": None, "model": None,
+         "effort": None, "skip": False, "notify": None, "words": []}
+    values = CODEX_VALUES if CODEX else CLAUDE_VALUES
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        i += 1
+        if a == "--":
+            o["words"] += argv[i:]
+            break
+        if not a.startswith("-") or a == "-":
+            o["words"].append(a)
+            continue
+        flag, eq, v = a.partition("=")
+        if flag in ("--resume", "-r") and not CODEX:
+            if eq:
+                o["resume"] = v
+            elif i < len(argv) and not argv[i].startswith("-"):
+                o["resume"] = argv[i]
+                i += 1
+            else:
+                o["resume"] = ""  # Claude's own list of conversations
+            continue
+        if flag in values:
+            if not eq:
+                if i >= len(argv):
+                    sys.exit(f"{PROG}: {flag} needs a value")
+                v = argv[i]
+                i += 1
+            key = values[flag]
+            if key == "config":
+                k, _, val = v.partition("=")
+                if k.strip() == "notify":
+                    o["notify"] = toml_strings(val)
+                elif k.strip() == "model_reasoning_effort":
+                    o["effort"] = val.strip().strip("\"'")
+            elif key:
+                o[key] = v
+            continue
+        if flag in ("--dangerously-skip-permissions", "--dangerously-bypass-approvals-and-sandbox", "--yolo"):
+            o["skip"] = True
+        elif flag == "--fork-session":
+            o["fork"] = True
+        # Any other flag is accepted and ignored.
+    return o
+
+
+def safe_name(s):
+    return bool(s) and re.fullmatch(r"[A-Za-z0-9._-]+", s) is not None
+
+
+def load_script(keys):
+    for k in [k for k in keys if safe_name(k)] + ["default"]:
+        path = os.path.join(HARNESS, "standin", k + ".json")
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+    return {}
+
+
+# ---- text ------------------------------------------------------------------
+
+def cells(s):
+    n = 0
+    for ch in s:
+        if unicodedata.combining(ch):
+            continue
+        n += 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+    return n
+
+
+def fit(segs, cols):
+    """One screen row from (text, style) pieces, cut to `cols` cells."""
+    out, used = [], 0
+    for text, style in segs:
+        keep = ""
+        for ch in text:
+            w = cells(ch)
+            if used + w > cols:
+                break
+            keep += ch
+            used += w
+        if keep:
+            out.append(style + keep + (RESET if style else ""))
+        if used >= cols:
+            break
+    return "".join(out), used
+
+
+def pad(segs, cols, style=""):
+    row, used = fit(segs, cols)
+    return row + style + " " * (cols - used) + (RESET if style else "")
+
+
+def elapsed(s):
+    s = int(s)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    return f"{s // 3600}h {s % 3600 // 60}m"
+
+
+def b64(text):
+    return base64.b64encode(text.encode()[:2048].decode("utf-8", "ignore").encode()).decode()
+
+
+def entry_of(line):
+    """A script LINE as (kind, text)."""
+    if line.startswith("> "):
+        return ("you", line[2:])
+    if line.startswith("⏺ "):
+        body = line[2:]
+        return ("tool", body) if re.match(r"[A-Z][A-Za-z]*\(", body) else ("text", body)
+    if line.lstrip().startswith("⎿"):
+        return ("out", line.lstrip()[1:].strip())
+    if line.startswith("! "):
+        return ("err", line[2:])
+    return ("plain", line)
+
+
+def tool_input(name, args):
+    if name == "Bash":
+        return {"command": args, "description": ""}
+    if name in ("Read", "Edit", "Update", "Write"):
+        return {"file_path": args}
+    if name in ("Grep", "Search", "Glob"):
+        return {"pattern": args}
+    return {"input": args}
+
+
+# ---- the program -----------------------------------------------------------
+
+class StandIn:
+    def __init__(self, o):
+        self.o = o
+        self.cwd = os.getcwd()
+        self.first_prompt = " ".join(o["words"]) or None
+        if CODEX:
+            verb = o["words"][0] if o["words"] else ""
+            known = o["words"][1] if verb in ("resume", "fork") and len(o["words"]) > 1 else None
+            self.first_prompt = " ".join(o["words"][2 if known else 0:]) or None
+            self.sid = known if verb == "resume" and known else str(uuid.uuid4())
+            self.source = verb if known else "startup"
+            self.script = load_script([known])
+        else:
+            resumed = o["resume"] or None
+            self.sid = o["session"] or (resumed if not o["fork"] else None) or str(uuid.uuid4())
+            self.source = "fork" if o["fork"] else "resume" if resumed else "startup"
+            self.script = load_script([o["session"], resumed])
+        self.resumed = self.source != "startup"
+        if o["settings"]:
+            s = o["settings"]
+            if s.lstrip().startswith("{"):
+                self.settings = json.loads(s)
+            else:
+                with open(s) as f:
+                    self.settings = json.load(f)
+        else:
+            self.settings = {}
+        sc = self.script
+        self.context = sc.get("context", 83)
+        self.plus, self.minus = sc.get("plus", 0), sc.get("minus", 0)
+        self.folder = sc.get("folder") or self.cwd.replace(os.path.expanduser("~"), "~", 1)
+        self.script_title = sc.get("title")
+        self.escape_asks = sc.get("escapeAsks")
+        self.title_base = None if CODEX else o["name"] or "Claude Code"
+        self.title_shown = None
+        self.status_ok = CODEX
+        self.reported = None
+        self.status_text = ""
+        # transcript and screen
+        self.entries = [("header", "")]
+        for line in sc.get("screen", []):
+            self.add(entry_of(line))
+        self.printed = 0
+        self.dyn_rows = 0
+        self.dirty = True
+        self.full = True
+        # input
+        self.inbuf = b""
+        self.esc_at = None
+        self.pasting = False
+        self.paste = b""
+        self.input, self.cur = "", 0
+        self.ctrl_c_at = None
+        self.esc_at_idle = None  # claude: a first Escape with text in the line
+        self.dialog = None  # "trust" (claude) or "update" (codex), with the selection
+        self.trusted = False  # claude runs no hook before the folder is trusted
+        # turns
+        self.turn_open = False
+        self.turn_seq = 0
+        self.turn_prompt = None
+        self.turn_started = 0.0
+        self.turn_prompts = []  # every prompt of the open turn, queued ones folded in
+        self.turn_shown = False  # the open turn has shown something since its prompt
+        self.prompt_id = None
+        self.step = ""
+        self.queue = []
+        self.asking = None
+        self.last_answer = None
+        self.last_tool = None
+        self.last_summary = None
+        self.unclaimed = None
+        self.prompts_seen = 0
+        # script
+        self.steps = collections.deque(sc.get("steps", []))
+        self.gen = None
+        self.begun = False
+        self.waiting = None
+        self.timers = []
+        self.signal = None
+        self.winch = False
+        self.hung = False
+
+    # ---- output ----
+    def write(self, s):
+        data = s.encode()
+        while data:
+            if self.hung:
+                # The terminal may be gone after a hang-up; there is nothing left to restore.
+                try:
+                    n = os.write(1, data)
+                except OSError:
+                    return
+            else:
+                n = os.write(1, data)
+            data = data[n:]
+
+    def report(self, state, kind=None, msg=None):
+        self.reported = (state, kind, msg)
+        if not self.status_ok:
+            self.refresh_title()
+            return
+        body = f"7501;state={state}" + ("" if state == "clear" else f":app={APP}")
+        if kind:
+            body += f":kind={kind}"
+        if msg:
+            body += ":msg=" + b64(msg)
+        out = "\x1b]" + body + ST
+        if not CODEX and os.environ.get("TERM_PROGRAM") == "ghostty":
+            out += "\x1b]9;4;3;\x07" if state in ("working", "blocked") else "\x1b]9;4;0;\x07"
+        self.write(out)
+
+    def title(self, text):
+        if text != self.title_shown:
+            self.title_shown = text
+            self.write(f"\x1b]0;{text}\x07")
+
+    def refresh_title(self):
+        if CODEX:
+            base = os.path.basename(self.cwd) if not self.title_base else f"{self.title_base} | {os.path.basename(self.cwd)}"
+            frame = BRAILLE[int(time.monotonic() * 10) % len(BRAILLE)] + " " if self.turn_open else ""
+            self.title(frame + base)
+            return
+        if self.title_base is None:
+            return
+        glyph = "" if self.status_ok else ("◐ " if self.turn_open else "✳ ")
+        self.title(glyph + self.title_base)
+
+    # ---- hooks ----
+    def run_command(self, command, stdin, timeout, label):
+        env = dict(os.environ, CLAUDECODE="1", CLAUDE_PROJECT_DIR=self.cwd)
+        try:
+            r = subprocess.run(["/bin/sh", "-c", command], input=stdin, text=True, capture_output=True,
+                               timeout=timeout, cwd=self.cwd, env=env)
+        except subprocess.TimeoutExpired:
+            self.add(("err", f"{label} timed out after {timeout}s"))
+            return None
+        if r.returncode != 0:
+            self.add(("err", f"{label} failed with status {r.returncode}: {r.stderr.strip()[:200]}"))
+        return r.stdout
+
+    def payload(self, event, fields):
+        return {"session_id": self.sid,
+                "transcript_path": os.path.join(HARNESS, "standin", "transcripts", self.sid + ".jsonl"),
+                "cwd": self.cwd,
+                "scratchpad_dir": os.path.join(HARNESS, "standin", "scratchpad", self.sid),
+                "hook_event_name": event, **fields}
+
+    def hook(self, event, tool=None, **fields):
+        if CODEX or not self.trusted:
+            return
+        data = json.dumps(self.payload(event, fields))
+        for group in self.settings.get("hooks", {}).get(event, []):
+            matcher = group.get("matcher", "")
+            if matcher not in ("", "*") and tool is not None and not re.fullmatch(matcher, tool):
+                continue
+            for h in group.get("hooks", []):
+                if h.get("type") != "command":
+                    continue
+                out = self.run_command(h["command"], data, h.get("timeout", 60), f"{event} hook")
+                if out and out.strip().startswith("{"):
+                    title = json.loads(out).get("hookSpecificOutput", {}).get("sessionTitle")
+                    if title:
+                        self.title_base = title
+                        self.refresh_title()
+
+    def statusline(self):
+        sl = self.settings.get("statusLine")
+        if CODEX or not sl or sl.get("type") != "command":
+            return
+        p = {"session_id": self.sid, "session_name": self.title_base or "",
+             "transcript_path": self.payload("", {})["transcript_path"], "cwd": self.cwd,
+             "model": {"id": self.o["model"] or "standin", "display_name": self.o["model"] or "Stand-in"},
+             "workspace": {"current_dir": self.cwd, "project_dir": self.cwd, "added_dirs": []},
+             "version": VERSION, "output_style": {"name": "default"},
+             "cost": {"total_cost_usd": 0, "total_duration_ms": 0, "total_api_duration_ms": 0,
+                      "total_lines_added": self.plus, "total_lines_removed": self.minus},
+             "context_window": {"used_percentage": 100 - self.context, "remaining_percentage": self.context},
+             "exceeds_200k_tokens": False}
+        out = self.run_command(sl["command"], json.dumps(p), 10, "Status line")
+        text = re.sub(r"\x1b\[[0-9;]*m", "", out or "").strip().splitlines()
+        self.status_text = text[0] if text else ""
+        self.dirty = True
+
+    def notify(self, message):
+        argv = self.o["notify"]
+        if not argv:
+            return
+        self.run_notify({"type": "agent-turn-complete", "thread-id": self.sid, "turn-id": self.prompt_id,
+                         "cwd": self.cwd, "client": "codex-tui", "input-messages": list(self.turn_prompts),
+                         "last-assistant-message": message})
+
+    def notify_title(self, prompt, title):
+        """codex titles the conversation in a turn of its own, on another thread, which notifies too."""
+        if self.o["notify"]:
+            self.run_notify({"type": "agent-turn-complete", "thread-id": str(uuid.uuid4()), "turn-id": str(uuid.uuid4()),
+                             "cwd": self.cwd, "client": "codex-tui", "input-messages": [TITLE_PROMPT + prompt],
+                             "last-assistant-message": json.dumps({"title": title})})
+
+    def run_notify(self, payload):
+        r = subprocess.run(self.o["notify"] + [json.dumps(payload)], stdin=subprocess.DEVNULL, capture_output=True,
+                           timeout=10, cwd=self.cwd)
+        if r.returncode != 0:
+            self.add(("err", f"notify failed with status {r.returncode}"))
+
+    # ---- transcript ----
+    def add(self, entry):
+        """Appends to the transcript, with one blank line before each message, as the CLIs space them."""
+        blank = ("plain", "")
+        if entry == blank and self.entries[-1] == blank:
+            return
+        if entry[0] in ("you", "tool", "text", "rule") and self.entries[-1] != blank:
+            self.entries.append(blank)
+        self.entries.append(entry)
+        self.dirty = True
+
+    def add_line(self, line):
+        e = entry_of(line)
+        self.add(e)
+        if not self.turn_open:
+            return
+        self.turn_shown = True
+        if e[0] == "tool":
+            m = re.match(r"([A-Za-z]+)\((.*)\)$", e[1])
+            name, args = (m.group(1), m.group(2)) if m else (e[1], "")
+            self.last_tool = (name, args, "toolu_" + uuid.uuid4().hex[:24], time.monotonic())
+            self.report("working", msg=f"{name} {args}"[:120])
+            self.hook("PreToolUse", tool=name, tool_name=name, tool_input=tool_input(name, args),
+                      tool_use_id=self.last_tool[2], prompt_id=self.prompt_id, effort=self.effort(),
+                      permission_mode=self.mode())
+        elif e[0] == "out" and self.last_tool:
+            name, args, tid, t0 = self.last_tool
+            self.last_tool = None
+            self.hook("PostToolUse", tool=name, tool_name=name, tool_input=tool_input(name, args),
+                      tool_response={"stdout": e[1], "stderr": "", "interrupted": False}, tool_use_id=tid,
+                      duration_ms=int((time.monotonic() - t0) * 1000), prompt_id=self.prompt_id,
+                      effort=self.effort(), permission_mode=self.mode())
+        if e[0] == "out":
+            # A prompt queued meanwhile joins the turn after the tool's result.
+            self.fold_queue()
+
+    def mode(self):
+        return "bypassPermissions" if self.o["skip"] else "default"
+
+    def effort(self):
+        return {"level": self.o["effort"] or "medium"}
+
+    # ---- turns ----
+    def start_turn(self, prompt):
+        self.turn_seq += 1
+        self.turn_open = True
+        self.turn_prompt = prompt
+        self.turn_prompts = [prompt] if prompt else []
+        self.turn_shown = False
+        self.prompt_id = str(uuid.uuid4())
+        self.turn_started = time.monotonic()
+        self.step = random.choice(["Thinking", "Pondering", "Working", "Considering"])
+        self.dirty = True
+        if prompt is None:
+            self.report("working")
+            return
+        self.add(("you", prompt))
+        self.report("working")
+        self.hook("UserPromptSubmit", prompt=prompt, prompt_id=self.prompt_id, permission_mode=self.mode())
+        self.prompts_seen += 1
+        if self.prompts_seen == 1 and (CODEX or not self.o["name"]):
+            # About a second after the first prompt the CLI titles the conversation.
+            words = " ".join(prompt.split()[:4])
+            name = self.script_title or (words[:1].upper() + words[1:])
+
+            def titled():
+                self.title_base = name
+                self.refresh_title()
+                if CODEX:
+                    self.notify_title(prompt, name)
+            self.later(1.0, titled)
+        self.unclaimed = prompt
+        if self.waiting and self.waiting[0] in ("wait", "prompt"):
+            self.unclaimed = None
+            self.run_director(prompt)
+
+    def end_turn(self):
+        self.turn_open = False
+        self.asking = None
+        self.last_tool = None
+        self.context = max(5, self.context - 2)
+        self.dirty = True
+        self.refresh_title()
+        if not CODEX:
+            seq = self.turn_seq
+            self.later(60, lambda: seq == self.turn_seq and not self.turn_open and self.hook(
+                "Notification", message="Claude is waiting for your input", notification_type="idle_prompt",
+                prompt_id=self.prompt_id))
+
+    def fold_queue(self):
+        """Queued prompts join the running turn, which now answers the latest of them."""
+        for q in self.queue:
+            self.add(("you", q))
+            self.turn_prompts.append(q)
+            self.turn_prompt = q
+        self.queue = []
+
+    def finish(self, message, summary=None, plus=0, minus=0):
+        if not self.turn_open:
+            self.start_turn(None)
+        self.plus += plus
+        self.minus += minus
+        took = time.monotonic() - self.turn_started
+        self.fold_queue()
+        if CODEX:
+            self.add(("rule", f"Worked for {elapsed(took)}"))
+            self.add(("text", message))
+            self.draw()
+            self.report("done")
+            self.notify(message)
+            self.end_turn()
+            return
+        self.add(("text", message))
+        self.add(("plain", f"{ORANGE}✻{RESET} {GREY}Worked for {elapsed(took)}{RESET}"))
+        self.draw()
+        self.hook("Stop", prompt_id=self.prompt_id, effort=self.effort(), permission_mode=self.mode(),
+                  last_assistant_message=message, stop_hook_active=False, background_tasks=[], session_crons=[])
+        self.report("done")
+        self.statusline()
+        seq = self.turn_seq
+        summary = summary or message.split(". ")[0].rstrip(".")[:80]
+        self.last_summary = summary
+        self.later(1.7, lambda: seq == self.turn_seq and not self.turn_open and self.report("done", msg=summary))
+        self.end_turn()
+
+    def fail(self, kind, text=None, resets=None):
+        if not self.turn_open:
+            self.start_turn(None)
+        if text is None:
+            if kind == "login":
+                text = ("Your access token could not be refreshed because you have since logged out or signed in to another account. Run codex login."
+                        if CODEX else "API Error: 401 · OAuth token has expired. Please run /login")
+            elif kind == "usage":
+                text = ((f"You've hit your usage limit. Try again at {resets}." if resets else "You've hit your usage limit.")
+                        if CODEX else (f"Claude usage limit reached. Your limit will reset at {resets}." if resets
+                                       else "Claude usage limit reached."))
+            else:
+                text = "API Error: Connection refused — a firewall or proxy may be blocking it (ECONNREFUSED)"
+        self.fold_queue()
+        self.add(("err", text))
+        self.draw()
+        if CODEX:
+            self.report("error")
+        else:
+            if kind == "login":
+                self.report("blocked", kind="auth", msg=text)
+            else:
+                self.report("error", msg=text)
+            self.hook("StopFailure", error={"login": "authentication_failed", "usage": "rate_limit"}.get(kind, "server_error"),
+                      last_assistant_message=text, prompt_id=self.prompt_id, effort=self.effort())
+        self.end_turn()
+
+    def ask(self, question, options, header):
+        if not self.turn_open:
+            self.start_turn(None)
+        tid = "toolu_" + uuid.uuid4().hex[:24]
+        questions = [{"question": question, "header": header or "Question", "multiSelect": False,
+                      "options": [{"label": o, "description": ""} for o in options]}]
+        self.asking = {"q": question, "options": options, "header": header or "Question", "sel": 0, "id": tid,
+                       "questions": questions, "at": time.monotonic()}
+        self.draw()
+        self.hook("PreToolUse", tool="AskUserQuestion", tool_name="AskUserQuestion", tool_input={"questions": questions},
+                  tool_use_id=tid, prompt_id=self.prompt_id, effort=self.effort(), permission_mode=self.mode())
+        self.hook("PermissionRequest", tool="AskUserQuestion", tool_name="AskUserQuestion",
+                  tool_input={"questions": questions}, permission_suggestions=[], prompt_id=self.prompt_id,
+                  effort=self.effort(), permission_mode=self.mode())
+        self.report("blocked", kind="question", msg=f"answer: {question} ({' · '.join(options)})")
+
+    def answer(self, text):
+        q = self.asking
+        self.asking = None
+        self.input, self.cur = "", 0
+        answers = {q["q"]: text}
+        self.hook("PostToolUse", tool="AskUserQuestion", tool_name="AskUserQuestion",
+                  tool_input={"questions": q["questions"], "answers": answers, "annotations": {}},
+                  tool_response={"questions": q["questions"], "answers": answers}, tool_use_id=q["id"],
+                  duration_ms=int((time.monotonic() - q["at"]) * 1000), prompt_id=self.prompt_id,
+                  effort=self.effort(), permission_mode=self.mode())
+        if CODEX:
+            self.add(("text", f"You chose: {text}"))
+        else:
+            self.add(("text", "User answered Claude's questions:"))
+            self.add(("out", f"· {q['q']} → {text}"))
+        self.last_answer = text
+        self.report("working")
+        if self.waiting and self.waiting[0] == "answer":
+            self.run_director(text)
+
+    def interrupt(self):
+        if not (self.turn_open or self.asking):
+            return
+        queued, self.queue = self.queue, []
+        if CODEX:
+            self.add(("err", "Conversation interrupted - use /feedback if something went wrong"))
+        else:
+            # Only a turn that has shown nothing gives its prompt back, and drops it from the transcript.
+            back = ([self.turn_prompt] if self.turn_prompt and not self.turn_shown else []) + queued
+            if back and self.turn_prompt and not self.turn_shown and ("you", self.turn_prompt) in self.entries:
+                i = len(self.entries) - 1 - self.entries[::-1].index(("you", self.turn_prompt))
+                del self.entries[i:]
+                self.full = True
+            if back:
+                self.input = "\n".join(back + ([self.input] if self.input else []))
+                self.cur = len(self.input)
+            else:
+                self.add(("out", "Interrupted · What should Claude do instead?"))
+        self.turn_open = False
+        self.asking = None
+        self.last_tool = None
+        self.report("idle")
+        self.refresh_title()
+        if self.gen:
+            self.gen.close()
+        while self.steps:
+            st = self.steps.popleft()
+            if "finish" in st or "fail" in st:
+                break
+        self.unclaimed = None
+        self.gen = self.director()
+        self.run_director()
+        if CODEX and queued:
+            # "press esc to interrupt and send immediately"
+            self.submit("\n".join(queued))
+
+    # ---- the script ----
+    def director(self):
+        while self.steps:
+            yield from self.do_step(self.steps.popleft())
+        while True:
+            if not self.turn_open:
+                yield ("prompt",)
+            self.unclaimed = None
+            yield from self.default_work(self.turn_prompt or self.last_answer)
+
+    def do_step(self, st):
+        if "print" in st:
+            rate = st.get("rate", 5)
+            for line in st["print"]:
+                self.add_line(line)
+                yield ("sleep", 1.0 / rate)
+        elif "working" in st:
+            if not self.turn_open:
+                self.start_turn(None)
+            self.step = st["working"] or self.step
+            self.turn_started = time.monotonic() - st.get("elapsed", 0)
+            self.dirty = True
+            # Claude's report names the step under way (cli-facts.md).
+            self.report("working", msg=None if CODEX else self.step)
+        elif "finish" in st:
+            self.finish(st["finish"], st.get("summary"), st.get("plus", 0), st.get("minus", 0))
+        elif "ask" in st:
+            self.ask(st["ask"], st.get("options", []), st.get("header"))
+            yield ("answer",)
+        elif "fail" in st:
+            self.fail(st["fail"], st.get("text"), st.get("resets"))
+        elif "wait" in st:
+            yield ("prompt",) if st["wait"] == "prompt" else ("wait", float(st["wait"]))
+        else:
+            raise ValueError(f"unknown step in the stand-in script: {st}")
+
+    def default_work(self, prompt):
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_]{2,}", prompt or "")
+        w = max(words, key=len).lower() if words else "task"
+        W = w[:1].upper() + w[1:]
+        if CODEX:
+            work = [(f"⏺ Bash(rg -n \"{w}\" src)", f"⎿ src/{w}.rs:42: fn {w}()"),
+                    (f"⏺ Read(src/{w}.rs)", "⎿ Read 188 lines"),
+                    (f"⏺ Edit(src/{w}.rs)", "⎿ +6 -2"),
+                    ("⏺ Bash(cargo test)", "⎿ test result: ok. 64 passed; 0 failed")]
+        else:
+            work = [(f"⏺ Search(pattern: \"{w}\", path: \"Sources\")", "⎿ Found 4 files"),
+                    (f"⏺ Read(Sources/{W}View.swift)", "⎿ Read 212 lines"),
+                    (f"⏺ Update(Sources/{W}View.swift)", f"⎿ Updated Sources/{W}View.swift with 6 additions and 2 removals"),
+                    ("⏺ Bash(swift test)", "⎿ Executed 212 tests, with 0 failures")]
+        yield ("sleep", 0.5)
+        for call, result in work:
+            self.add_line(call)
+            yield ("sleep", 0.4)
+            self.add_line(result)
+            yield ("sleep", 0.5)
+        self.fold_queue()
+        said = " ".join((self.turn_prompt or prompt or "the task").split())
+        said = said if len(said) <= 70 else said[:69] + "…"
+        self.finish(f"Done: {said}. Two files changed and all 212 tests pass.", f"handled \"{said[:40]}\"", 6, 2)
+
+    def run_director(self, value=None):
+        self.waiting = None
+        while self.gen:
+            try:
+                req = self.gen.send(value)
+            except StopIteration:
+                self.gen = None
+                return
+            value = None
+            if req[0] in ("sleep", "wait"):
+                self.waiting = (req[0], time.monotonic() + req[1])
+                return
+            if req[0] == "prompt":
+                if self.unclaimed is not None:
+                    value, self.unclaimed = self.unclaimed, None
+                    continue
+                self.waiting = ("prompt", None)
+                return
+            self.waiting = (req[0], None)
+            return
+
+    def later(self, dt, fn):
+        self.timers.append((time.monotonic() + dt, fn))
+
+    # ---- input ----
+    def submit(self, text):
+        cmd = text.strip()
+        if cmd in ("/exit", "/quit") and (CODEX or cmd == "/exit"):
+            return self.exit("prompt_input_exit", command=True)
+        if cmd == "/login":
+            self.add(("you", cmd))
+            self.add(("out", "Signed in." if CODEX else "Login successful"))
+            if self.reported and self.reported[1] == "auth" and not self.turn_open:
+                self.report("idle")
+            return
+        if cmd == "/clear" and not CODEX and not self.turn_open:
+            self.report("working")
+            self.hook("SessionEnd", reason="clear", prompt_id=self.prompt_id)
+            self.report("idle")
+            self.sid = str(uuid.uuid4())
+            self.entries = [("header", "")]
+            self.full = True
+            self.hook("SessionStart", source="clear", session_title=self.title_base or "")
+            return
+        if cmd == "/compact" and not CODEX and not self.turn_open:
+            self.report("working")
+            self.hook("PreCompact", trigger="manual", custom_instructions="", prompt_id=self.prompt_id)
+            self.add(("you", cmd))
+            self.add(("out", "Compacted (ctrl+o to see full summary)"))
+            self.later(1.5, self.compacted)
+            return
+        if self.turn_open or self.asking:
+            self.queue.append(text)
+            self.dirty = True
+            # claude submits a queued prompt at once, within the running turn.
+            self.hook("UserPromptSubmit", prompt=text, prompt_id=self.prompt_id, permission_mode=self.mode())
+            return
+        self.start_turn(text)
+
+    def compacted(self):
+        self.hook("SessionStart", source="compact", model=self.o["model"] or "standin", prompt_id=self.prompt_id)
+        self.hook("PostCompact", trigger="manual", compact_summary="The conversation so far.", prompt_id=self.prompt_id)
+        self.report("done", msg=self.last_summary)
+
+    def keylog(self, line):
+        folder = os.path.join(HARNESS, "keylog")
+        if os.path.isdir(folder) and safe_name(self.sid):
+            with open(os.path.join(folder, self.sid + ".log"), "a") as f:
+                f.write(line + "\n")
+
+    def insert(self, text):
+        self.input = self.input[:self.cur] + text + self.input[self.cur:]
+        self.cur += len(text)
+        self.dirty = True
+
+    def key(self, k):
+        self.keylog(k)
+        self.dirty = True
+        if self.dialog:
+            return self.dialog_key(k)
+        if k != "ctrl-c":
+            self.ctrl_c_at = None
+        if k != "esc":
+            self.esc_at_idle = None
+        a = self.asking
+        if k == "enter":
+            if a:
+                if self.input.strip():
+                    return self.answer(self.input.strip())
+                if a["sel"] < len(a["options"]):
+                    return self.answer(a["options"][a["sel"]])
+                return
+            text = self.input
+            if text.endswith("\\") and self.cur == len(text):  # a trailing backslash makes Return a newline
+                self.input, self.cur = text[:-1] + "\n", len(text)
+                return
+            if not text.strip():
+                return
+            self.input, self.cur = "", 0
+            return self.submit(text)
+        if k == "newline":
+            return self.insert("\n")
+        if k == "esc":
+            if self.turn_open and not a and self.escape_asks:
+                # Once: a CLI that asks before it stops.
+                q, self.escape_asks = self.escape_asks, None
+                return self.ask(q["ask"], q.get("options", []), q.get("header"))
+            if self.turn_open or a:
+                return self.interrupt()
+            if self.input and not CODEX:
+                # A second Escape soon after the first clears the line.
+                if self.esc_at_idle and time.monotonic() - self.esc_at_idle < 0.8:
+                    self.input, self.cur, self.esc_at_idle = "", 0, None
+                else:
+                    self.esc_at_idle = time.monotonic()
+            return
+        if k == "ctrl-c":
+            if self.turn_open or a:
+                return self.interrupt()
+            if self.input:
+                self.input, self.cur = "", 0
+                if not CODEX:
+                    # claude clears the line and arms the exit at once.
+                    self.ctrl_c_at = time.monotonic()
+                    self.later(2.05, lambda: setattr(self, "dirty", True))
+                return
+            if self.ctrl_c_at and time.monotonic() - self.ctrl_c_at < 2:
+                return self.exit("prompt_input_exit")
+            self.ctrl_c_at = time.monotonic()
+            self.later(2.05, lambda: setattr(self, "dirty", True))
+            return
+        if k == "ctrl-d":
+            if not self.input and not self.turn_open and not a:
+                return self.exit("prompt_input_exit")
+            return
+        if k in ("up", "down") and a:
+            a["sel"] = (a["sel"] + (1 if k == "down" else -1)) % (len(a["options"]) + 1)
+            return
+        if k == "backspace" and self.cur:
+            self.input = self.input[:self.cur - 1] + self.input[self.cur:]
+            self.cur -= 1
+        elif k == "delete":
+            self.input = self.input[:self.cur] + self.input[self.cur + 1:]
+        elif k == "left":
+            self.cur = max(0, self.cur - 1)
+        elif k == "right":
+            self.cur = min(len(self.input), self.cur + 1)
+        elif k == "home":
+            self.cur = self.input.rfind("\n", 0, self.cur) + 1
+        elif k == "end":
+            nl = self.input.find("\n", self.cur)
+            self.cur = len(self.input) if nl < 0 else nl
+        elif k == "ctrl-u":  # to the start of the line; at the start, joins with the line above
+            start = self.input.rfind("\n", 0, self.cur) + 1
+            start = start - 1 if start == self.cur and start else start
+            self.input = self.input[:start] + self.input[self.cur:]
+            self.cur = start
+        elif k == "ctrl-w":
+            m = re.search(r"\S*\s*$", self.input[:self.cur])
+            self.input = self.input[:m.start()] + self.input[self.cur:]
+            self.cur = m.start()
+
+    def char(self, ch):
+        self.keylog("char " + ch)
+        if self.dialog:
+            return
+        a = self.asking
+        if a and not self.input and ch.isdigit() and 1 <= int(ch) <= len(a["options"]):
+            return self.answer(a["options"][int(ch) - 1])
+        if a:
+            a["sel"] = len(a["options"])
+        self.ctrl_c_at = None
+        self.insert(ch)
+
+    CONTROL = {0x0d: "enter", 0x0a: "newline", 0x7f: "backspace", 0x08: "backspace", 0x03: "ctrl-c",
+               0x04: "ctrl-d", 0x15: "ctrl-u", 0x17: "ctrl-w", 0x01: "home", 0x05: "end", 0x02: "left",
+               0x06: "right", 0x1b: "esc"}
+
+    def parse(self):
+        b = self.inbuf
+        i = 0
+        now = time.monotonic()
+        while i < len(b):
+            if self.pasting:
+                end = b.find(b"\x1b[201~", i)
+                if end < 0:
+                    keep = max(i, len(b) - 5)
+                    self.paste += b[i:keep]
+                    i = keep
+                    break
+                self.paste += b[i:end]
+                i = end + 6
+                self.pasting = False
+                text = self.paste.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
+                self.paste = b""
+                self.keylog("paste " + json.dumps(text))
+                if self.asking:
+                    self.asking["sel"] = len(self.asking["options"])
+                self.insert(text)
+                continue
+            c = b[i]
+            if c == 0x1b:
+                if i + 1 >= len(b):
+                    if self.esc_at is None:
+                        self.esc_at = now + 0.05
+                        break
+                    if now < self.esc_at:
+                        break
+                    self.esc_at = None
+                    self.key("esc")
+                    i += 1
+                    continue
+                self.esc_at = None
+                n = b[i + 1]
+                if n == 0x5b:  # CSI
+                    m = re.compile(rb"\x1b\[([0-9:;<=>?]*)([ -/]*)([@-~])").match(b, i)
+                    if not m:
+                        if re.fullmatch(rb"\x1b\[[0-9:;<=>?]*[ -/]*", b[i:]):
+                            break
+                        i += 2
+                        continue
+                    self.csi(m.group(1).decode(), m.group(3).decode())
+                    i = m.end()
+                    continue
+                if n == 0x5d:  # OSC: a reply from the terminal
+                    m = re.compile(rb"\x1b\]([^\x07\x1b]*)(\x07|\x1b\\)").match(b, i)
+                    if not m:
+                        if re.fullmatch(rb"\x1b\][^\x07\x1b]*\x1b?", b[i:]):
+                            break
+                        i += 2
+                        continue
+                    if m.group(1).startswith(b"7501;?") and not self.status_ok:
+                        self.status_ready()
+                    i = m.end()
+                    continue
+                if n == 0x4f:  # SS3
+                    if i + 2 >= len(b):
+                        break
+                    k = {0x41: "up", 0x42: "down", 0x43: "right", 0x44: "left", 0x48: "home", 0x46: "end"}.get(b[i + 2])
+                    if k:
+                        self.key(k)
+                    i += 3
+                    continue
+                if n in (0x0d, 0x0a):  # Option-Return
+                    self.key("newline")
+                i += 2
+                continue
+            if c < 0x20 or c == 0x7f:
+                k = self.CONTROL.get(c)
+                if k:
+                    self.key(k)
+                i += 1
+                continue
+            size = 1 if c < 0x80 else 2 if c < 0xe0 else 3 if c < 0xf0 else 4
+            if i + size > len(b):
+                break
+            self.char(b[i:i + size].decode("utf-8", "replace"))
+            i += size
+        self.inbuf = b[i:]
+
+    def csi(self, params, final):
+        if final == "~":
+            k = {"200": None, "3": "delete", "1": "home", "4": "end", "7": "home", "8": "end"}
+            p = params.split(";")[0]
+            if p == "200":
+                self.pasting = True
+            elif k.get(p):
+                self.key(k[p])
+            return
+        if final in "ABCDHF" and not params.startswith("?"):
+            self.key({"A": "up", "B": "down", "C": "right", "D": "left", "H": "home", "F": "end"}[final])
+            return
+        if final == "u" and params and params[0].isdigit():  # kitty keyboard protocol
+            parts = params.split(";")
+            code = int(parts[0].split(":")[0])
+            mods = (int(parts[1].split(":")[0]) if len(parts) > 1 and parts[1] else 1) - 1
+            if code == 13:
+                self.key("newline" if mods & 1 else "enter")
+            elif code == 27:
+                self.key("esc")
+            elif code == 127:
+                self.key("backspace")
+            elif code == 9:
+                pass
+            elif mods & 4 and 64 <= (code & ~0x20) <= 95:
+                k = self.CONTROL.get(code & 0x1f)
+                if k:
+                    self.key(k)
+            elif mods in (0, 1) and code >= 32:
+                self.char(chr(code))
+
+    # ---- drawing ----
+    def size(self):
+        s = os.get_terminal_size(1)
+        return max(5, s.lines), max(20, s.columns)
+
+    def render(self, entry, cols):
+        kind, text = entry
+        if kind == "header":
+            return self.header(cols)
+        if kind == "plain":
+            return text
+        if kind == "rule":
+            label = f"─ {text} "
+            return GREY + label + "─" * max(0, cols - cells(label)) + RESET
+        lines = text.split("\n")
+        if CODEX:
+            if kind == "you":
+                return "\r\n".join(pad([(("› " if i == 0 else "  ") + line, BOLD if i == 0 else "")], cols, SHADE)
+                                   for i, line in enumerate(lines))
+            if kind == "tool":
+                m = re.match(r"([A-Za-z]+)\((.*)\)$", text)
+                name, args = (m.group(1), m.group(2)) if m else (text, "")
+                verb = {"Bash": "Ran", "Read": "Read", "Edit": "Edited", "Update": "Edited", "Write": "Added",
+                        "Grep": "Searched", "Search": "Searched", "Glob": "Listed"}.get(name, name)
+                return f"{GREY}•{RESET} {BOLD}{verb}{RESET} {args}"
+            if kind == "out":
+                return GREY + "  └ " + text + RESET
+            if kind == "err":
+                return RED + "■ " + text + RESET
+            return "\r\n".join(("• " if i == 0 else "  ") + line for i, line in enumerate(lines))
+        if kind == "you":
+            return "\r\n".join(GREY + ("❯ " if i == 0 else "  ") + line + RESET for i, line in enumerate(lines))
+        if kind == "tool":
+            m = re.match(r"([A-Za-z]+)\((.*)\)$", text)
+            if m:
+                return f"{GREEN}⏺{RESET} {BOLD}{m.group(1)}{RESET}({m.group(2)})"
+            return f"{GREEN}⏺{RESET} {text}"
+        if kind == "out":
+            return "\r\n".join(GREY + ("  ⎿ " + NBSP if i == 0 else "     ") + line + RESET for i, line in enumerate(lines))
+        if kind == "err":
+            return RED + "  ⎿ " + NBSP + text + RESET
+        return "\r\n".join((WHITE + "⏺" + RESET + " " if i == 0 else "  ") + line for i, line in enumerate(lines))
+
+    def header(self, cols):
+        if CODEX:
+            rows = [f"  {GREY}>_ {RESET}{BOLD}OpenAI Codex{RESET}{GREY} (v{VERSION}){RESET}", f"     {GREY}{self.folder}{RESET}"]
+            if self.o["skip"]:
+                rows.append(f"  {GREY}permissions:{RESET} YOLO mode")
+            rows += ["", "  To get started, describe a task or try one of these commands:", ""]
+            rows += [f"  {BOLD}{c}{RESET}{GREY} - {what}{RESET}" for c, what in (
+                ("/init", "create an AGENTS.md file with instructions for Codex"),
+                ("/status", "show current session configuration"),
+                ("/permissions", "choose what Codex is allowed to do"),
+                ("/model", "choose what model and reasoning effort to use"),
+                ("/review", "review any changes and find issues"))]
+            return "\r\n".join(rows)
+        model = self.o["model"] or "Stand-in model"
+        effort = f" with {self.o['effort']} effort" if self.o["effort"] else ""
+        return "\r\n".join([
+            f"{ORANGE} ▐▛███▛█ {RESET}  {BOLD}Claude Code{RESET} {GREY}v{VERSION}{RESET}",
+            f"{ORANGE}▝▜██████▀{RESET}  {GREY}{model}{effort} · Stand-in plan{RESET}",
+            f"{ORANGE}  ▝▝  ▝▝ {RESET}  {GREY}{self.folder}{RESET}"])
+
+    def editor_rows(self, width, first, rest):
+        """The input text as rows of `width` cells with the cursor drawn in."""
+        rows, row, used = [], [], 0
+        text = self.input + " "
+        for i, ch in enumerate(text):
+            if ch == "\n":
+                if i == self.cur:
+                    row.append((" ", INV))
+                rows.append(row)
+                row, used = [], 0
+                continue
+            w = cells(ch)
+            if used + w > width:
+                rows.append(row)
+                row, used = [], 0
+            if i == self.cur:
+                row.append((ch, INV))
+            elif i < len(self.input):
+                row.append((ch, ""))
+            used += w
+        rows.append(row)
+        return [[(first if n == 0 else rest, "")] + r for n, r in enumerate(rows)]
+
+    def dynamic(self, rows, cols):
+        now = time.monotonic()
+        d = [[]]
+        a = self.asking
+        working = self.turn_open and not a
+        if self.dialog:
+            d += self.dialog_rows()
+        elif CODEX:
+            if working:
+                d.append([("• ", GREY), ("Working", BOLD), (f" ({elapsed(now - self.turn_started)} • esc to interrupt)", GREY)])
+            if self.queue:
+                d.append([("• ", GREY), ("Messages to be submitted after next tool call", ""),
+                          (" (press esc to interrupt and send immediately)", GREY)])
+            for q in self.queue:
+                d.append([("  ↳ " + " ".join(q.split()), GREY)])
+            if a:
+                d.append([("• ", ""), (a["q"], BOLD)])
+                for n, opt in enumerate(a["options"] + [self.input or "Type something else"]):
+                    d.append([("› " if n == a["sel"] else "  ", BLUE), (f"{n + 1}. {opt}", BLUE if n == a["sel"] else "")])
+                d.append([])
+            if len(d) > 1:
+                d.append([])
+            room = max(1, rows - len(d) - 4)
+            if self.input or not a:
+                ed = self.editor_rows(cols - 2, "› ", "  ")[-room:]
+                if not self.input and not a:
+                    ed = [[("› ", ""), ("A", INV), ("sk Codex to do anything", GREY)]]
+                for r in ed:
+                    d.append(("shade", r))
+            d.append([])
+            effort = self.o["effort"] or "medium"
+            title = f" · {self.title_base}" if self.title_base else ""
+            d.append([(f"  {self.o['model'] or 'stand-in'} {effort} · {self.cwd}{title}", GREY)])
+            d.append([("  Ctrl-C again to quit" if self.ctrl_c_at else "  ← for agents · ? for shortcuts", GREY)])
+        else:
+            for q in self.queue:
+                d.append([("❯ " + " ".join(q.split()), GREY)])
+                d.append([("  ⎿ " + NBSP + "Queued · ctrl+enter to send now", GREY)])
+            if self.queue:
+                d.append([])
+            if working:
+                d.append([(SPIN[int(now * 8) % len(SPIN)] + " " + self.step + "… ", ORANGE),
+                          (f"({elapsed(now - self.turn_started)} · ↓ 120 tokens)", GREY)])
+                d.append([])
+            if a:
+                d.append([("─" * cols, BLUE)])
+                d.append([(" ☐ " + a["header"], BLUE)])
+                d.append([])
+                d.append([(a["q"], BOLD)])
+                d.append([])
+                for n, opt in enumerate(a["options"] + [self.input or "Type something."]):
+                    sel = n == a["sel"]
+                    cursor = [(" ", INV)] if n == len(a["options"]) and sel and self.input else []
+                    d.append([("❯ " if sel else "  ", BLUE), (f"{n + 1}. {opt}", BLUE if sel else "")] + cursor)
+                d.append([])
+                d.append([("Enter to select · ↑/↓ to navigate · Esc to cancel", GREY)])
+            else:
+                room = max(1, rows - len(d) - 5)
+                ed = self.editor_rows(cols - 2, "❯" + NBSP, "  ")[-room:]
+                if not self.input:
+                    hint = ("Press up to edit queued messages" if self.queue
+                            else 'Try "edit <filepath> to…"' if not self.prompts_seen and not self.resumed else "")
+                    ed = [[("❯" + NBSP, ""), (hint[:1] or " ", INV), (hint[1:], GREY)]]
+                d.append([("─" * cols, GREY)])
+                d += ed
+                d.append([("─" * cols, GREY)])
+            if self.status_text:
+                d.append([("  " + self.status_text, GREY)])
+            if self.ctrl_c_at:
+                d.append([("  Press Ctrl-C again to exit", GREY)])
+            else:
+                left = "  ⏵⏵ bypass permissions on (shift+tab to cycle)" if self.o["skip"] else "  ? for shortcuts"
+                d.append([(left, PINK if self.o["skip"] else GREY)] + ([(" · esc to interrupt", GREY)] if working else []))
+        out = []
+        for r in d[-rows:]:
+            if isinstance(r, tuple):
+                out.append(pad(r[1], cols, SHADE))
+            else:
+                out.append(fit(r, cols)[0])
+        return out
+
+    def draw(self):
+        rows, cols = self.size()
+        out = ["\x1b[?2026h"]
+        if self.full:
+            out.append("\x1b[H\x1b[2J\x1b[3J")
+            self.printed = max(0, len(self.entries) - 2000)
+            self.full = False
+        elif self.dyn_rows:
+            out.append("\r" + (f"\x1b[{self.dyn_rows - 1}A" if self.dyn_rows > 1 else "") + "\x1b[J")
+        for e in self.entries[self.printed:]:
+            out.append(self.render(e, cols) + "\r\n")
+        self.printed = len(self.entries)
+        dyn = self.dynamic(rows, cols)
+        out.append("\r\n".join(dyn))
+        self.dyn_rows = len(dyn)
+        out.append("\x1b[?2026l")
+        self.write("".join(out))
+        self.dirty = False
+
+    # ---- lifetime ----
+    def status_ready(self):
+        """The terminal answered the 7501 query: from now on claude reports."""
+        self.status_ok = True
+        self.refresh_title()
+        if self.dialog:
+            self.report("blocked", kind="permission", msg="trust this folder")
+            return
+        # A new session with a first prompt reports `working` first.
+        if not (self.first_prompt and not self.resumed):
+            self.report("idle")
+        self.begin()
+
+    def begin(self):
+        """Startup is over: the script starts, then the first-prompt argument is submitted."""
+        if self.begun or self.dialog:
+            return
+        self.begun = True
+        self.gen = self.director()
+        self.run_director()
+        if self.first_prompt:
+            self.submit(self.first_prompt)
+
+    def start(self):
+        self.saved = termios.tcgetattr(0)
+        tty.setraw(0)
+        self.write("\x1b[?2004h\x1b[?25l" + ("" if CODEX else "\x1b[>5u"))
+        r, w = os.pipe()
+        os.set_blocking(w, False)
+        self.wake_r = r
+        signal.set_wakeup_fd(w)
+        signal.signal(signal.SIGWINCH, lambda *_: setattr(self, "winch", True))
+        for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            signal.signal(sig, lambda n, _: setattr(self, "signal", n))
+        if CODEX:
+            self.refresh_title()
+            if self.script.get("update"):
+                self.dialog = {"kind": "update", "sel": 0}
+            else:
+                self.codex_started()
+        else:
+            self.refresh_title()
+            if self.script.get("trust"):
+                self.dialog = {"kind": "trust", "sel": 0}
+            else:
+                self.session_started()
+            self.write("\x1b]7501;?\x07")
+            # Without an answer Claude still works, but reports only in its title.
+            self.later(1.0, self.begin)
+        self.draw()
+
+    def session_started(self):
+        """claude's hooks run only in a trusted folder."""
+        self.trusted = True
+        self.hook("SessionStart", source=self.source,
+                  **({"model": self.o["model"] or "standin"} if self.source == "startup"
+                     else {"seconds_since_last_response": 60, "context_tokens": 45000,
+                           "prompt_cache_likely_expired": False, "estimated_cache_write_usd": 0.7}))
+        self.statusline()
+
+    def codex_started(self):
+        """codex reports idle, then works for a moment unless a first prompt starts a turn at once."""
+        if self.first_prompt:
+            if not self.resumed:
+                self.report("idle")
+            self.later(0.1, self.begin)
+            return
+        self.report("idle")
+        self.report("working")
+        self.later(0.5, lambda: self.report("idle"))
+        self.later(0.6, self.begin)
+
+    # ---- start-up dialogs ----
+    DIALOGS = {"trust": ["No, exit", "Yes, I trust this folder"],
+               "update": ["Update now", "Skip", "Skip until next version"]}
+
+    def dialog_rows(self):
+        kind, sel = self.dialog["kind"], self.dialog["sel"]
+        options = self.DIALOGS[kind]
+        if kind == "trust":
+            rows = [[("─" * 60, GREY)], [(" Accessing workspace:", BOLD)], [], [(" " + self.cwd, "")], [],
+                    [(" Quick safety check: Is this a project you created or one you trust?", "")], [],
+                    [(" Claude Code'll be able to read, edit, and execute files here.", "")], []]
+            rows += [[(" ❯ " if n == sel else "   ", BLUE), (o, BLUE if n == sel else "")] for n, o in enumerate(options)]
+            return rows + [[], [(" Enter to confirm · Esc to cancel", GREY)]]
+        rows = [[(f"  Update available · {VERSION} → 0.172.0", BOLD)], [("  Release notes: https://github.com/openai/codex/releases/latest", GREY)], []]
+        rows += [[("› " if n == sel else "  ", BLUE), (f"{n + 1}. {o}", BLUE if n == sel else "")] for n, o in enumerate(options)]
+        return rows + [[], [("  enter continue · esc skip", GREY)]]
+
+    def dialog_key(self, k):
+        d = self.dialog
+        n = len(self.DIALOGS[d["kind"]])
+        if k in ("up", "down"):
+            d["sel"] = (d["sel"] + (1 if k == "down" else -1)) % n
+            return
+        if d["kind"] == "trust":
+            if k == "enter" and d["sel"] == 1:
+                self.dialog = None
+                self.full = True
+                self.report("clear")
+                self.session_started()
+                self.report("idle")
+                return self.begin()
+            if k in ("enter", "esc", "ctrl-c"):
+                self.report("clear")
+                return self.exit("other", code=1)
+            return
+        if k == "enter" and d["sel"] == 0:
+            self.write("\r\n(stand-in) the update would run now\r\n")
+            return self.exit("other")
+        if k in ("enter", "esc"):
+            self.dialog = None
+            self.full = True
+            self.codex_started()
+
+    def loop(self):
+        while True:
+            now = time.monotonic()
+            due = [t for t, _ in self.timers]
+            if self.waiting and self.waiting[1] is not None:
+                due.append(self.waiting[1])
+            if self.esc_at:
+                due.append(self.esc_at)
+            if self.turn_open and not self.asking:
+                due.append(now + 0.25)
+            timeout = max(0.0, min(due) - now) if due else None
+            ready, _, _ = select.select([0, self.wake_r], [], [], timeout)
+            if self.wake_r in ready:
+                os.read(self.wake_r, 512)
+            if 0 in ready:
+                try:
+                    data = os.read(0, 65536)
+                except OSError as e:
+                    if e.errno != errno.EIO:
+                        raise
+                    data = b""  # the terminal closed
+                if not data:
+                    self.signal = signal.SIGHUP
+                self.inbuf += data
+            if self.signal:
+                n = self.signal
+                return self.exit("other", code=128 + n, hung=n == signal.SIGHUP)
+            if self.winch:
+                self.winch = False
+                self.full = True
+                self.dirty = True
+            if self.inbuf:
+                self.parse()
+            now = time.monotonic()
+            for item in [t for t in self.timers if t[0] <= now]:
+                self.timers.remove(item)
+                item[1]()
+            if self.waiting and self.waiting[1] is not None and self.waiting[1] <= time.monotonic():
+                self.run_director()
+            if self.turn_open:
+                self.dirty = True
+                if CODEX:
+                    self.refresh_title()
+            if self.dirty:
+                self.draw()
+
+    def exit(self, reason, code=0, command=False, hung=False):
+        self.hung = hung
+        if CODEX:
+            self.title("")
+            self.report("clear")
+        else:
+            if command:
+                self.report("working")
+            for _ in range(2 if command else 3):
+                self.report("clear")
+            self.title("")
+        if self.dyn_rows:
+            self.write("\r" + (f"\x1b[{self.dyn_rows - 1}A" if self.dyn_rows > 1 else "") + "\x1b[J")
+            self.dyn_rows = 0
+        if CODEX:
+            self.write(f"\r\nTo continue this session, run:\r\n  {BOLD}codex resume {self.sid}{RESET}\r\n"
+                       + (f"Or run codex resume and select {self.title_base}.\r\n" if self.title_base else ""))
+        self.write("\x1b[?25h\x1b[?2004l" + ("" if CODEX else "\x1b[<u"))
+        if hung:
+            try:
+                termios.tcsetattr(0, termios.TCSADRAIN, self.saved)
+            except termios.error:
+                pass  # the terminal is gone; nothing to restore
+        else:
+            termios.tcsetattr(0, termios.TCSADRAIN, self.saved)
+        self.hook("SessionEnd", reason=reason, prompt_id=self.prompt_id)
+        sys.exit(code)
+
+
+def running_sessions():
+    """The stand-in claude sessions running now, in the shape of the real
+    `claude agents --json`: one entry per process given --resume ID or
+    --session-id ID."""
+    found = []
+    out = subprocess.run(["/bin/ps", "-axo", "pid=,args="], capture_output=True, text=True, check=True).stdout
+    for line in out.splitlines():
+        pid, _, args = line.strip().partition(" ")
+        words = args.split()
+        at = next((i for i, w in enumerate(words) if w.endswith("/bin/claude")), None)
+        if at is None or int(pid) == os.getpid():
+            continue
+        rest = words[at + 1:]
+        for flag in ("--session-id", "--resume"):
+            if flag in rest and rest.index(flag) + 1 < len(rest) and not rest[rest.index(flag) + 1].startswith("-"):
+                found.append({"pid": int(pid), "sessionId": rest[rest.index(flag) + 1], "kind": "interactive",
+                              "status": "idle", "cwd": "", "name": "", "startedAt": 0})
+                break
+    return found
+
+
+def main():
+    argv = sys.argv[1:]
+    if any(a in ("--version", "-v", "-V") for a in argv):
+        print(f"codex-cli {VERSION}" if CODEX else f"{VERSION} (Claude Code)")
+        return
+    if any(a in ("--help", "-h") for a in argv):
+        print(__doc__)
+        return
+    o = parse_args(argv)
+    if not CODEX and o["words"][:1] == ["agents"]:
+        print(json.dumps(running_sessions()))
+        return
+    if not CODEX and o["words"][:2] == ["auth", "status"]:
+        print(json.dumps({"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty"}))
+        return
+    if CODEX and o["words"][:2] == ["login", "status"]:
+        print("Logged in using ChatGPT")
+        return
+    if not os.isatty(0):
+        sys.exit(f"{PROG}: the stand-in needs a terminal")
+    app = StandIn(o)
+    app.start()
+    app.loop()
+
+
+if __name__ == "__main__":
+    main()

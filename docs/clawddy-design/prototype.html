@@ -1,0 +1,1070 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clawddy prototype</title>
+<style>
+  /* Every surface takes its hue from the terminal theme. A terminal that needs the person is the brightest thing in the window. */
+  :root {
+    color-scheme: dark;
+    --term: #282c34; --term-off: #23262c; --term-fg: #d7dae0; --term-dim: #8b919c; --term-green: #98c379; --term-peach: #d9a66b; --term-blue: #7fb0f5;
+    --canvas: #1b1e24; --panel: #21242a; --raised: #292c33; --pop: #2f323a;
+    --ink: #e7e9ed; --text2: #a8abb2; --text3: #858890; --text4: #54575e;
+    --hair: rgba(255,255,255,.07); --hair2: rgba(255,255,255,.13);
+    --signal: #e3b458; --problem: #ef7f86;
+    /* Motion: one curve, four durations. Only a screen lighting (which no key causes) is slower. */
+    --out: cubic-bezier(.32,.72,0,1); --big: .2s; --zoom: .16s; --small: .15s; --gone: .1s; --light: .4s;
+    --mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  @property --row { syntax: "<length>"; inherits: false; initial-value: 240px; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--canvas); color: var(--ink); overflow: hidden; user-select: none; cursor: default;
+    font: 13px/18px -apple-system, "SF Pro Text", "Helvetica Neue", sans-serif; -webkit-font-smoothing: antialiased;
+    display: grid; grid-template-rows: 44px 1fr; }
+  body.still *, body.still *::before, body.still *::after { animation: none !important; transition: none !important; }
+  /* Selection and focus never animate: a render that moves them applies its styles with transitions off. */
+  body.snap *:not(.grid):not(.gone):not(.said) { transition: none !important; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+  kbd { font: 11px/16px -apple-system, sans-serif; color: var(--text2); background: rgba(255,255,255,.07); border-radius: 4px; padding: 0 5px; min-width: 18px; display: inline-block; text-align: center; }
+  ::selection { background: rgba(231,233,237,.28); }
+  /* Hover appears at once and fades over 150 ms when the pointer leaves. */
+  :is(.proj, .waiting, .icon, .row, .back, .more, .note, .undo, .help button, .menu button) { transition: background-color var(--small), color var(--small); }
+  :is(.proj, .waiting, .icon, .row, .back, .more, .note, .undo, .help button, .menu button):is(:hover, :active) { transition-duration: 0s; }
+
+  /* Top bar: projects, what waits on the person, and the commands used all day. */
+  .bar { display: flex; align-items: center; gap: 2px; padding: 0 12px 0 84px; position: relative; }
+  .bar.edge { box-shadow: 0 1px 0 var(--hair); }
+  .lights { position: absolute; left: 14px; top: 16px; display: flex; gap: 8px; }
+  .lights i { width: 12px; height: 12px; border-radius: 50%; background: var(--text4); }
+  .proj { padding: 4px 10px; border-radius: 8px; color: var(--text3); display: flex; align-items: baseline; gap: 7px; }
+  .proj:hover { color: var(--text2); background: rgba(255,255,255,.04); } .proj:active { background: rgba(255,255,255,.08); }
+  .proj.on { color: var(--ink); font-weight: 600; }
+  .proj b { font-weight: 500; font-size: 11px; color: var(--text2); font-variant-numeric: tabular-nums; }
+  .said { position: absolute; left: 50%; transform: translateX(-50%); color: var(--text2); opacity: 0; pointer-events: none; white-space: nowrap; display: flex; gap: 10px; align-items: center;
+    transition: opacity var(--big) var(--out); }
+  .said.on { opacity: 1; transition-duration: var(--small); } .said.on:has(button) { pointer-events: auto; }
+  .barright { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .waiting { padding: 4px 10px; border-radius: 8px; color: var(--signal); display: flex; gap: 7px; align-items: center; font-variant-numeric: tabular-nums; }
+  .waiting::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--signal); }
+  .waiting.none { color: var(--text3); } .waiting.none::before { background: var(--text4); }
+  .waiting:hover, .icon:hover { background: rgba(255,255,255,.05); } .waiting:active, .icon:active { background: rgba(255,255,255,.1); }
+  .icon { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--text2); }
+  .icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; }
+  .undo { color: var(--ink); padding: 3px 8px; border-radius: 8px; background: rgba(255,255,255,.07); display: flex; gap: 8px; align-items: center; }
+  .undo:hover { background: rgba(255,255,255,.1); } .undo:active { background: rgba(255,255,255,.13); }
+
+  /* Home and inside share the stage. While the terminal grows or shrinks both are drawn; only the one the state names takes the pointer. */
+  .stage { position: relative; min-height: 0; }
+  body[data-mode="home"]:not(.moving) .inside, body[data-mode="inside"]:not(.moving) :is(.grid, .line) { display: none; }
+  body[data-mode="home"] .inside, body[data-mode="inside"] :is(.grid, .line) { pointer-events: none; }
+  .mark { width: 14px; height: 14px; color: var(--text3); flex: none; }
+  .mark svg { width: 14px; height: 14px; display: block; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .working > .mark { color: var(--text2); } .working > .mark svg { animation: spin 1.2s linear infinite; } .yours > .mark { color: var(--signal); } .failed > .mark { color: var(--problem); }
+  .asks > .mark svg, .failed > .mark svg { fill: currentColor; stroke: none; }
+
+  /* Home: every agent of the project, each in a fixed place. Columns follow the window's width; row height the window's height and the chosen density. */
+  .grid { position: absolute; inset: 0 0 62px; overflow: auto; overscroll-behavior: contain; padding: 4px 24px 14px; display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); grid-auto-rows: var(--row); align-content: start; transition: --row var(--small) var(--out); }
+  .grid:has(.empty) { align-content: center; }
+  .grid.below { -webkit-mask: linear-gradient(#000 calc(100% - 16px), transparent); mask: linear-gradient(#000 calc(100% - 16px), transparent); }
+  .edgepill { position: absolute; left: 50%; transform: translateX(-50%); z-index: 3; display: none; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 999px; background: var(--pop); color: var(--signal); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums;
+    box-shadow: 0 4px 14px rgba(0,0,0,.45), inset 0 0 0 1px rgba(227,180,88,.28); }
+  .edgepill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--signal); }
+  .edgepill.on { display: flex; }
+  .edgepill:hover { background: #363943; } .edgepill:active { background: #3d404b; }
+  .edgepill.top { top: 8px; } .edgepill.bot { bottom: 72px; }
+  body[data-mode="inside"] .edgepill, body.nothing .edgepill, body.moving .edgepill { display: none; }
+  .tile { position: relative; isolation: isolate; overflow: hidden; background: var(--panel); border-radius: 12px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.05); min-width: 0; scroll-margin: 4px 0 14px;
+    display: grid; grid-template-columns: 14px 1fr auto; grid-template-rows: auto auto minmax(30px, 1fr); column-gap: 10px; padding: 11px 12px 12px;
+    grid-template-areas: "mark title age" "say say say" "tail tail tail"; }
+  /* The top line of a question or a problem, following the corner. */
+  .tile::before { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 2px 0 var(--edge, var(--signal)); opacity: 0; pointer-events: none; transition: opacity var(--big) var(--out); }
+  .tile.asks::before, .tile.failed::before { opacity: 1; }
+  /* Hover lifts the tile one surface step; pressing lifts it to the raised surface. */
+  .tile::after { content: ""; position: absolute; inset: 0; z-index: -1; border-radius: inherit; background: #fff; opacity: 0; pointer-events: none; transition: opacity var(--small); }
+  .tile:hover::after { opacity: .016; transition: none; } .tile:active::after { opacity: .036; transition: none; }
+  .tile .mark { grid-area: mark; margin-top: 2px; transition: opacity var(--gone) var(--out); }
+  .tile .num { position: absolute; left: 10px; top: 11px; width: 18px; height: 18px; border-radius: 4px; background: var(--pop); box-shadow: inset 0 0 0 1px var(--hair2);
+    color: var(--ink); font: 600 11px/18px -apple-system, sans-serif; text-align: center; opacity: 0; pointer-events: none; transition: opacity var(--gone) var(--out); }
+  body.nums .tile[data-num]:not(.out) .num { opacity: 1; }
+  body.nums .tile[data-num]:not(.out) .mark { opacity: 0; }
+  .title { grid-area: title; font-weight: 600; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-radius: 4px; outline: none; min-width: 0; }
+  .yours > .title { color: var(--ink); }
+  .title[contenteditable="true"] { color: var(--ink); background: rgba(255,255,255,.07); box-shadow: 0 0 0 4px rgba(255,255,255,.07); text-overflow: clip; user-select: text; cursor: text; }
+  .age { grid-area: age; font-size: 11px; color: var(--text3); font-variant-numeric: tabular-nums; }
+  .tile.yours .age { color: var(--text2); }
+  .say { grid-area: say; margin-top: 5px; color: var(--text3); display: -webkit-box; -webkit-line-clamp: var(--say, 2); -webkit-box-orient: vertical; overflow: hidden; }
+  .tile.finished .say, .tile.paused .say { color: var(--text2); }
+  .tile.yours .say { color: var(--ink); -webkit-line-clamp: var(--say4, 4); }
+  .say .sent { color: var(--text3); }
+  /* The screen. Off while the agent does not need the person, on when it does. Same font and line spacing as the terminal, at 11 px. */
+  .tail { grid-area: tail; margin-top: 9px; border-radius: 8px; background: var(--term-off); overflow: hidden; position: relative; font: 11px/17px var(--mono); color: var(--term-fg);
+    transition: background-color var(--big) var(--out); }
+  .tail-in { position: absolute; inset: 0; overflow: hidden; -webkit-mask: linear-gradient(transparent 0 var(--f1, 6px), #000 var(--f2, 24px)); mask: linear-gradient(transparent 0 var(--f1, 6px), #000 var(--f2, 24px)); }
+  .tail.nofade .tail-in { -webkit-mask: none; mask: none; }
+  .tail-in div { position: absolute; left: 10px; right: 10px; bottom: 7px; }
+  .tail p { margin: 0; min-height: 17px; white-space: pre; overflow: hidden; text-overflow: ellipsis; opacity: .2; transition: opacity var(--big) var(--out); }
+  .tile.working .tail p { opacity: .3; }
+  .tile.yours .tail { background: var(--term); transition-duration: var(--light); }
+  .tile.yours .tail p { opacity: .62; transition-duration: var(--light); } .tile.yours .tail p:nth-last-child(-n+3) { opacity: 1; }
+  .tile.sel { background: var(--raised); outline: 1px solid rgba(231,233,237,.30); outline-offset: 2px; }
+  body[data-zone="tiles"] .tile.sel.cursor { outline: 1.5px solid rgba(231,233,237,.55); outline-offset: 2px; }
+  .tile.sel:not(.yours) .tail p { opacity: .5; }
+  .tile.sel.yours { background: var(--panel); }
+  body[data-zone="line"].many .tile:not(.sel) { opacity: .55; }
+  .tile.lift > :is(.mark, .title, .age, .say, .tail, .num) { visibility: hidden; }
+  .tile.lift::before { opacity: 0 !important; transition: none !important; }
+  /* A settled place covers its tile in the same rectangle; it fades in over the tile and out again on undo. */
+  .gone { position: absolute; inset: 0; z-index: 1; border-radius: inherit; background: var(--canvas); box-shadow: inset 0 0 0 1px rgba(255,255,255,.05);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; color: var(--text3); padding: 14px; opacity: 0; pointer-events: none; transition: opacity var(--small) var(--out); }
+  .gone .glab { font-size: 12px; line-height: 16px; color: var(--text3); }
+  .gone .gname { font-size: 13px; line-height: 18px; color: var(--text2); font-weight: 500; margin-top: 4px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gone .undo { margin-top: 12px; }
+  .tile.out .gone { opacity: 1; pointer-events: auto; }
+  .empty { grid-column: 1 / -1; text-align: center; color: var(--text3); font-size: 15px; }
+
+  /* Inside an agent: its real terminal, with the others listed beside it. Rows keep one height and one order. */
+  .inside { position: absolute; inset: 0; z-index: 2; display: grid; grid-template-columns: 252px 1fr; }
+  .list { overflow: auto; overscroll-behavior: contain; padding: 0 8px 14px 12px; }
+  .back { position: relative; height: 42px; width: 100%; color: var(--text3); padding: 0 8px; border-radius: 8px; display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .back::after { content: ""; position: absolute; left: 8px; right: 8px; bottom: -3px; height: 1px; background: rgba(255,255,255,.05); pointer-events: none; }
+  .back-l { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .back-l span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .back .chev { width: 11px; height: 11px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .back:hover { color: var(--text2); } .back:active { background: rgba(255,255,255,.08); }
+  .row { display: grid; grid-template-columns: 14px 1fr; column-gap: 10px; padding: 6px 8px 7px; border-radius: 8px; }
+  .row:hover { background: rgba(255,255,255,.04); } .row:active { background: rgba(255,255,255,.08); }
+  .row .mark { margin-top: 2px; }
+  .row .title { grid-area: auto; font-weight: 500; }
+  .row.yours .title, .row.current .title { color: var(--ink); font-weight: 600; }
+  .row .say { grid-area: auto; grid-column: 2; margin: 0; display: block; white-space: nowrap; text-overflow: ellipsis; font-size: 12px; line-height: 17px; color: var(--text3); }
+  .row.current:not(.yours) .say { color: var(--text2); }
+  .row.yours .say { color: var(--ink); }
+  .row.current { background: var(--raised); }
+  .pane { min-width: 0; padding: 0 14px 14px 4px; display: grid; grid-template-rows: 42px 1fr; }
+  .pane header { display: flex; align-items: center; gap: 10px; padding: 0 8px 0 10px; min-width: 0; }
+  .pane .title { flex: none; max-width: 36vw; color: var(--ink); }
+  .pane .say { margin: 0 4px; display: block; white-space: nowrap; text-overflow: ellipsis; color: var(--text2); flex: 1; min-width: 0; }
+  @media (max-width: 1011px) { .pane header.hasnews .say { display: none; } }
+  .say i { color: var(--text3); } .tile.yours .say i, .row.yours .say i { color: var(--ink); }
+  .note { flex: none; max-width: 46%; color: var(--text3); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; display: flex; gap: 12px; align-items: center; }
+  .note.news { color: var(--ink); background: rgba(255,255,255,.06); box-shadow: inset 0 0 0 1px var(--news-rim, rgba(227,180,88,.28)); border-radius: 8px; padding: 3px 10px; gap: 8px; }
+  .note.news:hover { background: rgba(255,255,255,.10); } .note.news:active { background: rgba(255,255,255,.14); }
+  .note.news .mark { color: var(--signal); } .note.news.failed .mark { color: var(--problem); } .note.news span { overflow: hidden; text-overflow: ellipsis; color: var(--text2); } .note.news b { color: var(--ink); font-weight: 500; }
+  .scrclip { position: relative; width: 100%; height: 100%; border-radius: 10px; overflow: hidden; background: var(--term); }
+  .screen { width: 100%; height: 100%; background: var(--term); position: relative; overflow: hidden; transform-origin: 0 0; }
+  .snapcover { position: absolute; left: 0; top: 0; z-index: 3; pointer-events: none; transform-origin: 0 0; }
+  .snapcover .tile { width: 100%; height: 100%; outline: none !important; margin: 0; }
+  .term { position: absolute; left: 0; right: 0; bottom: 0; padding: 16px 22px 12px; font: 13px/20px var(--mono); color: var(--term-fg); white-space: pre-wrap; user-select: text; cursor: text; }
+  .term p { margin: 0; min-height: 20px; }
+  .term .dim { color: var(--term-dim); } .term .you { background: rgba(255,255,255,.05); margin: 0 -6px; padding: 0 6px; }
+  .term .tool::before { content: "⏺ "; color: var(--term-green); } .term .out { color: var(--term-dim); } .term .out::before { content: "  ⎿  "; }
+  .term .rep::before { content: "⏺ "; } .term .spin { color: var(--term-peach); } .term .q { color: var(--term-blue); }
+  .term .box { margin-top: 10px; border: 1px solid rgba(215,218,224,.3); border-radius: 6px; padding: 5px 10px; min-height: 32px; }
+  .term .box::before { content: "> "; color: var(--term-dim); }
+  .term .cur { display: inline-block; width: 8px; height: 16px; background: var(--term-fg); vertical-align: -3px; animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .term .foot { color: var(--term-dim); padding: 3px 2px 0; display: flex; justify-content: space-between; }
+
+  /* The line that starts agents. A raised slab with its controls inside it; it grows upward over the grid's bottom margin. */
+  .line { position: fixed; left: 50%; transform: translateX(-50%); width: min(calc(100% - 48px), 960px); bottom: 18px; z-index: 1; background: var(--raised); border-radius: 12px;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 0 0 1px var(--hair);
+    display: grid; grid-template-columns: auto 1fr auto; align-items: baseline; gap: 10px; padding: 9px 10px; }
+  body[data-zone="line"] .line { box-shadow: inset 0 1px 0 rgba(255,255,255,.10), 0 0 0 1px rgba(231,233,237,.32), 0 4px 24px rgba(0,0,0,.28); }
+  .chip { color: var(--text2); font-weight: 500; background: rgba(255,255,255,.06); border-radius: 6px; padding: 3px 9px; white-space: nowrap; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+  .chip.many { color: var(--ink); background: rgba(255,255,255,.12); }
+  textarea { color: var(--ink); caret-color: var(--ink); background: none; border: 0; outline: none; user-select: text; cursor: text; transition: height var(--small) var(--out); }
+  textarea { font: 14px/22px -apple-system, "SF Pro Text", sans-serif; resize: none; width: 100%; height: 24px; max-height: 134px; padding: 1px 0; }
+  textarea::placeholder { color: var(--text3); }
+  .ends { display: flex; gap: 12px; color: var(--text3); align-items: center; align-self: end; height: 26px; white-space: nowrap; }
+  .more { color: var(--text3); padding: 3px 8px; border-radius: 8px; }
+  .more:hover { color: var(--text2); background: rgba(255,255,255,.05); } .more:active { background: rgba(255,255,255,.1); } .more:empty { display: none; }
+  .send { width: 26px; height: 26px; border-radius: 50%; background: var(--ink); display: none; place-items: center; transition: transform var(--gone); }
+  .send:active { transform: scale(.92); transition-duration: 0s; } .send svg { width: 13px; height: 13px; fill: none; stroke: var(--canvas); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .line.has .send { display: grid; } .line.has .ends .hint, .line.has .more { display: none; }
+  .ends .now { display: none; gap: 6px; align-items: center; } .line.has.many .ends .now { display: flex; }
+
+  /* A tile or row picked up to move it: the raised surface, the selection ring and a soft shadow. It is floating, so it may cast one. */
+  .tile.lifted, .row.lifted { position: relative; z-index: 4; pointer-events: none; background: var(--raised);
+    box-shadow: 0 14px 34px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.3), inset 0 0 0 1px rgba(255,255,255,.05); outline: 1px solid rgba(231,233,237,.30); outline-offset: 2px; }
+  .tile.lifted.trail { z-index: 3; transition: transform var(--small) var(--out); }
+  /* First launch: nothing to show but the way in. */
+  .first { grid-column: 1 / -1; width: min(440px, 90%); min-height: 190px; margin: 0 auto; padding: 28px 32px; border: 1px dashed rgba(255,255,255,.09); border-radius: 16px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; color: var(--text3); font-size: 15px; line-height: 22px; text-align: center; }
+  .first button { color: var(--canvas); font-size: 13px; font-weight: 600; padding: 7px 14px; border-radius: 8px; background: var(--ink); display: inline-flex; gap: 8px; align-items: center; transition: background-color var(--small); }
+  .first button kbd { background: rgba(27,30,36,.14); color: var(--canvas); font-weight: 500; }
+  .first button:hover { background: #fff; transition-duration: 0s; } .first button:active { background: #d5d8de; transition-duration: 0s; }
+  .grid:has(.first) { align-content: center; } body.nothing .line, body.nothing #waiting, body.nothing #bfind { display: none; }
+  .drop { position: fixed; inset: 0; z-index: 50; display: none; place-items: center; pointer-events: none; border-radius: 10px; box-shadow: inset 0 0 0 2px rgba(231,233,237,.6); }
+  .drop.on { display: grid; } .drop span { background: var(--pop); color: var(--ink); padding: 8px 14px; border-radius: 12px; box-shadow: 0 0 0 1px var(--hair2); font-size: 15px; }
+
+  /* Floating things are opaque surfaces with a shadow. */
+  .veil { position: absolute; inset: 0; background: rgba(20,22,27,.55); display: none; z-index: 5; }
+  .pal { position: absolute; left: 0; right: 0; margin: 0 auto; top: 13%; width: min(640px, 88vw); transform-origin: 50% 0; z-index: 20; display: none; border-radius: 12px; overflow: hidden;
+    background: var(--pop);
+    box-shadow: 0 30px 90px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.08), 0 0 0 1px rgba(255,255,255,.14); }
+  .veil.on, .pal.on, .help.on, .menu.on { display: block; }
+  .palrow { display: flex; align-items: baseline; gap: 10px; padding: 14px 16px 12px; }
+  .pal textarea { flex: 1; font: 17px/24px -apple-system, sans-serif; min-width: 0; height: 24px; max-height: 144px; padding: 0; }
+  .pal .list2 { max-height: 46vh; overflow: auto; overscroll-behavior: contain; border-top: 1px solid var(--hair); padding: 6px; }
+  .pal h4 { margin: 8px 12px 4px; font-size: 11px; font-weight: 600; color: var(--text2); }
+  .hit { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; align-items: center; padding: 7px 12px; border-radius: 8px; color: var(--text2); }
+  .hit.on { background: rgba(255,255,255,.08); color: var(--ink); }
+  .hit small { display: block; color: var(--text2); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hit > span { min-width: 0; } .hit mark { background: none; color: var(--ink); font-weight: 600; } .hit .r { color: var(--text2); font-size: 12px; }
+  .pal .plain { padding: 12px 18px 14px; color: var(--text2); display: flex; gap: 18px; }
+  .pal .plain span { display: flex; gap: 7px; align-items: center; }
+  .help { position: absolute; right: 12px; top: 2px; z-index: 30; width: 370px; max-height: calc(100% - 20px); overflow: auto; overscroll-behavior: contain; outline: none; background: var(--pop); border-radius: 12px; padding: 12px 15px; display: none;
+    box-shadow: 0 24px 70px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.07), 0 0 0 1px rgba(255,255,255,.14); color: var(--text2); }
+  .help h4 { margin: 0 0 5px; color: var(--ink); font-size: 13px; } .help h4:not(:first-child) { margin-top: 11px; }
+  .help dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; align-items: center; } .help dd { margin: 0; }
+  .help button { display: block; width: 100%; text-align: left; padding: 6px 10px; margin-top: 4px; border-radius: 8px; background: rgba(255,255,255,.06); color: var(--ink); }
+  .help button:hover { background: rgba(255,255,255,.1); } .help button:active { background: rgba(255,255,255,.14); }
+  .help p { margin: 8px 0 0; }
+  .menu { position: fixed; z-index: 40; min-width: 200px; padding: 5px; border-radius: 12px; background: var(--pop); display: none;
+    box-shadow: 0 16px 40px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.07), 0 0 0 1px rgba(255,255,255,.14); }
+  .menu button { display: flex; justify-content: space-between; align-items: center; gap: 16px; width: 100%; padding: 4px 10px; border-radius: 8px; color: var(--ink); }
+  .menu button:hover { background: rgba(255,255,255,.08); } .menu button:active { background: rgba(255,255,255,.12); }
+  .menu button:disabled { color: var(--text4); background: none; } .menu kbd { background: none; color: var(--text3); }
+  /* Reduce Motion: nothing translates, scales or resizes; every change is a 100 ms fade. */
+  @media (prefers-reduced-motion: reduce) {
+    :root { --big: .1s; --zoom: .1s; --small: .1s; --light: .1s; }
+    .grid, textarea, .tile.lifted.trail { transition: none; }
+    .working > .mark svg { animation: none; }
+    .send:active { transform: none; opacity: .8; }
+  }
+</style>
+</head>
+<body data-mode="home" data-zone="tiles">
+  <header class="bar" id="bar">
+    <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+    <nav id="projects" style="display:flex;gap:2px" aria-label="Projects"></nav>
+    <div class="said" id="said" role="status"></div>
+    <div class="barright">
+      <button class="waiting" id="waiting" title="Go to the next agent waiting on you (⌥J)"></button>
+      <button class="icon" id="bfind" title="Find an agent or run a command (⌥P)" aria-label="Find"><svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5L14 14"/></svg></button>
+      <button class="icon" id="bnew" title="New agent (⌥N)" aria-label="New agent"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></button>
+      <button class="icon" id="bhelp" title="Keys (⌥?)" aria-label="Keys"><svg viewBox="0 0 16 16"><path d="M6 6.2a2 2 0 113 1.7c-.7.4-1 .8-1 1.6M8 12v.2"/></svg></button>
+    </div>
+  </header>
+  <main class="stage" id="stage">
+    <div class="grid" id="grid"></div>
+    <button class="edgepill top" id="edgetop"></button>
+    <button class="edgepill bot" id="edgebot"></button>
+    <div class="inside" id="inside">
+      <aside class="list" id="list"><button class="back" id="back"><span class="back-l"><svg class="chev" viewBox="0 0 12 12"><path d="M7.5 2.2L3.7 6l3.8 3.8"/></svg><span id="backname"></span></span><kbd>⌥⎋</kbd></button><div id="rows"></div></aside>
+      <section class="pane" id="pane">
+        <header id="head"><span class="mark"></span><span class="title"></span><span class="say"></span><button class="note" id="note"></button></header>
+        <div class="scrclip" id="scrclip"><div class="screen" id="screen"><div class="term" id="term"></div></div></div>
+      </section>
+    </div>
+    <div class="veil" id="veil"></div>
+    <div class="pal" id="pal" role="dialog"><div class="palrow"><span class="chip" id="palchip"></span><textarea id="palin" rows="1" autocomplete="off" spellcheck="false"></textarea></div><div class="list2" id="pallist"></div></div>
+    <div class="help" id="help"></div>
+  </main>
+  <footer class="line" id="line">
+    <span class="chip" id="chip"></span>
+    <textarea id="box" rows="1" spellcheck="false"></textarea>
+    <div class="ends"><button class="more" id="more"></button><span class="hint"><kbd>⌥N</kbd></span><span class="now"><kbd>⌥↩</kbd>interrupt them and send</span><button class="send" id="send"><svg viewBox="0 0 14 14"><path d="M7 11.5v-9M3 6.2l4-4 4 4"/></svg></button></div>
+  </footer>
+  <div class="menu" id="menu" role="menu"></div>
+  <div class="drop" id="drop"><span></span></div>
+  <input type="file" id="folder" webkitdirectory hidden>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const MARK = {
+  working: '<svg viewBox="0 0 14 14"><path d="M7 2a5 5 0 105 5"/></svg>',
+  finished: '<svg viewBox="0 0 14 14"><path d="M2.8 7.4l2.8 2.8 5.6-6"/></svg>',
+  asks: '<svg viewBox="0 0 14 14"><circle cx="7" cy="7" r="4.2"/></svg>',
+  failed: '<svg viewBox="0 0 14 14"><path d="M7 1.8l5.6 9.8H1.4z"/></svg>',
+  paused: '<svg viewBox="0 0 14 14"><path d="M5 3.5v7M9 3.5v7"/></svg>'
+};
+const T0 = Date.now(), now = () => (Date.now() - T0) / 1000;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmt = s => s < 45 ? "now" : s < 3600 ? Math.round(s / 60) + "m" : s < 86400 ? Math.round(s / 3600) + "h" : Math.round(s / 86400) + "d";
+const DEFAULT_CLI = "Claude Code";
+
+// ---- the agents: one stored record each. The terminal is a view of the record's conversation. ----
+const A = []; let seq = 0;
+const SWIFT = [["Grep(\"{w}\", Sources/)", "{a} files"], ["Read(Sources/{W}View.swift)", "{b} lines"], ["Read(Sources/{W}Store.swift)", "{c} lines"], ["Edit(Sources/{W}View.swift)", "+{p} −{m}"], ["Bash(xcodebuild test -only-testing:{W}Tests)", "{t} passed"], ["Read(Tests/{W}Tests.swift)", "{a}8 lines"], ["Bash(swiftlint lint --strict)", "no violations"]];
+const PY = [["Grep(\"{w}\", src/)", "{a} files"], ["Read(src/{w}.py)", "{b} lines"], ["Bash(python -m src.{w} --check)", "{c}{a} items checked"], ["Read(build/{w}.log)", "{t} lines"], ["Edit(src/{w}.py)", "+{p} −{m}"], ["Bash(python src/report.py {w})", "{t} rows written"], ["Bash(pytest tests -q)", "{a}1 passed in {m}.{a}s"]];
+const BEFORE = [["what does this file do, in one sentence", "It reads the settings, builds the list and draws it. Nothing is saved to disk."], ["run the tests and tell me what breaks", "Two tests break, both when the clock moves for summer time."], ["fix just those two, nothing else", "Fixed both. Every other test still passes."], ["what takes the most time on start", "Most of the start goes to parsing the same file twice."], ["note down what you changed", "Added two lines to the changelog, each with the reason for it."]];
+function tools(a, turn) {
+  const pool = a.project === "tidepool" ? SWIFT : PY, w = a.title.split(" ")[0].toLowerCase(), n = a.id * 7 + turn * 3;
+  const fill = s => s.replace(/\{w\}/g, w).replace(/\{W\}/g, w[0].toUpperCase() + w.slice(1)).replace(/\{a\}/g, 2 + n % 7).replace("{b}", 120 + n * 13 % 400).replace("{c}", 60 + n * 5 % 200).replace("{p}", 4 + n % 40).replace("{m}", 1 + n % 9).replace("{t}", 180 + n * 3 % 150);
+  return Array.from({ length: 3 + n % 3 }, (_, i) => pool[(n + i * 2) % pool.length].map(fill));
+}
+function agent(project, title, o) {
+  const a = Object.assign({ id: ++seq, project, title, state: "finished", unread: false, say: "", step: "", sent: "", lines: [], input: "", queue: [], cli: DEFAULT_CLI,
+    since: -(o.ago || 0), eta: o.eta ? now() + o.eta : 0, started: -(o.run || 0), plus: 0, minus: 0, ctx: 20 + seq * 13 % 60, settled: false, options: null }, o);
+  const L = a.lines = [["dim", "~/projects/" + project + "   " + (a.branch || "main")], ["dim", ""]];
+  const turn = (asked, said, i) => { L.push(["you", "> " + asked], ["dim", ""]); for (const x of tools(a, i)) L.push(["tool", x[0]], ["out", x[1]]); if (said) L.push(["dim", ""], [a.options && i === 2 ? "q" : "rep", said], ["dim", ""]); };
+  if (!o.fresh) { for (let i = 0; i < 2; i++) { const b = BEFORE[(a.id + i * 2) % BEFORE.length]; turn(b[0], b[1], i); } turn(a.brief || title, a.state === "working" || a.app ? "" : a.say, 2); }
+  A.push(a); return a;
+}
+const yours = a => !a.settled && (a.state === "asks" || a.state === "failed" || (a.state === "finished" && a.unread));
+const living = p => A.filter(a => a.project === p && !a.settled);
+const PROJECTS = ["tidepool", "field_notes", "paper-kite"];
+agent("tidepool", "Tide chart blank at sunrise", { unread: true, ago: 240, plus: 38, minus: 9, branch: "fix/tide-chart", brief: "the tide chart goes blank at sunrise when the day rolls over, find out why and fix it", say: "Fixed it: the chart asked for the next day's tides one hour early. Added a test for it; 186 pass." });
+agent("tidepool", "Wind barbs drawn in knots", { state: "working", run: 130, eta: 22, branch: "wind-units", brief: "wind barbs ignore the units setting, make them follow knots or m/s", step: "Testing the unit switch", after: "Wind barbs now follow the units setting, in knots, m/s or Beaufort. 7 new tests all pass.", gain: [47, 11] });
+agent("tidepool", "Anchor alarm on lock screen", { state: "asks", ago: 70, brief: "the anchor alarm is hard to hear on a boat", options: ["Siren, even with the phone silent", "Vibrate only when it is silent"], say: "The alarm can sound the siren or only vibrate when the phone is silent. Siren even then, or vibrate only when it is silent?" });
+agent("tidepool", "Offline chart packs per region", { state: "working", run: 840, eta: 95, brief: "split the offline chart download into packs so sailors fetch only their coast", step: "Splitting the chart tile index", after: "Charts now come as 14 regional packs. One stretch of coast takes 38 MB instead of the whole 610 MB download set.", gain: [29, 17] });
+agent("tidepool", "Moon phase icon set", { ago: 7200, brief: "check the moon phase icons, which are wrong down south", say: "Checked all 8 moon phase icons. 2 are mirrored for southern waters; I changed nothing." });
+agent("tidepool", "Logbook export to GPX", { state: "paused", app: true, ago: 1500, brief: "add an export of the logbook as a GPX track file", say: "Paused at the usage limit, which resets at 3:00 pm." });
+agent("tidepool", "Marine forecast sign-in", { state: "failed", app: true, ago: 600, brief: "the marine forecast returns 403 since this morning", say: "Login expired. Open it and run /login." });
+for (const t of ["Sunset time rounding", "Harbour search by name", "Swell legend colours", "Lighthouse list sort order", "Depth alarm sound"]) agent("tidepool", t, { settled: true, ago: 86400 * (2 + seq % 9), say: "Finished and merged.", brief: t.toLowerCase() });
+agent("field_notes", "Totals for the north marsh", { unread: true, ago: 360, brief: "add up the spring counts for the north marsh", say: "Spring totals for the north marsh: 41 species and 2,318 birds. Teal are up by a third." });
+agent("field_notes", "Merge duplicate observer sheets", { state: "working", run: 400, eta: 58, brief: "two observers sent the same transect twice, merge the copies", step: "Matching sheets by site and date", after: "Merged 23 duplicate sheets. Each transect now has exactly one sheet per visit." });
+agent("field_notes", "Map of the counting sites", { state: "working", run: 1500, eta: 150, brief: "draw a map of every counting site, shaded by its total for the whole season", step: "141 of 260 sites plotted", after: "The map shows all 260 sites, shaded by season total. It is saved as maps/season.png." });
+agent("field_notes", "Species name cleanup", { unread: true, ago: 21600, brief: "clean up how species names are spelled", say: "Found 37 spellings of 19 species. Each now maps to one standard name; the originals stay." });
+const STEPS = ["Reading the templates", "Building the site", "Checking 214 pages", "Writing the tests", "Waiting on the build"];
+const DONE = ["The checker found 9 broken links, all to pages renamed in March. They are listed in links.txt.", "Footnotes now link both ways. Two pages had the same label twice: about and colophon.", "Old addresses now redirect to the new permalinks. All 412 redirects are in redirects.txt."];
+["Themes", "Broken link checker", "Feeds", "Markdown tables", "Image resizing", "Sitemap generator", "Syntax colours", "Footnote links", "Incremental build cache", "Search indexer", "Front matter parser", "Shortcode library", "Dark mode styles", "Permalink rules", "Asset hashing", "Build timing", "Release notes"]
+  .forEach((r, i) => agent("paper-kite", r, i % 6 === 1 ? { unread: true, ago: 60 + i * 50, say: DONE[(i / 6 | 0) % 3], brief: r.toLowerCase() + ", report when done" }
+    : { state: "working", run: 200 + i * 90, eta: 40 + i * 37, step: STEPS[i % 5], brief: r.toLowerCase() + ", report when done", after: r + ": finished the change and checked every page of the built site." }));
+
+// ---- the window ----
+const S = { project: "tidepool", mode: "home", zone: "tiles", sel: new Set(), cursor: null, anchor: null, current: null, view: {}, walk: null, done: [], slots: new Set(), drafts: {}, news: null, pal: null, cli: null, rows: {}, zoom: null };
+const box = $("box"), by = id => A.find(a => a.id === id);
+function setProject(p) {
+  if (S.project) S.drafts[S.project] = box.value;
+  S.project = p;
+  box.value = (p && S.drafts[p]) || "";
+  grow();
+}
+function set(node, html) { if (node._h !== html) { node._h = html; node.innerHTML = html; } }
+// Put children in the wanted order, moving a node only when its place is wrong, so a field being edited is never pulled out from under the person.
+// The node holding the focus is never moved: the others move around it.
+function sync(parent, nodes) {
+  for (const c of [...parent.children]) if (!nodes.includes(c)) c.remove();
+  nodes.forEach((n, i) => { while (parent.children[i] !== n) { const at = parent.children[i]; if (at && n.contains(document.activeElement)) parent.insertBefore(at, n.nextSibling); else parent.insertBefore(n, at || null); } });
+}
+const made = { tile: new Map(), row: new Map() };
+const slot = a => S.slots.has(a.id);
+// The cells drawn at home, in order: every living agent, plus the place a settled one leaves until you look away.
+// The order is the person's: A keeps each project's agents in their order (a new one at the end), and a move rewrites it. While a tile or row is being dragged, the order shown is the drag's.
+const cells = () => S.drag && S.drag.kind === "tile" ? S.drag.order : A.filter(a => a.project === S.project && (!a.settled || slot(a)));
+const rowsShown = () => S.drag && S.drag.kind === "row" ? S.drag.order : living(S.project);
+const rect = el => { const r = el.getBoundingClientRect(), s = $("stage").getBoundingClientRect(); return { x: r.left - s.left, y: r.top - s.top, w: r.width, h: r.height }; };
+const columns = () => getComputedStyle($("grid")).gridTemplateColumns.split(" ").length;
+// Density is the number of rows that fit the grid's visible height. The default follows the height; the person's choice is kept per project as rows more or fewer.
+function rowsFor(H) { const base = Math.max(2, Math.round(H / 290)), most = Math.max(1, Math.floor((H + 12) / 144)); return { base, most, rows: Math.min(most, Math.max(1, base + (S.rows[S.project] || 0))) }; }
+function fadeTails() {
+  for (const el of $("grid").children) {
+    if (!el.classList.contains("tile")) continue;
+    const tail = el.children[5]; if (!tail) continue;
+    const h = tail.clientHeight;
+    if (h < 64) tail.classList.add("nofade");
+    else { tail.classList.remove("nofade"); tail.style.setProperty("--f1", Math.min(6, h * .1).toFixed(1) + "px"); tail.style.setProperty("--f2", Math.min(24, h * .35).toFixed(1) + "px"); }
+  }
+}
+function layout(animate) {
+  const g = $("grid"), H = g.clientHeight - 18; if (H <= 0) return;
+  const { rows } = rowsFor(H), row = Math.floor((H - 12 * (rows - 1)) / rows);
+  if (g.style.getPropertyValue("--row") === row + "px") return fadeTails();
+  g.style.transitionDuration = animate ? "" : "0s"; g.style.setProperty("--row", row + "px");
+  const fit = Math.max(1, Math.floor((row - 85) / 18));   // sentence lines that fit while the screen keeps 30 px
+  const s2 = row < 200 ? 1 : Math.min(2, fit), s4 = Math.min(4, fit);
+  const apply = () => { g.style.setProperty("--say", s2); g.style.setProperty("--say4", s4); fadeTails(); };
+  clearTimeout(layout.t);
+  if (animate && !calm() && !document.body.classList.contains("still")) layout.t = setTimeout(apply, ms("small"));
+  else apply();
+}
+function density(d) {   // +1 one more row, -1 one fewer, 0 the default; at either end nothing happens
+  const H = $("grid").clientHeight - 18, { base, most, rows } = rowsFor(H), want = d ? rows + d : base;
+  if (want < 1 || want > most || want === rows) return;
+  S.rows[S.project] = want - base; layout(true);
+  const el = made.tile.get(S.cursor), t0 = performance.now();
+  (function keep() { if (el && el.isConnected) el.scrollIntoView({ block: "nearest" }); edges(); if (performance.now() - t0 < ms("small") + 40) requestAnimationFrame(keep); })();
+}
+function edges() {
+  const g = $("grid"), top = $("edgetop"), bot = $("edgebot");
+  $("bar").classList.toggle("edge", S.mode === "home" && g.scrollTop > 0);
+  g.classList.toggle("below", g.scrollTop + g.clientHeight < g.scrollHeight - 1);
+  if (S.mode !== "home" || !S.project) { top.classList.remove("on"); bot.classList.remove("on"); return; }
+  const gr = g.getBoundingClientRect(), above = [], below = [];
+  for (const a of cells()) {
+    if (!yours(a)) continue;
+    const el = made.tile.get(a.id); if (!el || !el.isConnected) continue;
+    const r = el.getBoundingClientRect();
+    if (r.bottom < gr.top + 12) above.push(a);
+    else if (r.top > gr.bottom - 12) below.push(a);
+  }
+  top.classList.toggle("on", above.length > 0); top.textContent = above.length ? above.length + " waiting above" : ""; top._to = above.at(-1) || null;
+  bot.classList.toggle("on", below.length > 0); bot.textContent = below.length ? below.length + " waiting below" : ""; bot._to = below[0] || null;
+}
+function make(kind, a, html) { let el = made[kind].get(a.id); if (!el) { el = document.createElement("div"); el.dataset.id = a.id; el.innerHTML = html; made[kind].set(a.id, el); } return el; }
+const klass = (base, a, extra) => base + " " + a.state + (yours(a) ? " yours" : "") + (S.drag && S.drag.ids.includes(a.id) ? " lifted" + (a.id !== S.drag.primary ? " trail" : "") : "") + (extra || "");
+const age = a => a.state === "working" ? fmt(now() - a.started) : fmt(now() - a.since);
+// Words the app wrote are set apart from the agent's own words.
+const workSay = a => a.step || a.last || a.brief || "";
+const line = a => a.state === "working" ? (workSay(a) ? (a.app ? "<i>" + esc(workSay(a)) + "</i>" : esc(workSay(a))) : "<i>Working</i>") + (a.sent ? ' <span class="sent">You sent: ' + esc(a.sent) + "</span>" : "") : a.app ? "<i>" + esc(a.say) + "</i>" : esc(a.say);
+const plain = a => a.state === "working" ? (workSay(a) || "Working") : a.say;
+function setTitle(el, a) { if (el.contentEditable !== "true" && el.textContent !== a.title) el.textContent = a.title; }
+// What the native app draws on a tile: the last lines of the terminal's own text, above the CLI's input box.
+function tailLines(a) {
+  const from = Math.max(0, a.lines.length - 44);
+  const L = a.lines.slice(from).map((l, i) => [from + i, l]).filter(x => a.state === "working" || x[1][1] !== a.say).filter((x, i, all) => x[1][1] || all.slice(i).some(y => y[1][1]))
+    .map(([k, l]) => [k, (l[0] === "tool" || l[0] === "rep" ? "⏺ " : l[0] === "out" ? "  ⎿  " : "") + l[1]]);
+  if (a.state === "working") L.push(["spin", "✻ " + (a.step || "Thinking") + "… (" + age(a) + ")"]);
+  return L;
+}
+function tile(a) {
+  const el = make("tile", a, '<span class="mark"></span><span class="num"></span><span class="title"></span><span class="age"></span><div class="say"></div><div class="tail"><div class="tail-in"><div></div></div></div><div class="gone"></div>');
+  const out = a.settled, latest = S.done.length && S.done[S.done.length - 1].settled?.includes(a);
+  el.className = klass("tile", a, (S.sel.has(a.id) && !out ? " sel" : "") + (a.id === S.cursor ? " cursor" : "") + (out ? " out" : "") + (S.zoom && S.zoom.tile === el ? " lift" : ""));
+  if (a.state === "asks" || a.state === "failed") el.style.setProperty("--edge", a.state === "failed" ? "var(--problem)" : "var(--signal)");
+  set(el.children[0], MARK[a.state]); setTitle(el.children[2], a); set(el.children[3], age(a)); set(el.children[4], line(a));
+  // Each line keeps its element, so a screen lighting or powering down fades the lines that were already there.
+  const div = el.children[5].firstChild.firstChild, had = new Map([...div.children].map(p => [p.dataset.k, p]));
+  sync(div, tailLines(a).map(([k, t]) => { const p = had.get(String(k)) || document.createElement("p"); p.dataset.k = k; if (p.textContent !== t) p.textContent = t; return p; }));
+  set(el.children[6], '<span class="glab">Settled</span><span class="gname">' + esc(a.title) + "</span>" + (latest ? '<button class="undo">Undo<kbd>⌥Z</kbd></button>' : ""));
+  el.title = out ? "" : a.title + "\n" + plain(a);
+  return el;
+}
+function row(a) {
+  const el = make("row", a, '<span class="mark"></span><span class="title"></span><span class="say"></span>');
+  el.className = klass("row", a, a.id === S.current ? " current" : "");
+  set(el.children[0], MARK[a.state]); setTitle(el.children[1], a); set(el.children[2], line(a)); el.title = a.title + "\n" + plain(a);
+  return el;
+}
+function pane(a) {
+  const head = $("head"), note = $("note"), news = S.news && now() < S.news.until ? by(S.news.id) : null;
+  head.className = klass("", a, news ? " hasnews" : ""); set(head.children[0], MARK[a.state]); setTitle(head.children[1], a); set(head.children[2], line(a));
+  note.className = "note" + (news ? " news " + news.state : "");
+  if (news) note.style.setProperty("--news-rim", news.state === "failed" ? "rgba(239,127,134,.28)" : "rgba(227,180,88,.28)");
+  const kind = news ? "news" + news.id : "plain";   // news fades in over the change count, and the count fades back
+  if (note._kind && note._kind !== kind && !S.zoom) motion(note, { opacity: 0 }, { opacity: 1 }, news ? "small" : "big");
+  note._kind = kind;
+  set(note, news ? '<span class="mark">' + MARK[news.state] + "</span><span><b>" + esc(news.title) + "</b>&ensp;" + esc(news.say) + "</span>"
+    : (a.plus || a.minus ? "<span>+" + a.plus + " −" + a.minus + "</span>" : "") + "<span>" + (a.state === "working" ? "working " + age(a) : age(a) === "now" ? "just now" : age(a) + " ago") + "</span>");
+  const menu = a.state === "asks" && a.options ? a.options.concat("Type something else").map((o, i) => '<p class="' + (i ? "dim" : "") + '">' + (i ? "  " : "❯ ") + (i + 1) + ". " + esc(o) + "</p>").join("") : "";
+  const from = Math.max(0, a.lines.length - 70);
+  set($("term"), a.lines.slice(from).map((l, i) => '<p class="' + l[0] + '" data-k="' + (from + i) + '">' + esc(l[1]) + "</p>").join("") + (a.state === "working" ? '<p class="spin" data-k="spin">✻ ' + esc(a.step || "Thinking") + "… (" + age(a) + " · esc to interrupt)</p>" : "") + menu +
+    a.queue.map(q => '<p class="dim">  queued: ' + esc(q) + "</p>").join("") + '<div class="box">' + esc(a.input) + '<i class="cur"></i></div><div class="foot"><span>⏵⏵ bypass permissions on</span><span>' + (100 - a.ctx) + "% context left</span></div>");
+}
+const empty = Object.assign(document.createElement("div"), { className: "empty" });
+const first = Object.assign(document.createElement("div"), { className: "first", innerHTML: '<span>Add a project to start. Drop its folder on this window, or choose one.</span><button id="choose">Choose a folder…<kbd>⌥O</kbd></button>' });
+let shown = "";
+function render() {
+  // A render that moves the selection, the focus or the view applies its styles with transitions off: those changes never animate.
+  const sig = [S.mode, S.zone, S.project, S.current, S.cursor, ...S.sel].join(), snap = sig !== shown; shown = sig;
+  if (snap) document.body.classList.add("snap");
+  document.body.dataset.mode = S.mode; document.body.dataset.zone = S.zone; document.body.classList.toggle("nothing", !S.project);
+  document.body.classList.toggle("many", S.sel.size > 1);
+  if (!S.project) { sync($("grid"), [first]); layout(); edges(); }
+  else if (S.mode === "home") {
+    const list = cells(), n = A.filter(a => a.project === S.project && a.settled).length;
+    $("more").textContent = n ? n + " settled" : ""; empty.textContent = "No active agents in " + S.project + ". Describe a task below.";
+    const nodes = list.map((a, i) => {
+      const el = tile(a);
+      if (i < 9 && !a.settled) { el.dataset.num = String(i + 1); el.children[1].textContent = String(i + 1); }
+      else { delete el.dataset.num; el.children[1].textContent = ""; }
+      return el;
+    });
+    sync($("grid"), nodes.length ? nodes : [empty]); layout(); edges();
+  } else { const cur = by(S.current); sync($("rows"), rowsShown().map(row)); if (cur) pane(cur); $("bar").classList.remove("edge"); edges(); }
+  set($("projects"), PROJECTS.map(p => {
+    const n = A.filter(a => a.project === p && yours(a)).length, tot = living(p).length;
+    const tip = p + ", " + tot + (tot === 1 ? " agent" : " agents") + (n ? ", " + n + " waiting" : "");
+    return '<button class="proj' + (p === S.project ? " on" : "") + '" data-p="' + p + '" title="' + esc(tip) + '" aria-label="' + esc(tip) + '">' + p + (n ? "<b>" + n + "</b>" : "") + "</button>";
+  }).join(""));
+  const n = A.filter(yours).length;
+  if (S.walk && S.walk.moved) { $("waiting").className = "waiting"; set($("waiting"), S.walk.at + " of " + S.walk.total + " waiting"); }
+  else { $("waiting").className = "waiting" + (n ? "" : " none"); set($("waiting"), n ? n + " waiting on you" : "No one is waiting"); }
+  $("backname").textContent = "All of " + S.project;
+  const many = S.sel.size > 1, cli = S.cli && S.cli !== DEFAULT_CLI ? S.cli + " " : "";
+  const cur = S.sel.size === 1 ? by(S.cursor) : null, reply = S.zone === "tiles" && cur && !cur.settled;
+  $("chip").className = "chip" + (many ? " many" : "");
+  $("chip").textContent = many ? "To " + S.sel.size + " agents" : reply ? "Reply to " + cur.title : "New " + cli + "agent in " + S.project;
+  box.placeholder = many ? "One instruction for all " + S.sel.size : reply ? "Type to reply, or ⌥N for a new agent" : "Describe the task";
+  $("line").classList.toggle("has", !!box.value); $("line").classList.toggle("many", many);
+  box.setAttribute("aria-label", many ? "Instruction for " + S.sel.size + " agents" : reply ? "Reply to " + cur.title : "Task for a new " + cli + "agent in " + S.project);
+  $("send").setAttribute("aria-label", many ? "Send to " + S.sel.size + " agents" : "Start");
+  if (!S.walk && S.project) S.view[S.project] = { mode: S.mode, current: S.current };   // each project comes back the way it was left
+  if (snap) { void document.body.offsetWidth; document.body.classList.remove("snap"); }
+}
+function say(text, ms, undoable) {
+  const s = $("said"); s.innerHTML = esc(text) + (undoable ? '<button class="undo">Undo<kbd>⌥Z</kbd></button>' : ""); s.classList.add("on");
+  clearTimeout(say.t); say.t = setTimeout(() => s.classList.remove("on"), ms || 1800);
+}
+
+// ---- motion ----
+// The state changes at the key; motion only shows the change. Every motion starts from what is on screen now (mid-way
+// through an earlier one, or the old state) and runs to the new state: nothing queues, nothing waits, no key is held.
+const OUT = "cubic-bezier(.32,.72,0,1)", calm = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+const ms = k => document.body.classList.contains("still") ? 0 : calm() ? 100 : { big: 200, zoom: 160, small: 150, gone: 100 }[k];
+// A fresh start may hold a value for part of the way (mid, as a keyframe with an offset); a retarget never does.
+function motion(el, from, to, k, done, mid) {
+  let retarget = false;
+  if (el._m) { if (el._m.playState === "running" || el._m.playState === "paused") { const cs = getComputedStyle(el); from = {}; for (const p in to) from[p] = cs[p]; mid = null; retarget = true; } el._m.cancel(); }
+  const frames = mid ? [Object.assign({ easing: OUT }, from), Object.assign({ easing: OUT }, mid), to] : [from, to];
+  const m = el._m = el.animate(frames, { duration: ms(k), easing: mid ? "linear" : OUT, fill: "forwards" });
+  m.onfinish = () => { if (done) done(); if (el._m === m) el._m = null; m.cancel(); };
+  return m;
+}
+// The one large gesture. Entering, the terminal grows from the tile's outer rectangle to its full rectangle in 160 ms
+// inside a clipping wrapper; a snapshot of the tile cross-fades out over the first 50 ms (hiding stale frames);
+// the list and header fade in in place after 50 ms. Leaving is the reverse. Without a visible tile, or under Reduce Motion, cross-fade.
+const ZOOMED = () => [$("scrclip"), $("screen"), $("head"), $("list"), $("grid"), $("line"), $("inside")];
+function cleanZoom() {
+  const clip = $("scrclip"), scr = $("screen");
+  Object.assign(clip.style, { position: "", left: "", top: "", width: "", height: "", borderRadius: "", opacity: "" });
+  Object.assign(scr.style, { width: "", height: "", transform: "" });
+  if (S.zoom && S.zoom.cover) { if (S.zoom.cover._m) S.zoom.cover._m.cancel(); S.zoom.cover.remove(); }
+  if (S.zoom && S.zoom.gone && S.zoom.gone._m) { S.zoom.gone._m.cancel(); S.zoom.gone._m = null; }
+  if (S.zoom && S.zoom.tile) S.zoom.tile.classList.remove("lift");
+  document.body.classList.remove("moving");
+  S.zoom = null;
+}
+function stopZoom() { for (const x of ZOOMED()) if (x._m) { x._m.cancel(); x._m = null; } cleanZoom(); }
+function makeCover(el, T) {
+  const wrap = document.createElement("div"); wrap.className = "snapcover";
+  Object.assign(wrap.style, { width: T.w + "px", height: T.h + "px" });
+  const c = el.cloneNode(true);
+  c.classList.remove("lift", "sel", "cursor", "out");
+  if (c.children[6]) c.children[6].remove();
+  wrap.append(c);
+  return wrap;
+}
+function zoom(a, inward, vanish) {
+  const body = document.body, clip = $("scrclip"), scr = $("screen"), head = $("head"), grid = $("grid");
+  body.classList.add("moving");
+  const el = a && made.tile.get(a.id), g = rect(grid), T = el && el.isConnected && rect(el);
+  const kind = T && !calm() && T.y + T.h / 2 > g.y && T.y + T.h / 2 < g.y + g.h - 16 ? "grow" : "fade";
+  const reuse = S.zoom && S.zoom.kind === "grow" && kind === "grow" && S.zoom.id === a.id && !vanish;
+  if (S.zoom && !reuse) { stopZoom(); body.classList.add("moving"); }   // a different object: start clean
+  const finish = () => cleanZoom();
+  const go = (x, small, big, k, done, mid) => motion(x, inward ? small : big, inward ? big : small, k, done, mid);
+  const arrive = [$("list"), head], depart = [grid, $("line")];
+  if (kind === "fade") {
+    S.zoom = { id: a && a.id, kind };
+    go($("inside"), { opacity: 0 }, { opacity: 1 }, "small", finish); depart.forEach(x => go(x, { opacity: 1 }, { opacity: 0 }, "small"));
+    return;
+  }
+  const F = reuse ? S.zoom.F : rect(clip);
+  const s = reuse ? S.zoom.s : Math.max(T.w / F.w, T.h / F.h);
+  const cover = vanish ? null : (reuse && S.zoom.cover ? S.zoom.cover : makeCover(el, T));
+  if (!reuse) {
+    Object.assign(clip.style, { position: "absolute" });
+    Object.assign(scr.style, { width: F.w + "px", height: F.h + "px" });
+    if (cover) clip.append(cover);
+  }
+  S.zoom = { id: a.id, kind, tile: el, F, T, s, cover, gone: vanish ? el.children[6] : null };
+  el.classList.add("lift");
+  const smallClip = { left: T.x + "px", top: T.y + "px", width: T.w + "px", height: T.h + "px", borderRadius: "12px", opacity: vanish ? 0 : 1 };
+  const bigClip = { left: F.x + "px", top: F.y + "px", width: F.w + "px", height: F.h + "px", borderRadius: "10px", opacity: 1 };
+  const clipMid = vanish ? { opacity: 0, offset: .5 } : null;
+  go(clip, smallClip, bigClip, "zoom", finish, clipMid);
+  go(scr, { transform: `scale(${s})` }, { transform: "scale(1)" }, "zoom");
+  if (cover) {
+    const sx = F.w / T.w, sy = F.h / T.h;
+    if (inward) motion(cover, { opacity: 1, transform: "scale(1, 1)" }, { opacity: 0, transform: `scale(${sx}, ${sy})` }, "zoom", null, { opacity: 0, offset: .3125 });
+    else motion(cover, { opacity: 0, transform: `scale(${sx}, ${sy})` }, { opacity: 1, transform: "scale(1, 1)" }, "zoom", null, { opacity: 0, offset: .6875 });
+  }
+  if (vanish) motion(el.children[6], { opacity: 0 }, { opacity: 1 }, "zoom", null, { opacity: 0, offset: .5 });
+  arrive.forEach(x => inward ? motion(x, { opacity: 0 }, { opacity: 1 }, "zoom", null, { opacity: 0, offset: .3125 }) : motion(x, { opacity: 1 }, { opacity: 0 }, "zoom", null, { opacity: 0, offset: .3125 }));
+  depart.forEach(x => inward ? motion(x, { opacity: 1 }, { opacity: 0 }, "zoom", null, { opacity: 0, offset: .5 }) : motion(x, { opacity: 0 }, { opacity: 1 }, "zoom", null, { opacity: 0, offset: .3125 }));
+}
+// Floating panels fade in (the palette also rises from 98 %) and fade out; closing hands the keys back at once.
+function float(el, on, rise, fast) {
+  if (on === !!el._on) return; el._on = on;
+  const r = rise && !calm();
+  if (on) { el.classList.add("on"); el.style.pointerEvents = ""; motion(el, r ? { opacity: 0, transform: "scale(.98)" } : { opacity: 0 }, r ? { opacity: 1, transform: "none" } : { opacity: 1 }, "small", null, r ? { opacity: 1, offset: .55 } : fast && !calm() ? { opacity: 1, offset: .5 } : null); }
+  else { el.style.pointerEvents = "none"; motion(el, { opacity: 1 }, { opacity: 0 }, "gone", () => el.classList.remove("on")); }
+}
+// A tile that is removed (a cancelled start) fades where it was.
+function ghost(el) {
+  const r = rect(el), g = el.cloneNode(true); Object.assign(g.style, { position: "absolute", left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px", pointerEvents: "none" });
+  $("stage").append(g); g.animate({ opacity: [1, 0] }, { duration: ms("gone"), easing: OUT, fill: "forwards" }).onfinish = () => g.remove();
+}
+
+// ---- what agents do ----
+function startTurn(a, text) {
+  a.lines.push(["you", "> " + text], ["dim", ""]);
+  Object.assign(a, { state: "working", unread: false, app: false, options: null, sent: "", started: now(), eta: now() + 9 + Math.random() * 8, step: "", last: text, gain: [12 + text.length % 40, 3 + text.length % 9],
+    after: "Did it: " + text.replace(/\s+/g, " ").slice(0, 90) + (text.length > 90 ? "…" : "") + ". 2 files changed; the checks pass." });
+}
+function finish(a) {
+  const said = a.after || "Finished."; a.lines.push(["tool", "Bash(run the checks)"], ["out", "all passed"], ["dim", ""], ["rep", said], ["dim", ""]);
+  if (a.gain) { a.plus += a.gain[0]; a.minus += a.gain[1]; a.gain = null; }
+  Object.assign(a, { say: said, app: false, since: now(), sent: "", ctx: Math.min(96, a.ctx + 4) });
+  if (a.queue.length) return startTurn(a, a.queue.shift());
+  a.state = "finished"; a.unread = !(S.mode === "inside" && S.current === a.id);
+  if (a.unread && S.mode === "inside") S.news = { id: a.id, until: now() + 6 };
+}
+// The app types the text into each terminal and presses Return. A busy CLI queues it itself.
+function deliver(a, text) { if (a.state === "working") { a.queue.push(text); a.sent = text; } else startTurn(a, text); }
+function create(text) {
+  text = text.trim(); if (!text) return;
+  const words = text.split(/\s+/).slice(0, 5).join(" "), a = agent(S.project, words[0].toUpperCase() + words.slice(1), { fresh: true, brief: text, state: "working", cli: S.cli || DEFAULT_CLI });
+  startTurn(a, text); S.done.push({ started: a, until: now() + 6 }); render();
+  if (S.mode === "home") {   // the new tile fades in at its place, one surface lighter for a moment
+    const el = made.tile.get(a.id); el.scrollIntoView({ block: "nearest" }); edges();
+    el.animate({ opacity: [0, 1] }, { duration: ms("small"), easing: OUT });
+    el.animate({ backgroundColor: ["#2f323a", getComputedStyle(el).backgroundColor] }, { duration: document.body.classList.contains("still") ? 0 : 1400, easing: OUT });
+  }
+  say("Started " + a.title + ". ⌥Z cancels it.", 6000);
+}
+const names = list => list.map(a => a.title).join(", ");
+function submit(interrupt) {
+  const text = box.value.trim(); if (!text) return;
+  if (S.sel.size < 2) { box.value = ""; if (S.project) S.drafts[S.project] = ""; grow(); return create(text); }
+  // Never type on top of words the person left half-written in a terminal, or into a menu.
+  const all = [...S.sel].map(by), typed = all.filter(a => a.input), asks = all.filter(a => !a.input && a.state === "asks"), to = all.filter(a => !typed.includes(a) && !asks.includes(a));
+  const skipped = [typed.length && "Skipped " + names(typed) + ": " + (typed.length > 1 ? "their terminals hold text you typed." : "its terminal holds text you typed."),
+    asks.length && "Skipped " + names(asks) + ": " + (asks.length > 1 ? "they are asking questions." : "it is asking a question.")].filter(Boolean).join(" ");
+  if (!to.length) return say("Nothing sent. " + skipped, 6000);
+  box.value = ""; if (S.project) S.drafts[S.project] = ""; grow();
+  to.forEach(a => { if (interrupt && a.state === "working") { a.lines.push(["dim", "  ⎿  Interrupted"], ["dim", ""]); a.queue = []; startTurn(a, text); } else deliver(a, text); });
+  pick(S.cursor); zone("tiles"); render();
+  say(skipped ? "Sent to " + to.length + ". " + skipped : "Sent to " + to.length + (to.length > 1 ? " agents" : " agent"), skipped ? 6000 : 1800);
+}
+// Settle: the selected agents at home; inside, the agent shown. During a walk, settles in place and advances straight to the next waiting agent.
+function settle(only) {
+  const inside = S.mode === "inside", all = (only ? [only] : inside ? [by(S.current)] : [...S.sel].map(by)).filter(Boolean);
+  if (!all.length) return say("Select an agent first");
+  const many = all.length > 1, skip = a => a.state === "working" || (many && (a.state === "asks" || a.state === "failed"));
+  const to = all.filter(a => !skip(a));
+  if (!to.length) {
+    if (all.every(a => a.state === "working")) return say(inside ? "Still working. Press ⎋ to interrupt it first." : many ? "Still working. Open each and press ⎋ to interrupt." : "Still working. Open it and press ⎋ to interrupt.", 3000);
+    return say("None settled. All are working or need you.", 3000);
+  }
+  const list = living(S.project), after = list.slice(list.indexOf(to[to.length - 1]) + 1).find(a => !to.includes(a)) || list.find(a => !to.includes(a));
+  to.forEach(a => a.settled = true); S.done.push({ settled: to });
+  if (inside && to[0].id === S.current) {
+    const a = to[0];
+    if (S.walk && S.walk.moved) {
+      next();
+      return say("Settled " + a.title, 6000, true);
+    }
+    S.slots.add(a.id);
+    S.mode = "home"; pick(after && after.id); zone("tiles"); render(); made.tile.get(a.id).scrollIntoView({ block: "nearest" }); edges(); zoom(a, false, true);
+  } else {
+    if (!inside) { to.forEach(a => S.slots.add(a.id)); pick(after && after.id); }
+    render();
+  }
+  const left = all.length - to.length;
+  if (left) say("Settled " + to.length + ". Skipped " + (left > 1 ? left + " that are working or need you." : "1 that is working or needs you."), 3000);
+}
+function removeProject() {
+  if (!S.project) return;
+  const p = S.project, at = PROJECTS.indexOf(p), agents = living(p), view = S.view[p];
+  agents.forEach(a => a.settled = true); PROJECTS.splice(at, 1);
+  if (PROJECTS.length) show(PROJECTS[at] || PROJECTS[at - 1]);
+  else { const from = S.mode, cur = by(S.current); setProject(null); Object.assign(S, { mode: "home", current: null, walk: null }); S.slots.clear(); pick(null); zone("tiles"); render(); if (from === "inside") zoom(cur, false); }   // the first-launch screen
+  S.done.push({ removed: p, at, agents, view });
+  say("Removed " + p + (agents.length ? " and settled its " + (agents.length > 1 ? agents.length + " agents." : "agent.") : "."), 6000, true);
+}
+function undo(canCancelStart) {
+  const top = S.done[S.done.length - 1]; if (!top) return say("Nothing to undo");
+  if (top.started) {
+    if (!canCancelStart) return say("Nothing to undo");
+    S.done.pop();
+    if (now() > top.until || top.started.state !== "working") return say("Too late to cancel. Settle it instead.", 3000);
+    const a = top.started, el = made.tile.get(a.id);
+    if (S.mode === "home" && el && el.isConnected) ghost(el);
+    A.splice(A.indexOf(a), 1); made.tile.delete(a.id); made.row.delete(a.id);
+    if (S.current === a.id) { S.mode = "home"; S.current = null; pick(null); render(); zoom(a, false); }
+    else { if (S.cursor === a.id) pick(null); render(); }
+    return say("Cancelled " + a.title);
+  }
+  const d = S.done.pop();
+  if (d.removed) { PROJECTS.splice(d.at, 0, d.removed); d.agents.forEach(a => a.settled = false); S.view[d.removed] = d.view; show(d.removed); return say("Brought back " + d.removed); }
+  if (d.settled) {
+    d.settled.forEach(a => { a.settled = false; S.slots.delete(a.id); });
+    if (S.mode === "home" && d.settled[0].project === S.project) pick(d.settled[0].id);
+    render();
+    return say(d.settled.length > 1 ? "Brought back " + d.settled.length + " agents" : "Brought back " + d.settled[0].title);
+  }
+}
+function unread(a) {
+  a = a || by(S.mode === "inside" ? S.current : S.cursor); if (!a) return;
+  if (a.state !== "finished") return say("Only a finished agent can be marked unread");
+  a.unread = true; render(); say("Marked unread");
+}
+function restart() {
+  const cut = A.filter(a => a.state === "working" && !a.settled);
+  document.body.animate([{ opacity: 1 }, { opacity: 0, offset: .3 }, { opacity: 0, offset: .65 }, { opacity: 1 }], { duration: 1200 });
+  setTimeout(() => { cut.forEach(a => { a.lines.push(["dim", "── Clawddy restarted and resumed this conversation ──"], ["you", "> [Sent by Clawddy after a restart, not typed by you] Continue where you left off. Your last turn was cut short."], ["dim", ""]); a.app = true; a.step = "Continuing after a restart (1 of 3)"; a.eta += 5; });
+    render(); say("Restarted. Resuming " + (cut.length === 1 ? "1 interrupted agent." : cut.length + " interrupted agents."), 7000); }, 450);
+}
+function copySentence() {   // tile text is not selectable; ⌥C copies the selected agents' sentences, each after its name
+  const all = cells().filter(a => S.sel.has(a.id) && !a.settled); if (!all.length) return say("Select an agent first");
+  navigator.clipboard.writeText(all.map(a => a.title + ": " + plain(a)).join("\n")); say("Copied");
+}
+
+// ---- moving tiles and rows. A tile keeps its place unless the person moves it. ----
+// Writes a new order for the agents shown; agents not shown (settled, other projects) keep their places in A.
+function reorder(order) { const shown = new Set(order); A.map((a, i) => shown.has(a) ? i : -1).filter(i => i >= 0).forEach((i, k) => A[i] = order[k]); }
+// Tiles or rows that change place glide there from wherever they are on screen (150 ms); the ones under the hand are left to it.
+function flip(els, change, landing) {
+  const was = new Map(els.map(el => [el, el.getBoundingClientRect()]));
+  change();
+  for (const [el, b] of was) {
+    if (!el.isConnected || (S.drag && S.drag.ids.includes(+el.dataset.id))) continue;
+    if (el._m) { el._m.cancel(); el._m = null; }
+    const r = el.getBoundingClientRect(), dx = b.left - r.left, dy = b.top - r.top, land = landing && landing.includes(el);
+    if (calm() || Math.abs(dx) + Math.abs(dy) < .5) continue;
+    const rest = getComputedStyle(el).boxShadow, lifted = "0 14px 34px rgba(0,0,0,.45), 0 2px 6px rgba(0,0,0,.3), inset 0 0 0 1px rgba(255,255,255,.05)";
+    motion(el, Object.assign({ transform: `translate(${dx}px, ${dy}px)` }, land ? { boxShadow: lifted } : {}), Object.assign({ transform: "translate(0px, 0px)" }, land ? { boxShadow: rest } : {}), "small");
+  }
+}
+const holder = kind => kind === "tile" ? $("grid") : $("rows");
+// ⌥← ⌥→ in the app: the selected tiles move one place earlier or later; at either end nothing happens.
+function nudge(d) {
+  const list = cells(), at = list.map((a, i) => S.sel.has(a.id) && !a.settled ? i : -1).filter(i => i >= 0);
+  if (!at.length || (d < 0 ? at[0] === 0 : at.at(-1) === list.length - 1)) return;
+  const order = list.slice(); (d < 0 ? at : at.slice().reverse()).forEach(i => { [order[i], order[i + d]] = [order[i + d], order[i]]; });
+  flip([...$("grid").children], () => { reorder(order); render(); }); reveal(S.cursor);
+}
+// A press on a tile selects it at once; release without moving enters (the click); a drag past 4 px picks it up.
+let press = null;
+function pressStart(e, el, kind) {
+  const a = el && by(+el.dataset.id); if (e.button !== 0 || !a || a.settled || e.target.isContentEditable) return;
+  down = [e.clientX, e.clientY];
+  if (e.shiftKey || e.metaKey) return;
+  if (kind === "tile" && !(S.sel.has(a.id) && S.sel.size > 1)) { pick(a.id); zone("tiles"); render(); }
+  press = { x: e.clientX, y: e.clientY, a, el, kind };
+}
+function pickUp() {
+  const { a, el, kind } = press, list = kind === "tile" ? cells() : living(S.project), r = el.getBoundingClientRect();
+  const ids = kind === "tile" && S.sel.has(a.id) ? list.filter(x => S.sel.has(x.id) && !x.settled).map(x => x.id) : [a.id];
+  S.drag = { kind, ids, primary: a.id, origin: list.slice(), order: list.slice(), grab: [press.x - r.left, press.y - r.top] };
+  for (const id of ids) { const t = made[kind].get(id); if (t && t._m) { t._m.cancel(); t._m = null; } }
+  render();
+  if (!calm()) for (const id of ids) made[kind].get(id).animate({ boxShadow: ["0 0 0 rgba(0,0,0,0), inset 0 0 0 1px rgba(255,255,255,.05)", getComputedStyle(made[kind].get(id)).boxShadow] }, { duration: ms("small"), easing: OUT });
+}
+// Where the drag is: the place whose centre is nearest the pointer takes the picked-up tiles; the others make room.
+function follow(e) {
+  const d = S.drag, box = holder(d.kind), items = [...box.children], home_ = d.kind === "tile";
+  if (home_) { const g = box.getBoundingClientRect(); if (e.clientY > g.bottom - 40) box.scrollTop += 12; else if (e.clientY < g.top + 40) box.scrollTop -= 12; }
+  const natural = el => { const r = el.getBoundingClientRect(), m = new DOMMatrix(getComputedStyle(el).transform); return { x: r.left - m.e, y: r.top - m.f, w: r.width, h: r.height }; };
+  let best = 0, bd = Infinity;
+  items.forEach((el, i) => { const n = natural(el), dd = (n.x + n.w / 2 - e.clientX) ** 2 + (n.y + n.h / 2 - e.clientY) ** 2; if (dd < bd) { bd = dd; best = i; } });
+  const block = d.origin.filter(a => d.ids.includes(a.id)), others = d.order.filter(a => !d.ids.includes(a.id));
+  const at = Math.max(0, Math.min(others.length, best - block.findIndex(a => a.id === d.primary)));
+  const order = others.slice(0, at).concat(block, others.slice(at));
+  if (order.some((a, i) => a !== d.order[i])) flip(items, () => { d.order = order; render(); });
+  const lead = made[d.kind].get(d.primary), n = natural(lead), x = home_ ? e.clientX - d.grab[0] - n.x : 0, y = e.clientY - d.grab[1] - n.y;
+  lead.style.transform = `translate(${x}px, ${y}px)`;
+  block.filter(a => a.id !== d.primary).forEach((a, k) => { const t = made[d.kind].get(a.id), m = natural(t); t.style.transform = `translate(${n.x + x + 6 * (k + 1) - m.x}px, ${n.y + y + 6 * (k + 1) - m.y}px)`; });
+}
+// Release drops them where the gap is; Escape puts everything back where it was.
+function drop(back) {
+  const d = S.drag, items = [...holder(d.kind).children], landing = d.ids.map(id => made[d.kind].get(id));
+  flip(items, () => { landing.forEach(el => el.style.transform = ""); S.drag = null; reorder(back ? d.origin : d.order); render(); }, landing);
+  press = null;
+}
+document.addEventListener("mousemove", e => { if (!press) return; if (!S.drag) { if (Math.hypot(e.clientX - press.x, e.clientY - press.y) <= 4) return; pickUp(); } follow(e); });
+document.addEventListener("mouseup", () => { if (S.drag) drop(false); press = null; });
+
+// ---- adding projects: the folder panel (⌘O, "Choose a folder…") or dropping folders on the window ----
+function addProject(name) {
+  if (PROJECTS.includes(name)) { show(name); return say(name + " is already here"); }
+  PROJECTS.push(name); show(name); say("Added " + name);
+}
+$("folder").addEventListener("change", e => { const f = e.target.files[0]; if (f) addProject(f.webkitRelativePath.split("/")[0]); e.target.value = ""; });
+// A browser hides the dragged folder's name until the drop, so the prototype says "this folder"; the app names it.
+let dragging = 0;
+addEventListener("dragenter", e => { if (!e.dataTransfer.types.includes("Files")) return; dragging++; const n = e.dataTransfer.items.length; $("drop").firstChild.textContent = n > 1 ? "Add " + n + " folders as projects" : "Add this folder as a project"; float($("drop"), true); });
+addEventListener("dragleave", () => { if (--dragging <= 0) { dragging = 0; float($("drop"), false); } });
+addEventListener("dragover", e => { if (e.dataTransfer.types.includes("Files")) { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; } });
+addEventListener("drop", e => {
+  e.preventDefault(); dragging = 0; float($("drop"), false);
+  const dirs = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry && i.webkitGetAsEntry()).filter(x => x && x.isDirectory);
+  if (!dirs.length) return say("Drop a folder, not a file", 3000);
+  dirs.forEach(x => addProject(x.name));
+});
+
+// ---- moving around. The state changes at once; motion shows it. ----
+function pick(id, add) { if (!add) { S.sel.clear(); S.anchor = id || null; } if (id) { S.sel.add(id); S.cursor = id; if (!S.anchor) S.anchor = id; } else { S.cursor = null; S.anchor = null; } }
+function zone(z) { S.zone = z; document.body.dataset.zone = z; if (z === "line") box.focus({ preventScroll: true }); else { box.blur(); S.cli = null; } }   // the line returns to the default CLI when it loses the keyboard
+const reveal = id => { const el = made.tile.get(id); if (el && el.isConnected) el.scrollIntoView({ block: "nearest" }); edges(); };
+function enter(a, walking) {
+  if (!a) return; S.slots.clear(); if (!walking) S.walk = null;
+  if (a.settled) { a.settled = false; a.lines.push(["dim", "── resumed with claude --resume ──"], ["dim", ""]); }
+  if (!PROJECTS.includes(a.project)) PROJECTS.push(a.project);
+  const from = S.mode, was = S.project;
+  setProject(a.project);
+  Object.assign(S, { mode: "inside", current: a.id }); if (a.state === "finished") a.unread = false; pick(a.id); zone("tiles"); render();
+  if (from === "home") zoom(a, true);
+  else if (was !== a.project) motion($("list"), { opacity: .4 }, { opacity: 1 }, "small");   // another project's list: a quiet fade, the terminal does not move
+}
+function home() { if (S.mode !== "inside") return; S.walk = null; const a = by(S.current); S.mode = "home"; pick(S.current); zone("tiles"); render(); reveal(S.current); zoom(a, false); }
+function show(p) {
+  if (p === S.project) return; S.slots.clear(); S.walk = null;
+  const v = S.view[p] || {}, list = living(p), was = by(v.current), from = S.mode, cur = by(S.current);
+  setProject(p);
+  if (v.mode === "inside" && was && !was.settled) return enter(was);   // back to the terminal you left
+  S.mode = "home"; pick(null); zone(list.length ? "tiles" : "line"); $("grid").scrollTop = 0; render(); edges();
+  if (from === "inside") zoom(cur, false); else motion($("grid"), { opacity: .4 }, { opacity: 1 }, "small");
+}
+// One walk through everyone waiting. The order is fixed when the walk starts; at the end it returns to where it began.
+function waitingOrder() { const rank = a => a.state === "asks" ? 0 : a.state === "failed" ? 1 : 2, here = S.project; return A.filter(yours).sort((x, y) => (x.project !== here) - (y.project !== here) || PROJECTS.indexOf(x.project) - PROJECTS.indexOf(y.project) || rank(x) - rank(y) || x.since - y.since); }
+function next() {
+  if (!S.walk) {
+    const ids = waitingOrder().filter(a => !(S.mode === "inside" && a.id === S.current)).map(a => a.id);
+    S.walk = { ids, total: ids.length, at: 0, moved: false, origin: { project: S.project, mode: S.mode, current: S.current, cursor: S.cursor } };
+  }
+  const w = S.walk; let to = null;
+  while (w.ids.length && !to) { const c = by(w.ids.shift()); if (c && yours(c)) to = c; else w.total--; }
+  if (to) { w.moved = true; w.at++; return enter(to, true); }
+  S.walk = null; if (!w.moved) return say("No one else is waiting");
+  const o = w.origin;
+  if (o.mode === "inside" && by(o.current) && !by(o.current).settled) enter(by(o.current));
+  else { const from = S.mode, cur = by(S.current); setProject(o.project); S.mode = "home"; pick(o.cursor); zone("tiles"); render(); if (o.cursor) reveal(o.cursor); if (from === "inside") zoom(cur, false); }
+  say("That was everyone. Back where you started.", 2600);
+}
+function move(dx, dy, shift) {
+  const list = cells(), liv = list.filter(a => !a.settled); if (!liv.length) return;
+  if (!by(S.cursor)) { pick(dx < 0 || dy < 0 ? liv.at(-1).id : liv[0].id); render(); return reveal(S.cursor); }
+  const by1 = dx + dy * columns(); let j = list.findIndex(a => a.id === S.cursor) + by1;
+  if (dx && Math.floor(j / columns()) !== Math.floor((j - dx) / columns())) return;   // no wrap at the row's ends
+  while (list[j] && list[j].settled) j += by1;   // step over a settled place
+  if (!list[j]) return;
+  if (!shift) pick(list[j].id);
+  else {
+    const ai = list.findIndex(a => a.id === S.anchor && !a.settled);
+    const from = ai >= 0 ? ai : list.findIndex(a => a.id === S.cursor);
+    if (ai < 0) S.anchor = S.cursor;
+    const lo = Math.min(from, j), hi = Math.max(from, j);
+    S.sel = new Set(list.slice(lo, hi + 1).filter(a => !a.settled).map(a => a.id));
+    S.cursor = list[j].id;
+  }
+  render(); reveal(list[j].id);
+}
+function step(d) { const list = living(S.project), i = list.findIndex(a => a.id === S.current); if (list.length) enter(list[(i + d + list.length) % list.length]); }
+function rename(a, t) {
+  if (!a) return; t = t || (S.mode === "inside" ? $("head") : made.tile.get(a.id)).querySelector(".title"); const was = a.title;
+  t.contentEditable = "true"; t.focus(); getSelection().selectAllChildren(t);
+  const done = keep => { if (t.contentEditable !== "true") return; t.contentEditable = "false"; t.onkeydown = t.onblur = null; a.title = keep && t.textContent.trim() ? t.textContent.trim() : was; t.textContent = a.title; getSelection().removeAllRanges(); render(); };
+  t.onkeydown = e => { e.stopPropagation(); if (e.key === "Enter") { e.preventDefault(); done(true); } else if (e.key === "Escape") done(false); }; t.onblur = () => done(true);
+}
+
+// ---- find, commands, and the floating line that starts an agent from inside a terminal ----
+let hits = [], hitAt = 0;
+const addFolder = () => $("folder").click();
+function selectWorking() { if (S.mode === "inside") home(); const w = living(S.project).filter(a => a.state === "working"); S.sel = new Set(w.map(a => a.id)); if (w[0]) { S.cursor = w[0].id; S.anchor = w[0].id; } zone("line"); render(); }
+const COMMANDS = () => [["New agent", "⌥N", () => newAgent()], ["New Claude Code agent", "", () => newAgent("Claude Code")], ["New Codex agent", "", () => newAgent("Codex")], ["Add a project folder…", "⌥O", addFolder],
+  ["Settle", "⌥D", () => settle()], ["Mark as unread", "⌥U", () => unread()], ["Rename", "F2", () => rename(by(S.mode === "inside" ? S.current : S.cursor))], ["Select every working agent here", "", selectWorking],
+  ["Remove project", "", removeProject]].concat(PROJECTS.map(p => ["Go to " + p, "", () => show(p)]));
+function openPalette(mode, q) {
+  S.pal = mode; hitAt = 0; float($("pal"), true, true); float($("veil"), true, false, true);
+  const cli = S.cli && S.cli !== DEFAULT_CLI ? S.cli + " " : "", pin = $("palin");
+  $("palchip").style.display = mode === "new" ? "" : "none"; $("palchip").textContent = "New " + cli + "agent in " + S.project;
+  pin.placeholder = mode === "new" ? "Describe the task" : "Find an agent or run a command"; pin.value = q || ""; pin.focus(); fit(pin, 144); search();
+}
+function closePalette() {
+  if (!S.pal) return; if (S.pal === "new") S.cli = null; S.pal = null;
+  float($("pal"), false); float($("veil"), false); $("palin").blur(); if (S.mode === "home" && S.zone === "line") box.focus({ preventScroll: true }); render();
+}
+function newAgent(cli) {
+  if (!S.project) return addFolder();   // there is no project to start an agent in yet
+  if (S.mode === "inside") { S.cli = cli || null; return openPalette("new"); }
+  if (S.zone === "line" && !cli && !S.pal) return;   // already in the line: nothing changes
+  closePalette(); pick(S.cursor); zone("line"); S.cli = cli || null; render();
+}
+// An agent is found by its stored record only: name, first instruction, the prompts sent to it, its last message.
+const record = a => [a.say, a.brief].concat(a.lines.filter(l => l[0] === "you").map(l => l[1].replace(/^> /, "")));
+function search() {
+  if (S.pal === "new") return set($("pallist"), '<div class="plain"><span><kbd>↩</kbd>Start another</span><span><kbd>⎋</kbd>Back to terminal</span></div>');
+  let q = $("palin").value.trim().toLowerCase(); const only = q.startsWith("settled"); if (only) q = q.slice(7).trim();
+  const hl = s => q ? esc(s).replace(new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "ig"), m => "<mark>" + m + "</mark>") : esc(s);
+  const found = a => { if (!q || a.title.toLowerCase().includes(q)) return a.say || a.brief; return record(a).find(t => t && t.toLowerCase().includes(q)) || null; };
+  const rows = A.map(a => ({ a, text: found(a) })).filter(h => h.text !== null && (!only || h.a.settled)).sort((x, y) => (yours(y.a) - yours(x.a)) || (x.a.settled - y.a.settled) || y.a.since - x.a.since).slice(0, q || only ? 8 : 5);
+  hits = rows.concat(only ? [] : COMMANDS().filter(c => c[0].toLowerCase().includes(q)).slice(0, q ? 4 : 5).map(c => ({ c })));
+  hitAt = Math.min(hitAt, Math.max(0, hits.length - 1));
+  let html = "", head = "";
+  hits.forEach((h, at) => { const group = h.a ? (h.a.settled ? "Settled" : "Agents") : "Commands"; if (group !== head) { html += "<h4>" + group + "</h4>"; head = group; }
+    html += h.a ? '<div class="' + klass("hit", h.a, at === hitAt ? " on" : "") + '" data-i="' + at + '"><span class="mark">' + MARK[h.a.state] + "</span><span>" + hl(h.a.title) + "<small>" + hl(h.text) + '</small></span><span class="r">' + h.a.project + "&ensp;" + fmt(now() - h.a.since) + "</span></div>"
+      : '<div class="hit' + (at === hitAt ? " on" : "") + '" data-i="' + at + '"><span></span><span>' + hl(h.c[0]) + '</span><span class="r">' + (h.c[1] ? "<kbd>" + h.c[1] + "</kbd>" : "") + "</span></div>"; });
+  set($("pallist"), html || '<div class="plain"><span>Nothing matches.</span><span><kbd>⌥↩</kbd>start an agent with this text</span></div>');
+}
+function runHit(i) { const h = hits[i]; if (!h) return; closePalette(); if (h.a) enter(h.a); else h.c[2](); }
+// The menu of a tile or a list row. It acts on that agent; at home a right-click first makes the tile the cursor.
+function openMenu(a, x, y, t) {
+  if (S.mode === "home" && !S.sel.has(a.id)) { pick(a.id); render(); }
+  const m = $("menu"); m._items = [["Open", "", () => enter(a)], ["Rename", "F2", () => rename(a, t)], ["Mark as unread", "⌥U", () => unread(a), a.state !== "finished" || a.unread], ["Settle", "⌥D", () => S.mode === "home" ? settle() : settle(a), a.state === "working"]];
+  set(m, m._items.map((it, i) => '<button data-i="' + i + '"' + (it[3] ? " disabled" : "") + "><span>" + it[0] + "</span>" + (it[1] ? "<kbd>" + it[1] + "</kbd>" : "") + "</button>").join(""));
+  float(m, true); m.style.left = Math.min(x, innerWidth - m.offsetWidth - 8) + "px"; m.style.top = Math.min(y, innerHeight - m.offsetHeight - 8) + "px";
+}
+const closeMenu = () => float($("menu"), false);
+
+// ---- the hand ----
+// The line grows a line at a time; its height is measured on a hidden copy so the change can animate.
+const ruler = Object.assign(document.createElement("textarea"), { tabIndex: -1 }); ruler.setAttribute("aria-hidden", "true");
+Object.assign(ruler.style, { position: "absolute", left: "-9999px", visibility: "hidden", height: "0", transition: "none" }); document.body.append(ruler);
+function fit(el, cap) { const cs = getComputedStyle(el); Object.assign(ruler.style, { width: el.clientWidth + "px", font: cs.font, padding: cs.padding }); ruler.value = el.value || " "; el.style.height = Math.min(cap, Math.max(24, ruler.scrollHeight)) + "px"; if (el.selectionEnd === el.value.length) el.scrollTop = 1e6; }   // the text stays put while the top edge rises
+function grow() { fit(box, 134); $("line").classList.toggle("has", !!box.value); if (S.project) S.drafts[S.project] = box.value; }
+box.addEventListener("input", grow);
+box.addEventListener("focus", () => { if (S.zone !== "line") { S.zone = "line"; render(); } });
+box.addEventListener("blur", () => { if (!S.pal && S.zone === "line") { S.zone = "tiles"; S.cli = null; render(); } });
+$("line").addEventListener("mousedown", e => { if (!e.target.closest("button, textarea")) { e.preventDefault(); zone("line"); render(); } });   // a click anywhere on the slab puts the caret in it
+$("send").onclick = () => submit(false); $("more").onclick = () => openPalette("find", "settled ");
+$("edgetop").onclick = () => { const a = $("edgetop")._to; if (a) reveal(a.id); };
+$("edgebot").onclick = () => { const a = $("edgebot")._to; if (a) reveal(a.id); };
+$("palin").addEventListener("input", () => { hitAt = 0; fit($("palin"), 144); search(); });
+let pointer = [];
+$("pallist").addEventListener("mousemove", e => { const h = e.target.closest(".hit"); if (!h || (pointer[0] === e.clientX && pointer[1] === e.clientY)) return; pointer = [e.clientX, e.clientY]; if (+h.dataset.i !== hitAt) { hitAt = +h.dataset.i; search(); } });
+$("pallist").addEventListener("click", e => { const h = e.target.closest(".hit"); if (h) runHit(+h.dataset.i); });
+$("veil").onclick = closePalette; $("back").onclick = home; $("waiting").onclick = next; $("bfind").onclick = () => openPalette("find"); $("bnew").onclick = () => newAgent();
+$("note").onclick = () => { if (S.news && now() < S.news.until && by(S.news.id)) enter(by(S.news.id)); };
+$("said").addEventListener("click", e => { if (e.target.closest(".undo")) undo(false); });
+$("projects").addEventListener("click", e => { const b = e.target.closest(".proj"); if (b) show(b.dataset.p); });
+const toggleHelp = () => float($("help"), !$("help")._on);
+$("bhelp").onclick = e => { e.stopPropagation(); toggleHelp(); };
+document.addEventListener("click", e => { if (!e.target.closest(".help")) float($("help"), false); });
+document.addEventListener("mousedown", e => { if ($("menu")._on && !e.target.closest(".menu")) closeMenu(); });
+$("menu").addEventListener("click", e => { const b = e.target.closest("button"); if (!b || b.disabled) return; closeMenu(); $("menu")._items[+b.dataset.i][2](); });
+// A click on a tile enters it on release. The second click of a double-click, and a press that moved more than 4 px (a drag, which moves the tile), do not.
+let down = [0, 0];
+$("grid").addEventListener("mousedown", e => pressStart(e, e.target.closest(".tile"), "tile"));
+$("rows").addEventListener("mousedown", e => pressStart(e, e.target.closest(".row"), "row"));
+$("grid").addEventListener("click", e => { if (e.target.closest("#choose")) addFolder(); });
+$("grid").addEventListener("click", e => {
+  if (e.target.closest(".undo")) return undo(false);
+  const t = e.target.closest(".tile"); if (!t || t.classList.contains("out") || e.target.isContentEditable) return;
+  if (e.detail > 1 || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4) return;
+  const a = by(+t.dataset.id);
+  if (e.shiftKey || e.metaKey) { if (S.sel.has(a.id)) { S.sel.delete(a.id); if (S.cursor === a.id) S.cursor = [...S.sel][0] || null; if (!S.sel.size) S.anchor = null; } else pick(a.id, true); return render(); }
+  enter(a);
+});
+$("grid").addEventListener("scroll", edges);
+$("grid").addEventListener("contextmenu", e => { const t = e.target.closest(".tile"); e.preventDefault(); if (t && !t.classList.contains("out")) openMenu(by(+t.dataset.id), e.clientX, e.clientY); });
+$("rows").addEventListener("click", e => { const r = e.target.closest(".row"); if (r && e.detail < 2 && !e.target.isContentEditable && Math.hypot(e.clientX - down[0], e.clientY - down[1]) <= 4) enter(by(+r.dataset.id)); });
+$("rows").addEventListener("contextmenu", e => { const r = e.target.closest(".row"); e.preventDefault(); if (r) openMenu(by(+r.dataset.id), e.clientX, e.clientY, r.querySelector(".title")); });
+$("head").addEventListener("dblclick", e => { if (e.target.closest(".title")) rename(by(S.current)); });
+let pinch = 0, pinchT;
+addEventListener("resize", () => { layout(); edges(); });
+addEventListener("wheel", e => { if (!e.ctrlKey) return; e.preventDefault(); pinch += e.deltaY; clearTimeout(pinchT); pinchT = setTimeout(() => pinch = 0, 250);
+  if (pinch > 30 && S.mode === "inside") { pinch = 0; home(); } else if (pinch < -30 && S.mode === "home" && S.cursor) { pinch = 0; enter(by(S.cursor)); } }, { passive: false });
+
+let holdT = null;
+const clearHold = () => { clearTimeout(holdT); holdT = null; document.body.classList.remove("nums"); };
+addEventListener("keyup", e => { if (e.key === "Alt" || e.key === "Meta") clearHold(); });
+addEventListener("blur", clearHold);
+document.addEventListener("keydown", e => {
+  if (e.target.isContentEditable) return;   // a name being edited takes every key
+  if ((e.key === "Alt" || e.key === "Meta") && !e.repeat) {
+    if (S.mode === "home" && S.project && !S.pal && !S.drag) {
+      clearTimeout(holdT);
+      holdT = setTimeout(() => { if (S.mode === "home" && S.project && !S.pal && !S.drag) document.body.classList.add("nums"); }, 200);
+    }
+    return;
+  }
+  clearHold();
+  const mod = e.metaKey || e.altKey, code = e.code, stop = () => e.preventDefault();
+  if ($("menu")._on) { closeMenu(); if (e.key === "Escape") return stop(); }
+  if (S.drag) { if (e.key === "Escape") drop(true); return stop(); }   // while dragging, Escape puts it back and no other key acts
+  if (!S.project && !S.pal) {   // first launch: only the way in, find, keys and undo
+    if (mod && (code === "KeyO" || code === "KeyN")) addFolder(); else if (mod && code === "KeyZ") undo(false); else if (mod && code === "KeyP") openPalette("find"); else if (mod && code === "Slash" && e.shiftKey) toggleHelp(); else return;
+    return stop();
+  }
+  if (e.ctrlKey && e.altKey && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {   // the app's ⌥← ⌥→ (here ⌃⌥, since ⌥ stands for ⌘)
+    if (S.mode === "home" && S.zone === "tiles") nudge(e.key === "ArrowLeft" ? -1 : 1);
+    return stop();
+  }
+  if (S.pal) {   // while the palette is open no other app key acts
+    const pin = $("palin");
+    if (e.key === "Escape" || (mod && code === "KeyP")) closePalette();
+    else if (mod && code === "KeyZ") { if (S.pal === "new" && !pin.value && S.done.length && S.done.at(-1).started) undo(true); else document.execCommand("undo"); }
+    else if (mod && code === "KeyA") pin.select();
+    else if (mod && code === "Enter") { if (S.pal === "find" && !hits.length && pin.value.trim()) { const t = pin.value; if (S.mode === "inside") { create(t); openPalette("new"); } else { closePalette(); pick(S.cursor); zone("line"); create(t); } } }
+    else if (mod) {}
+    else if (S.pal === "new") { if (e.key !== "Enter" || e.shiftKey) return; const t = pin.value; pin.value = ""; fit(pin, 144); create(t); }
+    else if (e.key === "ArrowDown") { hitAt = Math.min(hits.length - 1, hitAt + 1); search(); }
+    else if (e.key === "ArrowUp") { hitAt = Math.max(0, hitAt - 1); search(); }
+    else if (e.key === "Enter") runHit(hitAt);
+    else return;
+    return stop();
+  }
+  if (mod) {   // the app's own commands; a terminal never sees these
+    const d = /^Digit([1-9])$/.exec(code), list = S.mode === "home" ? cells() : living(S.project), brace = code === "BracketRight" ? 1 : code === "BracketLeft" ? -1 : 0, home_ = S.mode === "home";
+    if (code === "KeyP") openPalette("find");
+    else if (code === "KeyN") newAgent();
+    else if (code === "KeyJ") next();
+    else if (code === "Escape") home();
+    else if (brace && e.shiftKey) show(PROJECTS[(PROJECTS.indexOf(S.project) + brace + PROJECTS.length) % PROJECTS.length]);
+    else if (brace) { if (!home_) step(brace); }
+    else if (d) { const a = list[d[1] - 1]; if (a && !a.settled) enter(a); }
+    else if (code === "KeyZ") { if (home_ && S.zone === "line" && box.value) document.execCommand("undo"); else undo(home_ && S.zone === "line" && !box.value); }
+    else if (code === "Enter") { if (home_ && S.zone === "line") submit(true); }
+    else if (code === "KeyU") unread();
+    else if (code === "KeyD") settle();
+    else if (code === "KeyO") addFolder();
+    else if (code === "Slash" && e.shiftKey) toggleHelp();
+    else if (code === "KeyA") { if (home_ && S.zone === "tiles") { const liv = living(S.project); S.sel = new Set(liv.map(a => a.id)); if (!S.cursor && liv[0]) { S.cursor = liv[0].id; S.anchor = liv[0].id; } render(); } else if (home_) box.select(); }
+    else if (code === "Minus" || code === "Equal" || code === "Digit0") { if (home_) density(code === "Minus" ? 1 : code === "Equal" ? -1 : 0); }
+    else if (code === "KeyC" && home_ && S.zone === "tiles") copySentence();
+    else if (S.zone === "line" && home_) {}   // other chords type nothing into the line
+    else return;
+    return stop();
+  }
+  if (S.mode === "inside") {   // every other key belongs to the terminal
+    const a = by(S.current); if (!a) return;
+    if (e.key === "Enter") { const text = a.input.trim(); if (!text) return stop(); a.input = ""; if (a.state === "working") a.queue.push(text); else startTurn(a, text); }
+    else if (e.key === "Backspace") a.input = a.input.slice(0, -1);
+    else if (e.key === "Escape" && a.state === "working") { Object.assign(a, { state: "finished", say: "You interrupted it.", app: true, since: now(), queue: [], sent: "" }); a.lines.push(["dim", "  ⎿  Interrupted · What should Claude do instead?"], ["dim", ""]); }
+    else if (a.state === "asks" && !a.input && a.options && a.options[e.key - 1]) startTurn(a, a.options[e.key - 1]);
+    else if (e.key.length === 1) a.input += e.key; else return;
+    stop(); return render();
+  }
+  if (S.zone === "line") {   // typing; no key here ever moves the selection
+    if (e.key === "Enter" && !e.shiftKey) { stop(); submit(false); }
+    else if (e.key === "Escape" || (e.key === "ArrowUp" && !box.value.slice(0, box.selectionStart).includes("\n"))) { stop(); if (e.key === "Escape" && S.sel.size > 1 && !box.value) pick(S.cursor); zone("tiles"); render(); }
+    else if (e.key === "F2") stop();
+    return;
+  }
+  const cur = by(S.cursor);   // the tiles; no key here ever types into an agent without opening it
+  if (e.key.startsWith("Arrow")) { stop(); move(e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0, e.key === "ArrowDown" ? 1 : e.key === "ArrowUp" ? -1 : 0, e.shiftKey); }
+  else if (e.key === "Enter") { stop(); if (S.sel.size > 1) { zone("line"); render(); } else enter(cur); }
+  else if (e.key === "Escape") { stop(); if (S.sel.size > 1) { pick(S.cursor); render(); } else if (S.sel.size === 1) { pick(null); render(); } }
+  else if (e.key === "F2") { stop(); if (cur) rename(cur); }
+  else if (e.key === " ") stop();   // Space does nothing, and never scrolls the grid
+  else if (e.key.length === 1 && !e.ctrlKey) {
+    if (S.sel.size > 1 || !cur) { zone("line"); render(); }   // several or none selected: the key lands in the line
+    else { stop(); enter(cur); if (cur.state !== "asks") cur.input += e.key; render(); }   // one selected: the key goes to its own terminal; a question's menu gets no stray key
+  }
+});
+
+const helpGroup = (name, items) => "<h4>" + name + "</h4><dl>" + items.map(k => "<dt><kbd>" + k[0] + "</kbd></dt><dd>" + k[1] + "</dd>").join("") + "</dl>";
+set($("help"),
+  helpGroup("Move", [["← ↑ → ↓", "Move between tiles. Shift selects a range"], ["⌥J", "Walk everyone waiting on you, one press each, then return"], ["⌥⎋", "Back to all agents. Pinching together does the same"], ["⌥1 … 9", "Open the agent in that place. Hold ⌥ to see numbers"], ["⌥[ ⌥]", "Previous and next agent"], ["⇧⌥[ ⇧⌥]", "Previous and next project"], ["⌥P", "Find an agent or run a command"]]) +
+  helpGroup("Agents", [["type", "On one selected tile: replies in its terminal. With none: starts a new agent"], ["↩", "On a tile: open its terminal. In the line: start or send"], ["⌥N", "New agent: the line at home, a floating line inside a terminal"], ["⌥D", "Settle. During a walk, settles and moves to the next"], ["⌥Z", "Undo settle or project removal. In an empty line, cancels a start"], ["⌥U", "Mark as unread"], ["F2", "Rename"], ["⌥C", "Copy the selected agents' sentences"], ["⌥O", "Add a project folder"]]) +
+  helpGroup("Grid", [["⌥−", "Smaller tiles"], ["⌥+", "Larger tiles"], ["⌥0", "Default tile size"], ["⌃⌥← ⌃⌥→", "Move the selected tile earlier or later. Dragging does the same"]]) +
+  '<p>Inside a terminal, every key without ⌥ goes to the terminal. With several tiles selected, typing writes one instruction for all of them.</p><p>A browser keeps ⌘N and ⌘P for itself, so this prototype uses ⌥ where the app uses ⌘, and ⌃⌥ where the app uses ⌥.</p><h4>Try</h4><button id="pfin">Make one working agent finish now</button><button id="prestart">Restart the app</button>');
+$("pfin").onclick = () => { const a = A.find(x => x.state === "working" && x.project === S.project && !x.settled && x.id !== S.current) || A.find(x => x.state === "working" && x.id !== S.current); if (a) { finish(a); render(); } };
+$("prestart").onclick = restart;
+
+setInterval(() => { if (window.__still) return; for (const a of A) if (a.state === "working" && !a.settled) { if (now() >= a.eta) finish(a); else if (Math.random() < .3) a.lines.push(["out", ["read 3 files", "ran the checks", "12 passed", "wrote the patch", "compared the output"][a.lines.length % 5]]); } render(); }, 1000);
+
+// ---- first paint, and fixed scenes for pictures: prototype.html#inside, #arrival, #find, #new, #mission, #several, #settled, #reply, #typing, #help, #dense, #codex, #menu, #first, #moving ----
+pick(null); render(); grow();
+const scene = location.hash.slice(1);
+if (scene) { window.__still = true; document.body.classList.add("still"); const m = living("paper-kite");
+  if (scene === "inside") enter(A[1]);
+  if (scene === "arrival") { enter(A[3]); finish(A[1]); render(); }
+  if (scene === "find") openPalette("find", "early");
+  if (scene === "new") { enter(A[1]); openPalette("new"); $("palin").value = "the sunrise time on the passage screen is a minute off, find out why and fix it"; fit($("palin"), 144); }
+  if (scene === "mission") show("paper-kite");
+  if (scene === "several") { show("paper-kite"); pick(m[0].id); pick(m[2].id, true); pick(m[3].id, true); box.value = "rebuild from a clean output folder before you continue"; zone("line"); render(); grow(); }
+  if (scene === "settled") { pick(A[0].id); settle(); }
+  if (scene === "reply") { pick(A[0].id); enter(A[0]); A[0].input = "yes, and add the same test for the tide table"; render(); }
+  if (scene === "typing") { box.value = "the sunrise time on the passage screen is a minute off, find out why"; zone("line"); render(); grow(); }
+  if (scene === "help") toggleHelp();
+  if (scene === "dense") { show("paper-kite"); density(1); density(1); }
+  if (scene === "codex") { newAgent("Codex"); box.value = "port the tide chart tests to the new test runner"; grow(); render(); }
+  if (scene === "first") { A.forEach(a => a.settled = true); PROJECTS.length = 0; Object.assign(S, { project: null, done: [] }); pick(null); render(); }
+  if (scene === "moving") { const t = made.tile.get(A[0].id).getBoundingClientRect(), u = made.tile.get(A[2].id).getBoundingClientRect(); pressStart({ button: 0, clientX: t.left + 60, clientY: t.top + 30, target: made.tile.get(A[0].id) }, made.tile.get(A[0].id), "tile");
+    document.dispatchEvent(new MouseEvent("mousemove", { clientX: t.left + 70, clientY: t.top + 40 })); document.dispatchEvent(new MouseEvent("mousemove", { clientX: u.left + 40, clientY: u.top + 50 })); }
+  if (scene === "menu") { const r = made.tile.get(A[4].id).getBoundingClientRect(); openMenu(A[4], r.left + 120, r.top + 40); }
+}
+</script>
+</body>
+</html>

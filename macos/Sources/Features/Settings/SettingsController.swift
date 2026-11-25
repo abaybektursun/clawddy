@@ -2,9 +2,9 @@ import AppKit
 import SwiftUI
 
 final class SettingsController: NSWindowController {
-    init(preferencesFile: URL) {
+    init(preferencesFile: URL, onSave: @escaping (AgentPreferences) -> Void) {
         let hostingController = NSHostingController(
-            rootView: SettingsView(preferencesFile: preferencesFile))
+            rootView: SettingsView(preferencesFile: preferencesFile, onSave: onSave))
         let window = NSWindow(contentViewController: hostingController)
         window.title = "Clawddy Settings"
         window.styleMask = [.titled, .closable, .miniaturizable]

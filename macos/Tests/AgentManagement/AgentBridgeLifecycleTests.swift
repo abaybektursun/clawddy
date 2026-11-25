@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import Testing
@@ -17,12 +18,12 @@ struct AgentBridgeLifecycleTests {
         try h.activate(id)
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .launching)
-        #expect(agent.displayState.label == "Starting")
+        #expect(agent.terminal == .starting)
+        #expect(agent.terminal == .starting)
         #expect(agent.surfaceState == .open)
         #expect(agent.processState == .launching)
         #expect(agent.telemetryHealth == .awaiting)
-        #expect(h.host.calls == [.select(id), .present(id)])
+        #expect(h.host.calls == [.present(id)])
         #expect(h.host.surfaces.count == 1)
         #expect(h.presentationChanges == [id])
         #expect(h.providers.launchRequests.count == 1)
@@ -30,21 +31,21 @@ struct AgentBridgeLifecycleTests {
         #expect(request.launchGeneration == agent.launchGeneration)
         #expect(request.environmentPath == h.binFolder.path)
         #expect(request.session == nil)
-        #expect(request.pendingFork == nil)
         // The terminal runs the launch script, which waits in the root's
         // launch folder until the provider is seen alive.
         let command = try #require(h.host.surfaces[id]?.configuration.command)
         #expect(command.hasPrefix(h.root.launchDir.path + "/"))
         #expect(try h.launchScripts() == [URL(fileURLWithPath: command).lastPathComponent])
-        // Start publishes the idle aggregate state; starting a launch
-        // publishes none.
-        #expect(h.aggregateChanges == [.idle])
+        // Start publishes the waiting count; starting a launch changes
+        // nothing.
+        #expect(h.waitingCounts == [0])
     }
 
     /// Flipped from `knownWrong_aggregateNotPublishedAtStartup` (P3.1): a
-    /// relaunch with an unread completion publishes attention at start,
-    /// before any event arrives.
-    @Test func aggregatePublishedAtStartup() throws {
+    /// relaunch publishes its waiting count at start, before any event
+    /// arrives. An unread completion it restores shows as Done, which asks
+    /// for no attention.
+    @Test func waitingCountPublishedAtStartup() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent")
@@ -54,8 +55,8 @@ struct AgentBridgeLifecycleTests {
 
         try h.restart()
 
-        #expect(h.bridge.aggregateState == .attention)
-        #expect(h.aggregateChanges == [.attention])
+        #expect(try h.agent(id).shownState == .finishedUnread)
+        #expect(h.waitingCounts == [1])
     }
 
     @Test func secondActivationDuringPreparationStartsNothing() throws {
@@ -67,21 +68,21 @@ struct AgentBridgeLifecycleTests {
         h.io.hold()
         try h.activate(id)
         try h.activate(id)
-        #expect(h.host.calls == [.select(id), .select(id)])
+        #expect(h.host.calls == [])
         #expect(h.providers.launchRequests.isEmpty)
 
         h.io.release()
         #expect(h.providers.launchRequests.count == 1)
-        #expect(h.host.calls == [.select(id), .select(id), .present(id)])
+        #expect(h.host.calls == [.present(id)])
         #expect(h.host.surfaces.count == 1)
         #expect(try h.launchScripts().count == 1)
     }
 
-    /// Claude reports nothing before its folder trust dialog is accepted,
-    /// so a launch with no report within 10 s says that its status is
-    /// unavailable. The first report, once the dialog is accepted, shows
-    /// Claude ready.
-    @Test func noReportFor10sIsStatusUnavailable() throws {
+    /// A launch stuck with nothing on its screen is not ready within 30 s:
+    /// it stops with a problem and its terminal closes, so the agent is
+    /// truly stopped, and opening it starts it afresh (final review ruling
+    /// 11).
+    @Test func notReadyIn30sIsAProblemAndItsTerminalCloses() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent")
@@ -89,26 +90,50 @@ struct AgentBridgeLifecycleTests {
         try h.activate(id)
         let agent = try h.agent(id)
 
-        h.scheduler.advance(by: 9.9)
-        #expect(agent.displayState == .launching)
+        h.scheduler.advance(by: 29.9)
+        #expect(agent.terminal == .starting)
 
         h.scheduler.advance(by: 0.2)
-        #expect(agent.displayState == .statusUnavailable)
-        #expect(agent.telemetryHealth == .unavailable(
-            "The terminal is running, but agent activity status is unavailable."))
-        #expect(agent.processState == .launching)
-        #expect(h.aggregateChanges == [.idle])
-        #expect(h.notifier.posted.isEmpty)
+        #expect(agent.shownState == .problem)
+        #expect(agent.telemetryHealth == .unavailable("It did not start within 30 seconds."))
+        #expect(agent.record.problem == AgentRecord.Problem(kind: .didNotStart))
+        #expect(agent.processState == .exited)
+        #expect(!h.host.hasSurface(id: id))
 
-        h.scheduler.advance(by: 5)
+        let launches = h.providers.launchRequests.count
+        try h.activate(id)
+        #expect(h.providers.launchRequests.count == launches + 1)
         try h.osc(id, "state=idle:app=claude-code")
-        #expect(agent.displayState == .idle)
+        #expect(agent.terminal == .idle)
+        #expect(agent.record.problem == nil)
+    }
+
+    /// Claude reports nothing before its folder trust dialog is accepted. A
+    /// launch showing such a screen past 30 s stops with a problem but keeps
+    /// its terminal, where the keys go; the first report, once the dialog is
+    /// accepted, shows Claude ready.
+    @Test func aDialogPast30sKeepsItsTerminal() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent")
+        h.start()
+        try h.activate(id)
+        let agent = try h.agent(id)
+        h.host.screens[id] = "Do you trust the files in this folder?"
+        h.scheduler.advance(by: AgentBridge.holdLimit + 1)
+        h.scheduler.advance(by: AgentBridge.startLimit)
+        #expect(agent.record.problem == AgentRecord.Problem(kind: .didNotStart))
+        #expect(agent.processState == .launching)
+        #expect(h.host.hasSurface(id: id))
+
+        try h.osc(id, "state=idle:app=claude-code")
+        #expect(agent.terminal == .idle)
         #expect(agent.processState == .running)
     }
 
     /// A hook is not a report: a `SessionStart` with no report, as from a
     /// terminal that never answers Claude's query, binds the session but
-    /// leaves the status unavailable after 10 s.
+    /// leaves it not ready, a problem after 30 s.
     @Test func sessionStartAloneIsNotAReport() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -120,16 +145,19 @@ struct AgentBridgeLifecycleTests {
 
         try h.hook(id, "SessionStart")
         #expect(try h.binding(id).sessionID == "session-1")
-        #expect(agent.displayState == .launching)
-        h.scheduler.advance(by: 7.1)
+        #expect(agent.terminal == .starting)
+        h.scheduler.advance(by: 27.1)
 
-        #expect(agent.displayState == .statusUnavailable)
-        #expect(agent.processState == .launching)
+        #expect(agent.shownState == .problem)
+        // Nothing on its screen: stuck, so its terminal closed (final review
+        // ruling 11).
+        #expect(agent.processState == .exited)
     }
 
-    /// Codex's `SessionStart` hook shows it ready; Claude's first report
-    /// does (`firstReportWithin10sPreventsStatusUnavailable`).
-    @Test func sessionStartIsReadyRemovesScriptWritesBinding() throws {
+    /// Codex's first report shows it ready, as Claude's does
+    /// (`firstReportWithin10sPreventsStatusUnavailable`); its notify
+    /// program's record of a completed turn binds its session.
+    @Test func codexFirstReportIsReadyAndNotifyWritesBinding() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent", provider: .codex)
@@ -137,23 +165,25 @@ struct AgentBridgeLifecycleTests {
         try h.activate(id)
         #expect(try h.launchScripts().count == 1)
 
-        try h.hook(id, "SessionStart", session: "session-1")
+        try h.osc(id, "state=idle:app=codex")
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .idle)
-        #expect(agent.displayState.label == "Ready")
+        #expect(agent.terminal == .idle)
         #expect(agent.processState == .running)
         #expect(agent.telemetryHealth == .live)
-        #expect(agent.sessionID == "session-1")
         #expect(try h.launchScripts().isEmpty)
+        #expect(h.waitingCounts == [0])
+
+        h.view(id)
+        try h.hook(id, "agent-turn-complete", session: "session-1")
+        #expect(agent.sessionID == "session-1")
         #expect(try h.binding(id) == AgentSessionBinding(
             provider: .codex,
             sessionID: "session-1",
             launchGeneration: agent.launchGeneration))
-        #expect(h.aggregateChanges == [.idle])
 
         h.scheduler.advance(by: 11)
-        #expect(agent.displayState == .idle)
+        #expect(agent.terminal == .idle)
     }
 
     @Test func missingExecutableIsCouldntStart() throws {
@@ -167,21 +197,18 @@ struct AgentBridgeLifecycleTests {
         try h.activate(id)
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .failed)
-        #expect(agent.displayState.label == "Couldn't Start")
-        #expect(agent.failureMessage
-            == AgentProviderIssue.executableMissing(.claudeCode).localizedDescription)
+        #expect(agent.shownState == .problem)
+        #expect(agent.record.problem == AgentRecord.Problem(kind: .notInstalled))
         #expect(agent.surfaceState == .failed)
         #expect(agent.processState == .exited)
-        #expect(h.host.calls == [.select(id)])
+        #expect(h.host.calls == [])
         #expect(try h.launchScripts().isEmpty)
-        // The failure raises the aggregate state from the idle one published
-        // at start, but posts no notification.
-        #expect(h.aggregateChanges == [.idle, .attention])
+        // A problem asks for no attention, and posts no notification.
+        #expect(h.waitingCounts == [0, 1])
         #expect(h.notifier.posted.isEmpty)
 
         h.scheduler.advance(by: 11)
-        #expect(agent.displayState == .failed)
+        #expect(agent.shownState == .problem)
     }
 
     /// Flipped from `knownWrong_hostRefusingPresentLeavesAgentLaunching`
@@ -197,17 +224,17 @@ struct AgentBridgeLifecycleTests {
         try h.activate(id)
 
         let agent = try h.agent(id)
-        #expect(h.host.calls == [.select(id), .present(id)])
-        #expect(agent.displayState == .failed)
-        #expect(agent.failureMessage == "The agent's terminal could not be opened.")
+        #expect(h.host.calls == [.present(id)])
+        #expect(agent.shownState == .problem)
+        #expect(agent.record.problem?.text == "Its terminal could not be opened.")
         #expect(agent.surfaceState == .failed)
         #expect(agent.processState == .exited)
         #expect(try h.launchScripts().isEmpty)
         #expect(h.presentationChanges.isEmpty)
-        #expect(h.aggregateChanges == [.idle, .attention])
+        #expect(h.waitingCounts == [0, 1])
         #expect(h.notifier.posted.isEmpty)
         h.scheduler.advance(by: 10)
-        #expect(agent.displayState == .failed)
+        #expect(agent.shownState == .problem)
         #expect(agent.telemetryHealth == .awaiting)
     }
 
@@ -221,96 +248,17 @@ struct AgentBridgeLifecycleTests {
         try h.providerExited(id, status: 127)
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .failed)
-        #expect(agent.failureMessage
-            == "The provider exited before the agent session started (status 127).")
+        #expect(agent.shownState == .problem)
+        #expect(agent.record.problem?.text
+            == "It exited before its session started.")
         #expect(agent.processState == .exited)
-        // The login shell the launch script falls back to keeps the surface.
+        // The terminal closes once the launch script ends, after the report.
         #expect(agent.surfaceState == .open)
         #expect(h.host.hasSurface(id: id))
         #expect(try h.launchScripts().isEmpty)
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
         #expect(h.notifier.posted.first?.content.interruptionLevel == .active)
-        #expect(h.aggregateChanges == [.idle, .attention])
-    }
-
-    /// A fork keeps its marker until its session is saved, at its first
-    /// turn: Claude writes a forked session only with its first entry
-    /// (review S1 capture), so being alive is not enough. The first turn
-    /// makes the fork's own session the binding and drops the marker.
-    @Test func forkKeepsPendingForkUntilItsFirstTurn() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        try h.useRealClaudeLaunch()
-        let sourceID = try h.addAgent("Source")
-        h.start()
-        try h.launch(sourceID, session: "source-session")
-        try h.completeTurn(sourceID)
-        let fork = try forkOf(sourceID, in: h)
-        #expect(fork.name == "Source-fork")
-        #expect(h.exists(h.statusFile(fork.id, "fork.json")))
-
-        try h.activate(fork.id)
-        let request = try #require(h.providers.launchRequests.last)
-        #expect(request.agentID == fork.id)
-        #expect(request.pendingFork == AgentPendingFork(
-            provider: .claudeCode,
-            sourceSessionID: "source-session"))
-        #expect(request.session == nil)
-        let forkSession = try #require(h.agent(fork.id).sessionID)
-        #expect(try h.launchScript().contains(shellCommand([
-            "--resume", "source-session", "--fork-session", "--session-id", forkSession,
-        ])))
-
-        try h.osc(fork.id, "state=idle:app=claude-code")
-        try h.hook(fork.id, "SessionStart", session: forkSession)
-        #expect(h.exists(h.statusFile(fork.id, "fork.json")))
-        #expect(!h.exists(h.statusFile(fork.id, "session.json")))
-
-        try h.startTurn(fork.id)
-        #expect(!h.exists(h.statusFile(fork.id, "fork.json")))
-        #expect(try h.binding(fork.id) == AgentSessionBinding(
-            provider: .claudeCode,
-            sessionID: forkSession,
-            launchGeneration: try h.generation(fork.id)))
-    }
-
-    /// Review S1: a seeded fork opened and closed without a prompt has no
-    /// session on disk, so its next launch forks again from the source,
-    /// under a new ID, and starts; it is not told that its conversation is
-    /// missing, and its link to the source stays.
-    @Test func forkClosedWithoutAPromptForksAgain() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        try h.useRealClaudeLaunch()
-        let sourceID = try h.addAgent("Source")
-        h.start()
-        try h.launch(sourceID, session: "source-session")
-        try h.completeTurn(sourceID)
-        let fork = try forkOf(sourceID, in: h)
-
-        try h.activate(fork.id)
-        let first = try #require(h.agent(fork.id).sessionID)
-        try h.osc(fork.id, "state=idle:app=claude-code")
-        try h.hook(fork.id, "SessionStart", session: first)
-        try h.osc(fork.id, "state=clear")
-        try h.providerExited(fork.id, status: 0)
-        #expect(!h.exists(h.statusFile(fork.id, "session.json")))
-        #expect(h.exists(h.statusFile(fork.id, "fork.json")))
-
-        try h.activate(fork.id)
-        let agent = try h.agent(fork.id)
-        let second = try #require(agent.sessionID)
-        #expect(second != first)
-        #expect(try h.launchScript().contains(shellCommand([
-            "--resume", "source-session", "--fork-session", "--session-id", second,
-        ])))
-        try h.osc(fork.id, "state=idle:app=claude-code")
-        try h.hook(fork.id, "SessionStart", session: second)
-        try h.hook(fork.id, "SessionEnd", session: second)
-        #expect(agent.displayState == .idle)
-        #expect(agent.missingSessionID == nil)
-        #expect(agent.failureMessage == nil)
+        #expect(h.waitingCounts == [0, 1])
     }
 
     /// Review S1 and M3: a new agent's session is not on disk before its
@@ -339,7 +287,7 @@ struct AgentBridgeLifecycleTests {
         let declined = try launchesNewSession()
         try h.osc(id, "state=clear")
         try h.providerExited(id, status: 1)
-        #expect(agent.displayState == .failed)
+        #expect(agent.shownState == .problem)
         #expect(!h.exists(h.statusFile(id, "session.json")))
 
         try h.activate(id)
@@ -390,19 +338,18 @@ struct AgentBridgeLifecycleTests {
 
         try h.hook(id, "SessionEnd", session: "gone-session")
         let agent = try h.agent(id)
-        #expect(agent.displayState == .failed)
+        #expect(agent.shownState == .problem)
         #expect(agent.missingSessionID == "gone-session")
         try h.providerExited(id, status: 1)
 
-        #expect(agent.displayState == .failed)
+        #expect(agent.shownState == .problem)
         #expect(agent.processState == .exited)
         #expect(agent.missingSessionID == "gone-session")
-        #expect(agent.failureMessage
-            == "Claude Code found no conversation with session ID gone-session, so the agent could not be resumed.")
+        #expect(agent.record.problem == AgentRecord.Problem(kind: .conversationMissing))
         // The fallback shell keeps the terminal, which shows Claude's message.
         #expect(h.host.hasSurface(id: id))
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
-        #expect(h.notifier.announced == ["Agent encountered an error"])
+        #expect(h.notifier.announced == ["Agent, Claude Code cannot find this conversation. Type to start fresh."])
 
         let project = try #require(h.config.project(forAgent: id))
         h.bridge.startFresh(id: id, host: h.host, project: project)
@@ -417,7 +364,7 @@ struct AgentBridgeLifecycleTests {
         #expect(script.contains(shellCommand(["--session-id", fresh, "--name", "Agent"])))
         #expect(!script.contains("--resume"))
         #expect(agent.missingSessionID == nil)
-        #expect(agent.displayState == .launching)
+        #expect(agent.terminal == .starting)
         // Start fresh is only for a missing session.
         h.bridge.startFresh(id: id, host: h.host, project: project)
         #expect(agent.sessionID == fresh)
@@ -448,22 +395,21 @@ struct AgentBridgeLifecycleTests {
         try h.at(0.31)
         try h.providerExited(id, status: 1)
         let agent = try h.agent(id)
-        #expect(agent.displayState == .failed)
+        #expect(agent.shownState == .problem)
         #expect(agent.missingSessionID == nil)
         #expect(!agent.canOnlyStartFresh)
-        #expect(agent.failureMessage == "The provider exited before the agent session started (status 1).")
+        #expect(agent.record.problem?.text == "It exited before its session started.")
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
-        #expect(h.notifier.announced == ["Agent encountered an error"])
+        #expect(h.notifier.announced == ["Agent, It exited before its session started."])
 
         try h.hook(id, at: 0.303 + 0.25, "SessionEnd", session: "saved-session")
-        #expect(agent.displayState == .failed)
+        #expect(agent.shownState == .problem)
         #expect(agent.missingSessionID == "saved-session")
         #expect(agent.canOnlyStartFresh)
-        #expect(agent.failureMessage
-            == "Claude Code found no conversation with session ID saved-session, so the agent could not be resumed.")
+        #expect(agent.record.problem == AgentRecord.Problem(kind: .conversationMissing))
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
-        #expect(h.notifier.announced == ["Agent encountered an error"])
-        #expect(h.aggregateChanges == [.idle, .attention])
+        #expect(h.notifier.announced == ["Agent, It exited before its session started."])
+        #expect(h.waitingCounts == [0, 1])
     }
 
     /// Review M1 and M2: a missing saved session stays the agent's state
@@ -485,12 +431,11 @@ struct AgentBridgeLifecycleTests {
         try h.activate(id)
         try h.hook(id, "SessionEnd", session: "gone-session")
         try h.providerExited(id, status: 1)
-        let message = "Claude Code found no conversation with session ID gone-session, so the agent could not be resumed."
         func showsMissing(_ agent: AgentInstance) {
-            #expect(agent.displayState == .failed)
+            #expect(agent.shownState == .problem)
             #expect(agent.missingSessionID == "gone-session")
             #expect(agent.canOnlyStartFresh)
-            #expect(agent.failureMessage == message)
+            #expect(agent.record.problem == AgentRecord.Problem(kind: .conversationMissing))
         }
         showsMissing(try h.agent(id))
         #expect(try h.binding(id) == AgentSessionBinding(
@@ -510,8 +455,9 @@ struct AgentBridgeLifecycleTests {
         h.bridge.surfaceClosed(id: id, generation: try h.generation(id), processAlive: false)
         #expect(!h.host.hasSurface(id: id))
         showsMissing(try h.agent(id))
+        let calls = h.host.calls
         try h.activate(id)
-        #expect(h.host.calls.last == .select(id))
+        #expect(h.host.calls == calls)
         #expect(h.providers.launchRequests.count == 1)
 
         try h.restart()
@@ -542,8 +488,8 @@ struct AgentBridgeLifecycleTests {
         await yieldToMainActor(until: { !h.surfaceDeaths.isEmpty })
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .dead)
-        #expect(agent.displayState.label == "Exited")
+        #expect(agent.terminal == .notRunning)
+        #expect(agent.terminal == .notRunning)
         #expect(agent.surfaceState == .closed)
         #expect(agent.processState == .exited)
         #expect(try h.launchScripts().isEmpty)
@@ -577,12 +523,13 @@ struct AgentBridgeLifecycleTests {
         #expect(agent.surfaceState == .open)
         await yieldToMainActor(until: { agent.surfaceState == .closed })
 
-        #expect(agent.displayState == .dead)
+        // Its CLI went without the person and without an exit report.
+        #expect(agent.record.problem == AgentRecord.Problem(kind: .exited))
         #expect(agent.processState == .exited)
         #expect(agent.turnState == .inactive)
         #expect(!h.host.hasSurface(id: id))
         #expect(h.surfaceDeaths == [id])
-        #expect(h.aggregateChanges == [.idle, .running(1), .idle])
+        #expect(h.waitingCounts == [0, 1])
         #expect(!h.scheduler.hasRepeatingTimer)
     }
 
@@ -606,12 +553,12 @@ struct AgentBridgeLifecycleTests {
         await yieldToMainActor(until: { !h.host.hasSurface(id: id) })
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .dead)
+        #expect(agent.record.problem == AgentRecord.Problem(kind: .exited))
         #expect(agent.surfaceState == .closed)
         #expect(!h.host.hasSurface(id: id))
         #expect(h.surfaceDeaths == [id])
         #expect(h.providers.cleanups == [id])
-        #expect(try h.agent(other).displayState == .idle)
+        #expect(try h.agent(other).terminal == .idle)
         #expect(h.host.hasSurface(id: other))
 
         // The removed surface reports nothing more.
@@ -646,14 +593,14 @@ struct AgentBridgeLifecycleTests {
 
         // The close reaches the bridge through a main-actor task, so nothing
         // has happened when the post returns.
-        #expect(h.host.calls == [.select(id), .present(id)])
+        #expect(h.host.calls == [.present(id)])
         await yieldToMainActor(until: { h.host.calls.last == .confirmClose(id) })
-        #expect(h.host.calls == [.select(id), .present(id), .confirmClose(id)])
+        #expect(h.host.calls == [.present(id), .confirmClose(id)])
         #expect(agent.surfaceState == .open)
         #expect(h.surfaceDeaths.isEmpty)
 
         h.host.answerClose(confirmed: false)
-        #expect(agent.displayState == .idle)
+        #expect(agent.terminal == .idle)
         #expect(h.host.hasSurface(id: id))
         #expect(h.surfaceDeaths.isEmpty)
 
@@ -661,16 +608,28 @@ struct AgentBridgeLifecycleTests {
         await yieldToMainActor(until: { h.host.calls.filter { $0 == .confirmClose(id) }.count == 2 })
         #expect(h.host.calls.last == .confirmClose(id))
         h.host.answerClose(confirmed: true)
-        #expect(agent.displayState == .dead)
+        #expect(agent.terminal == .notRunning)
         #expect(agent.surfaceState == .closed)
         #expect(h.surfaceDeaths == [id])
         #expect(h.host.calls.last == .remove(id))
     }
 
-    /// Quitting stops the agents whose provider is starting or running, so
-    /// it asks and names them; agents that exited or never started do not
-    /// count. The sentence follows Ghostty's own text for terminal windows.
-    @Test func quitWithRunningAgentsAsks() throws {
+    /// Closing a running agent's terminal asks in words that say what
+    /// happens.
+    @Test func closeSaysWhatHappens() {
+        let running = AgentCloseConfirmation(name: "review")
+        #expect([running.title, running.message, AgentCloseConfirmation.confirm] == [
+            "Close review?",
+            "review is running. Closing stops it; it continues when you come back to it.",
+            "Close",
+        ])
+    }
+
+    /// Quitting asks only while agents work, and says they continue by
+    /// themselves (words.md); agents at their prompt, exited or never
+    /// started come back as they were. The sentence follows Ghostty's own
+    /// text for terminal windows.
+    @Test func quitWithWorkingAgentsAsks() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let running = try h.addAgent("Running")
@@ -679,7 +638,7 @@ struct AgentBridgeLifecycleTests {
         try h.addAgent("Never Started")
         h.start()
         #expect(h.bridge.runningAgentCount == 0)
-        #expect(AgentQuitConfirmation.notice(runningAgents: h.bridge.runningAgentCount) == nil)
+        #expect(h.bridge.quitNotice == nil)
 
         try h.launch(running)
         try h.activate(starting)
@@ -687,14 +646,25 @@ struct AgentBridgeLifecycleTests {
         try h.providerExited(exited, status: 0)
 
         #expect(h.bridge.runningAgentCount == 2)
-        #expect(AgentQuitConfirmation.notice(runningAgents: h.bridge.runningAgentCount)
-            == "2 agents are running. Their sessions can be resumed.")
-        #expect(AgentQuitConfirmation.notice(runningAgents: 1)
-            == "1 agent is running. Its session can be resumed.")
-        let terminalText = "The terminal still has a running process. If you quit, the process will be killed."
-        #expect(AgentQuitConfirmation.informativeText(terminalText, runningAgents: 2)
-            == terminalText + "\n\n2 agents are running. Their sessions can be resumed.")
-        #expect(AgentQuitConfirmation.informativeText(terminalText, runningAgents: 0) == terminalText)
+        // Agents at their prompt come back as they were: nothing to ask.
+        #expect(h.bridge.quitNotice == nil)
+        try h.startTurn(running)
+        #expect(h.bridge.quitNotice
+            == "1 agent is working. It stops now and continues by itself when Clawddy opens again.")
+        #expect(AgentQuitConfirmation.notice(working: 5)
+            == "5 agents are working. They stop now and continue by themselves when Clawddy opens again.")
+        let notice = AgentQuitConfirmation.notice(working: 2)
+        #expect(AgentQuitConfirmation.notice(working: 0, waitingToStart: 1) == "1 agent waiting its turn to start does not start.")
+        #expect(AgentQuitConfirmation.notice(working: 1, waitingToStart: 2)
+            == "1 agent is working. It stops now and continues by itself when Clawddy opens again. 2 agents waiting their turn to start do not start.")
+
+        // With no terminal window to ask about, it asks only while agents
+        // work, under the app's own name, and says what happens to them.
+        #expect(AgentQuitConfirmation.alert(notice: nil) == nil)
+        let alert = try #require(AgentQuitConfirmation.alert(notice: notice))
+        #expect(alert.messageText == "Quit Clawddy?")
+        #expect(alert.informativeText == notice)
+        #expect(alert.buttons.map(\.title) == ["Quit", "Cancel"])
     }
 
     /// A close the host reports for an earlier launch, here one that was
@@ -712,7 +682,7 @@ struct AgentBridgeLifecycleTests {
         h.bridge.surfaceClosed(id: id, generation: first, processAlive: false)
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .launching)
+        #expect(agent.terminal == .starting)
         #expect(agent.surfaceState == .open)
         #expect(h.host.hasSurface(id: id))
         #expect(h.surfaceDeaths.isEmpty)
@@ -740,8 +710,8 @@ struct AgentBridgeLifecycleTests {
 
         #expect(h.diagnostics.messages.contains(
             "program status \(id) generation \(launch): working kind=-"))
-        #expect(try h.agent(id).displayState == .working)
-        #expect(try h.agent(other).displayState == .idle)
+        #expect(try h.agent(id).activityState == .executing)
+        #expect(try h.agent(other).terminal == .idle)
 
         let before = h.diagnostics.messages
         NotificationCenter.default.post(
@@ -752,60 +722,61 @@ struct AgentBridgeLifecycleTests {
 
         h.bridge.programStatus(id: id, generation: UUID(), report: blocked)
         #expect(h.diagnostics.messages.last == "ignored program status for \(id)")
-        #expect(try h.agent(id).displayState == .working)
+        #expect(try h.agent(id).activityState == .executing)
         #expect(h.notifier.posted.isEmpty)
     }
 
     @Test func restartNewGenerationIgnoresOldEvents() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent", provider: .codex)
+        let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
         let first = try h.generation(id)
         try h.providerExited(id, status: 0)
-        #expect(try h.agent(id).displayState == .dead)
+        #expect(try h.agent(id).terminal == .notRunning)
         #expect(h.host.hasSurface(id: id))
 
         try h.activate(id)
 
         let second = try h.generation(id)
         #expect(second != first)
-        #expect(Array(h.host.calls.suffix(3)) == [.remove(id), .select(id), .present(id)])
+        #expect(Array(h.host.calls.suffix(2)) == [.remove(id), .present(id)])
         #expect(h.surfaceDeaths.isEmpty)
         #expect(h.providers.cleanups == [id])
         // The new launch resumes the session the first one bound.
         #expect(h.providers.launchRequests.last?.session?.sessionID == "session-1")
 
-        try h.append(id, h.record("UserPromptSubmit", generation: first, provider: .codex))
+        try h.append(id, h.record("UserPromptSubmit", generation: first))
         h.poll()
-        #expect(try h.agent(id).displayState == .launching)
+        #expect(try h.agent(id).terminal == .starting)
         #expect(h.diagnostics.messages.contains("ignored stale launch event for \(id)"))
 
-        try h.hook(id, "SessionStart")
-        #expect(try h.agent(id).displayState == .idle)
+        try h.osc(id, "state=idle:app=claude-code")
+        #expect(try h.agent(id).terminal == .idle)
     }
 
     @Test func providerMismatchAndUnknownSchemaAreSkippedAndAcknowledged() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent", provider: .codex)
+        let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
         let launch = try h.generation(id)
 
-        try h.append(id, h.record("UserPromptSubmit", generation: launch, provider: .claudeCode))
-        try h.append(id, h.record("UserPromptSubmit", generation: launch, provider: .codex)
+        try h.osc(id, "state=working:app=claude-code")
+        try h.append(id, h.record("UserPromptSubmit", generation: launch, provider: .codex))
+        try h.append(id, h.record("UserPromptSubmit", generation: launch)
             .replacingOccurrences(of: #""schemaVersion":1"#, with: #""schemaVersion":2"#))
         h.poll()
 
-        #expect(try h.agent(id).displayState == .idle)
+        #expect(try h.agent(id).terminal == .idle)
         #expect(h.diagnostics.messages.contains("ignored provider-mismatched event for \(id)"))
         #expect(h.diagnostics.messages.contains("ignored unsupported event schema for \(id): 2"))
 
         // The next read starts after them.
         try h.hook(id, "UserPromptSubmit")
-        #expect(try h.agent(id).displayState == .thinking)
+        #expect(try h.agent(id).activityState == .reasoning)
         #expect(h.diagnostics.messages.filter { $0.hasPrefix("ignored provider-mismatched") }.count == 1)
         #expect(h.diagnostics.messages.filter { $0.hasPrefix("ignored unsupported event schema") }.count == 1)
     }
@@ -827,8 +798,8 @@ struct AgentBridgeLifecycleTests {
         h.poll()
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .inactive)
-        #expect(agent.unreadCompletion == nil)
+        #expect(agent.terminal == .notRunning)
+        #expect(!agent.record.unread)
         #expect(h.notifier.posted.isEmpty)
         #expect(!h.diagnostics.messages.contains("ignored stale launch event for \(id)"))
 
@@ -838,12 +809,13 @@ struct AgentBridgeLifecycleTests {
 
         try h.activate(id)
         h.poll()
-        #expect(agent.displayState == .launching)
+        #expect(agent.terminal == .starting)
     }
 
     /// No terminal outlives the app. An agent that was working when the app
-    /// quit is not running after the restart, and what its hooks wrote after
-    /// the last read never applies; another agent's unread completion stays.
+    /// quit is not running after the restart, until it is brought back, and
+    /// is marked interrupted; what its hooks wrote after the last read never
+    /// applies; another agent's unread completion stays.
     @Test func agentRunningAtQuitIsNotRunningAfterRestart() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -863,11 +835,12 @@ struct AgentBridgeLifecycleTests {
         h.poll()
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .inactive)
+        // Its turn was cut off by the quit (flow 1).
+        #expect(agent.record.cutOff && agent.record.state == .working)
         #expect(agent.surfaceState == .inactive)
         #expect(agent.processState == .notStarted)
-        #expect(agent.unreadCompletion == nil)
-        #expect(try h.agent(other).displayState == .finished)
+        #expect(!agent.record.unread)
+        #expect(try h.agent(other).shownState == .finishedUnread)
         #expect(h.bridge.runningAgentCount == 0)
         #expect(h.notifier.posted.count == posted)
         #expect(!h.diagnostics.messages.contains("ignored stale launch event for \(id)"))
@@ -892,16 +865,6 @@ struct AgentBridgeLifecycleTests {
 
         #expect(h.providers.launchRequests.count == 1)
         #expect(try h.launchScripts().isEmpty)
-        #expect(try h.agent(id).displayState == .launching)
+        #expect(try h.agent(id).terminal == .starting)
     }
-}
-
-/// A fork of `sourceID` in the harness's task, as the agent list makes one.
-@MainActor
-private func forkOf(_ sourceID: UUID, in h: AgentBridgeHarness) throws -> AgentEntry {
-    try #require(h.bridge.forkAgent(
-        sourceId: sourceID,
-        config: h.config,
-        project: AgentBridgeHarness.projectName,
-        task: AgentBridgeHarness.taskName))
 }

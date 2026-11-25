@@ -5,11 +5,14 @@ import UserNotifications
 
 /// Characterization of how `AgentBridge` turns observations into activity,
 /// notifications, unread state and renames. Hook records carry "" for absent
-/// fields, as the hook script writes them. Codex's turn activity comes from
-/// its hooks, Claude's from its terminal's program status (P3.5).
+/// fields, as the hook script writes them. Every provider's turn activity
+/// comes from its terminal's program status (P3.5); Codex's completion also
+/// from its notify program's record.
 @MainActor
 struct AgentBridgeActivityTests {
-    @Test func promptToolPermissionStopSequence() throws {
+    /// A Codex turn as its terminal reports it, completed by its notify
+    /// program's record.
+    @Test func promptPermissionCompletionSequence() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent", provider: .codex)
@@ -17,36 +20,34 @@ struct AgentBridgeActivityTests {
         try h.launch(id)
         let agent = try h.agent(id)
 
-        try h.hook(id, "UserPromptSubmit")
-        #expect(agent.displayState == .thinking)
-        try h.hook(id, "PreToolUse")
-        #expect(agent.displayState == .working)
-        try h.hook(id, "PostToolUse")
-        #expect(agent.displayState == .thinking)
+        try h.startTurn(id)
+        #expect(agent.activityState == .executing)
         #expect(h.notifier.posted.isEmpty)
 
-        try h.hook(id, "PermissionRequest")
-        #expect(agent.displayState == .permission)
+        try h.osc(id, "state=blocked:kind=permission:app=codex")
+        #expect(agent.record.state == .asks)
         let waiting = try #require(h.notifier.posted.last)
         #expect(waiting.identifier == "clawddy.\(id.uuidString).waiting")
         #expect(waiting.content.interruptionLevel == .timeSensitive)
-        #expect(waiting.content.sound != nil)
+        #expect(waiting.content.sound == nil)
 
-        try h.hook(id, "Stop")
-        #expect(agent.displayState == .finished)
+        try h.osc(id, "state=working:app=codex")
+        try h.hook(id, "agent-turn-complete")
+        #expect(agent.shownState == .finishedUnread)
         #expect(h.notifier.posted.count == 2)
         let completed = try #require(h.notifier.posted.last)
         #expect(completed.identifier == "clawddy.\(id.uuidString).completed")
         #expect(completed.content.interruptionLevel == .passive)
         #expect(completed.content.sound == nil)
-        let unread = try #require(agent.unreadCompletion)
+        let unread = try #require(agent.lastAppliedCompletion)
         #expect(unread.sessionID == "session-1")
         #expect(unread.launchGeneration == agent.launchGeneration)
-        #expect(Set(try h.persisted("unreadCompletions").keys) == [id])
-        #expect(h.aggregateChanges == [.idle, .running(1), .attention])
+        #expect(try h.recordedUnread() == [id])
+        // A question and an unread finish both wait on the person.
+        #expect(h.waitingCounts == [0, 1, 0, 1])
     }
 
-    @Test func stopWhileViewedNoUnreadNoNotification() throws {
+    @Test func completionWhileViewedNoUnreadNoNotification() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
         let id = try h.addAgent("Agent", provider: .codex)
@@ -54,15 +55,15 @@ struct AgentBridgeActivityTests {
         try h.launch(id)
         h.view(id)
 
-        try h.hook(id, "UserPromptSubmit")
-        try h.hook(id, "Stop")
+        try h.startTurn(id)
+        try h.hook(id, "agent-turn-complete")
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .idle)
-        #expect(agent.unreadCompletion == nil)
+        #expect(agent.terminal == .idle)
+        #expect(!agent.record.unread)
         #expect(agent.lastAppliedCompletion != nil)
         #expect(h.notifier.posted.isEmpty)
-        #expect(try h.persisted("unreadCompletions").isEmpty)
+        #expect(try h.recordedUnread().isEmpty)
     }
 
     @Test func viewingAcknowledgesPersistsAndClears() throws {
@@ -72,20 +73,20 @@ struct AgentBridgeActivityTests {
         h.start()
         try h.launch(id)
         try h.completeTurn(id)
-        #expect(Set(try h.persisted("unreadCompletions").keys) == [id])
+        #expect(try h.recordedUnread() == [id])
 
         h.view(id)
 
         let agent = try h.agent(id)
-        #expect(agent.unreadCompletion == nil)
-        #expect(agent.displayState == .idle)
-        #expect(try h.persisted("unreadCompletions").isEmpty)
+        #expect(!agent.record.unread)
+        #expect(agent.terminal == .idle)
+        #expect(try h.recordedUnread().isEmpty)
         #expect(h.notifier.removed == [[
             "clawddy.\(id.uuidString).completed",
             "clawddy.\(id.uuidString).waiting",
             "clawddy.\(id.uuidString).error",
         ]])
-        #expect(h.aggregateChanges.last == .idle)
+        #expect(h.waitingCounts.last == 0)
     }
 
     /// Claude's `StopFailure` hook fails the turn its terminal reported, and
@@ -101,83 +102,46 @@ struct AgentBridgeActivityTests {
         try h.hook(id, "StopFailure")
 
         let agent = try h.agent(id)
-        #expect(agent.displayState == .error)
-        #expect(agent.displayState.label == "Needs Attention")
-        #expect(agent.runtimeErrorMessage == "The agent reported a runtime error.")
-        #expect(agent.unreadCompletion == nil)
+        #expect(agent.shownState == .problem)
+        #expect(agent.record.problem?.kind == .error)
+        #expect(agent.sentence.text
+            == "Stopped with an error. Open it to see why.")
+        #expect(agent.record.problem == AgentRecord.Problem(kind: .error))
+        #expect(!agent.record.unread)
         let error = try #require(h.notifier.posted.last)
         #expect(error.identifier == "clawddy.\(id.uuidString).error")
         #expect(error.content.interruptionLevel == .active)
 
         try h.startTurn(id)
-        #expect(agent.displayState == .working)
-        #expect(agent.runtimeErrorMessage == nil)
-    }
-
-    @Test func compactionExpiresAfter30s() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent", provider: .codex)
-        h.start()
-        try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-
-        try h.hook(id, "PreCompact")
-        let agent = try h.agent(id)
-        #expect(agent.displayState == .compacting)
-        #expect(agent.displayState.label == "Optimizing Context")
-
-        h.scheduler.advance(by: 29)
-        #expect(agent.displayState == .compacting)
-        h.scheduler.advance(by: 2)
-        #expect(agent.displayState == .thinking)
-    }
-
-    @Test func silent120sIsDelayedAndRecovers() throws {
-        let h = try AgentBridgeHarness()
-        defer { h.remove() }
-        let id = try h.addAgent("Agent", provider: .codex)
-        h.start()
-        try h.launch(id)
-        try h.hook(id, "UserPromptSubmit")
-        let agent = try h.agent(id)
-
-        // A turn with no provider fact for 120 s shows as delayed.
-        h.scheduler.advance(by: 115)
-        #expect(agent.displayState == .thinking)
-        h.scheduler.advance(by: 10)
-        #expect(agent.displayState == .statusDelayed)
-        #expect(agent.displayState.label == "Status Delayed")
-        #expect(agent.telemetryHealth == .delayed)
-
-        try h.hook(id, "PreToolUse")
-        #expect(agent.displayState == .working)
-        #expect(agent.telemetryHealth == .live)
+        #expect(agent.activityState == .executing)
+        #expect(agent.record.problem == nil)
     }
 
     @Test func partialLineWaitsForNewline() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent", provider: .codex)
+        let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
+        try h.startTurn(id)
         let agent = try h.agent(id)
 
-        try h.appendRaw(id, h.record("UserPromptSubmit", generation: try h.generation(id), provider: .codex))
+        try h.appendRaw(id, h.record("StopFailure", generation: try h.generation(id)))
         h.poll()
-        #expect(agent.displayState == .idle)
+        #expect(agent.isRunning)
 
         try h.appendRaw(id, "\n")
         h.poll()
-        #expect(agent.displayState == .thinking)
+        #expect(agent.shownState == .problem)
     }
 
     @Test func journalOver1MiBCompactsAndLaterEventsApply() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent", provider: .codex)
+        let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
+        try h.startTurn(id)
         let events = h.statusFile(id, "events")
 
         // One record of an event the provider table does not know, padded
@@ -185,13 +149,12 @@ struct AgentBridgeActivityTests {
         try h.append(id, h.record(
             "Padding",
             generation: try h.generation(id),
-            provider: .codex,
             session: String(repeating: "x", count: 1_048_576)))
         h.poll()
 
         #expect(try h.size(events) == 0)
-        try h.hook(id, "UserPromptSubmit")
-        #expect(try h.agent(id).displayState == .thinking)
+        try h.hook(id, "StopFailure")
+        #expect(try h.agent(id).shownState == .problem)
     }
 
     /// Compaction cuts off only what was read: records read before it never
@@ -200,38 +163,34 @@ struct AgentBridgeActivityTests {
     @Test func compactionNeitherReplaysNorLoses() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent", provider: .codex)
+        let id = try h.addAgent("Agent")
         h.start()
         try h.launch(id)
         let agent = try h.agent(id)
         let launch = try h.generation(id)
-        let waiting = "clawddy.\(id.uuidString).waiting"
-        let completed = "clawddy.\(id.uuidString).completed"
+        let error = "clawddy.\(id.uuidString).error"
 
-        try h.append(id, h.record("UserPromptSubmit", generation: launch, provider: .codex))
-        try h.append(id, h.record("PermissionRequest", generation: launch, provider: .codex))
+        try h.osc(id, "state=working:app=claude-code")
+        try h.append(id, h.record("UserPromptSubmit", generation: launch))
         try h.append(id, h.record(
             "Padding",
             generation: launch,
-            provider: .codex,
             session: String(repeating: "x", count: 1_048_576)))
-        let unfinished = h.record("Stop", generation: launch, provider: .codex)
+        let unfinished = h.record("StopFailure", generation: launch)
         try h.appendRaw(id, unfinished)
         h.poll()
 
-        #expect(agent.displayState == .permission)
-        #expect(h.notifier.posted.map(\.identifier) == [waiting])
+        #expect(agent.isRunning)
+        #expect(h.notifier.posted.isEmpty)
         #expect(try Data(contentsOf: h.statusFile(id, "events")) == Data(unfinished.utf8))
 
         try h.appendRaw(id, "\n")
         h.poll()
-        #expect(agent.displayState == .finished)
-        #expect(h.notifier.posted.map(\.identifier) == [waiting, completed])
+        #expect(agent.shownState == .problem)
+        #expect(h.notifier.posted.map(\.identifier) == [error])
 
         h.poll()
-        try h.hook(id, "UserPromptSubmit")
-        #expect(agent.displayState == .thinking)
-        #expect(h.notifier.posted.map(\.identifier) == [waiting, completed])
+        #expect(h.notifier.posted.map(\.identifier) == [error])
     }
 
     /// Renaming changes the label at once and reaches no terminal, even while
@@ -246,7 +205,7 @@ struct AgentBridgeActivityTests {
         h.start()
         try h.launch(id, session: "session-1")
         let agent = try h.agent(id)
-        #expect(agent.displayState == .idle)
+        #expect(agent.terminal == .idle)
         let hostCalls = h.host.calls
 
         #expect(h.config.renameAgent(id: id, newName: "New Name"))
@@ -254,9 +213,7 @@ struct AgentBridgeActivityTests {
         #expect(agent.name == "New Name")
         try h.completeTurn(id)
         #expect(h.host.calls == hostCalls)
-        let state = try #require(
-            JSONSerialization.jsonObject(with: Data(contentsOf: h.root.stateFile)) as? [String: Any])
-        #expect(state["pendingRenames"] == nil)
+        #expect(try h.agent(id).record.nameSource == .person)
 
         try h.providerExited(id, status: 0)
         try h.activate(id)
@@ -290,7 +247,7 @@ struct AgentBridgeActivityTests {
         try h.hook(id, "SessionStart")
         #expect(agent.metadata?.observedAt == h.scheduler.now)
         #expect(agent.metadata?.modelID == "claude-test")
-        #expect(agent.metadata?.displayModel == "Claude Test")
+        #expect(agent.metadata?.modelDisplayName == "Claude Test")
     }
 
     /// The hook script the launch installs, run with the arguments of the
@@ -326,21 +283,21 @@ struct AgentBridgeActivityTests {
             sessionID: session,
             launchGeneration: generation))
         // Liveness is the terminal's to report.
-        #expect(agent.displayState == .launching)
+        #expect(agent.terminal == .starting)
         try h.osc(id, "state=idle:app=claude-code")
-        #expect(agent.displayState == .idle)
+        #expect(agent.terminal == .idle)
         #expect(try h.launchScripts().isEmpty)
 
         try h.startTurn(id)
         try run(#"{"session_id":"\#(session)","hook_event_name":"PreCompact","trigger":"manual","custom_instructions":"","prompt_id":"prompt-1"}"#)
-        #expect(agent.displayState == .compacting)
+        #expect(agent.terminal == .compacting)
         try h.osc(id, "state=done:app=claude-code")
-        #expect(agent.displayState == .idle)
+        #expect(agent.terminal == .idle)
         #expect(agent.lastAppliedCompletion == nil)
 
         try h.startTurn(id)
         try run(#"{"session_id":"\#(session)","hook_event_name":"StopFailure","error":"server_error","last_assistant_message":"API Error","prompt_id":"prompt-2"}"#)
-        #expect(agent.displayState == .error)
+        #expect(agent.shownState == .problem)
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).error"])
     }
 
@@ -392,7 +349,7 @@ struct AgentBridgeActivityTests {
         // A resumed session that started ends as usual.
         try run(#"{"session_id":"\#(cleared)","hook_event_name":"SessionEnd","reason":"prompt_input_exit"}"#)
         #expect(agent.missingSessionID == nil)
-        #expect(agent.failureMessage == nil)
+        #expect(agent.record.problem == nil)
     }
 
     /// `/clear` ends the session with `SessionEnd`, `reason: "clear"`, while
@@ -420,12 +377,12 @@ struct AgentBridgeActivityTests {
 
         try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionStart","source":"startup"}"#)
         try h.osc(id, "state=idle:app=claude-code")
-        #expect(agent.displayState == .idle)
+        #expect(agent.terminal == .idle)
 
         try run(#"{"session_id":"\#(launched)","hook_event_name":"SessionEnd","reason":"clear"}"#)
         #expect(agent.processState == .running)
-        #expect(agent.displayState == .idle)
-        #expect(agent.failureMessage == nil)
+        #expect(agent.terminal == .idle)
+        #expect(agent.record.problem == nil)
         #expect(h.bridge.runningAgentCount == 1)
         #expect(h.notifier.posted.isEmpty)
 
@@ -436,11 +393,97 @@ struct AgentBridgeActivityTests {
             sessionID: cleared,
             launchGeneration: generation))
         try h.startTurn(id)
-        #expect(agent.displayState == .working)
+        #expect(agent.activityState == .executing)
 
         try h.providerExited(id, status: 0)
         #expect(agent.processState == .exited)
-        #expect(agent.displayState == .dead)
+        #expect(agent.terminal == .notRunning)
+    }
+
+    /// The waiting count is the record's `isWaitingOnYou` and nothing else:
+    /// a finished unread agent and a problem count, a settled one does not.
+    @Test func theWaitingCountIsTheRecords() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let done = try h.addAgent("Done")
+        let failed = try h.addAgent("Failed")
+        h.start()
+        try h.launch(done)
+        try h.completeTurn(done)
+        try h.launch(failed)
+        try h.startTurn(failed)
+        try h.osc(failed, "state=error:app=claude-code")
+        #expect(h.bridge.waitingAgentCount == 2)
+        #expect(h.waitingCounts == [0, 1, 2])
+        #expect(Set(h.bridge.agents.values.filter(\.isWaiting).map(\.id)) == [done, failed])
+        try h.agent(done).apply(.settled(includingWorking: false), at: h.scheduler.now)
+        #expect(h.bridge.waitingAgentCount == 1)
+    }
+
+    /// Ruling 12: what a working agent reports of its activity changes
+    /// neither its place in the waiting order nor what find reads of it;
+    /// a transition changes both, and the waiting count follows it alone.
+    @Test func activityWakesNeitherTheWaitingOrderNorFind() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Worker")
+        h.start()
+        try h.launch(id)
+        try h.startTurn(id)
+        let agent = try h.agent(id)
+        let version = agent.searchVersion
+        let counts = h.waitingCounts
+        for step in 0..<20 {
+            try h.osc(id, "state=working:app=claude-code:msg=" + Data("Running step \(step)".utf8).base64EncodedString())
+        }
+        #expect(agent.record.activity != nil)
+        #expect(agent.searchVersion == version)
+        #expect(agent.waitingKey == nil)
+        #expect(h.waitingCounts == counts)
+        try h.osc(id, "state=done:app=claude-code")
+        #expect(agent.waitingKey != nil)
+        #expect(agent.searchVersion > version)
+        #expect(h.bridge.waitingAgentCount == 1)
+    }
+
+    /// A line of the event file that is no record, and a hook that could
+    /// not record its event, each stop the agent with a problem saying so.
+    @Test func lostReportsAreShown() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let garbled = try h.addAgent("Garbled")
+        let failing = try h.addAgent("Failing")
+        h.start()
+        try h.launch(garbled)
+        try h.launch(failing)
+        try h.append(garbled, "{not a record")
+        h.poll()
+        #expect(try h.agent(garbled).record.problem == AgentRecord.Problem(kind: .reportFailed))
+        try h.append(failing, #"{"schemaVersion":1,"provider":"claudeCode","launchGeneration":"\#(try h.generation(failing).uuidString)","hookEventName":"HookFailed","text":"Stop: could not record"}"#)
+        h.poll()
+        #expect(try h.agent(failing).record.problem == AgentRecord.Problem(kind: .reportFailed))
+        #expect(h.notifier.posted.count == 2)
+    }
+
+    /// Codex's title stops spinning when its turn ends: the turn completes,
+    /// and the notify that follows ends nothing more.
+    @Test func codexTitleSpinnerEndsTheTurn() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Codex", provider: .codex)
+        h.start()
+        try h.launch(id)
+        try h.startTurn(id)
+        let generation = try h.generation(id)
+        h.bridge.surfaceTitle(id: id, generation: generation, title: "⠙ work")
+        h.bridge.surfaceTitle(id: id, generation: generation, title: "⠹ work")
+        #expect(try h.agent(id).record.state == .working)
+        h.bridge.surfaceTitle(id: id, generation: generation, title: "Fix the sheet | work")
+        #expect(try h.agent(id).record.state == .finished)
+        #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(id.uuidString).completed"])
+        try h.hook(id, "agent-turn-complete", turn: "turn-1")
+        #expect(h.notifier.posted.count == 1)
+        #expect(try h.agent(id).record.state == .finished)
     }
 }
 

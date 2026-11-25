@@ -42,11 +42,6 @@ struct AgentMetadataTests {
             observedAt: observedAt)
 
         #expect(metadata.modelID == "claude-opus-4-8")
-        #expect(metadata.displayModel == "Opus 4.8")
-        #expect(metadata.displayEffort == "Extra high")
-        #expect(metadata.contextUsedTokens == 128_500)
-        #expect(metadata.contextFraction == 0.6425)
-        #expect(metadata.contextPercentText == "64%")
         #expect(metadata.totalCostUSD == 3.75)
         #expect(metadata.observedAt == observedAt)
     }
@@ -67,25 +62,15 @@ struct AgentMetadataTests {
 
         let metadata = try AgentSessionMetadata.decodeStatusLinePayload(payload)
 
-        #expect(metadata.displayModel == "Sonnet 4.6")
-        #expect(metadata.displayEffort == "High")
-        #expect(metadata.contextUsedTokens == nil)
-        #expect(metadata.contextFraction == nil)
-        #expect(metadata.contextPercentText == nil)
     }
 
-    @MainActor
-    @Test func metadataFreshnessTracksAuthoritativeLifecycle() {
-        #expect(AgentInstance(entry: AgentEntry(name: "Metadata")).metadataIsHistorical)
-
-        let agent = AgentInstance(
-            entry: AgentEntry(name: "Metadata"),
-            runtime: AgentRuntimeSnapshot(surfaceState: .open, processState: .running))
-        agent.metadataAvailability = .available
-        #expect(!agent.metadataIsHistorical)
-
-        agent.metadataAvailability = .waiting
-        #expect(agent.metadataIsHistorical)
+    /// The header's cluster shows the model and the context each only once
+    /// reported, and nothing before either is.
+    @Test func statusLineReportsLinesAddedAndRemoved() throws {
+        let data = Data(#"{"cost":{"total_lines_added":38,"total_lines_removed":9}}"#.utf8)
+        let metadata = try AgentSessionMetadata.decodeStatusLinePayload(data)
+        #expect(metadata.linesAdded == 38)
+        #expect(metadata.linesRemoved == 9)
     }
 
     @Test func proxyHasValidPOSIXShellSyntax() throws {

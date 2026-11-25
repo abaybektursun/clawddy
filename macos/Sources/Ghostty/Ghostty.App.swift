@@ -1197,14 +1197,22 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
-                NotificationCenter.default.post(
-                    name: .ghosttyBellDidRing,
-                    object: surfaceView
-                )
+                bellRang(on: surfaceView)
 
             default:
                 assertionFailure()
             }
+        }
+
+        /// The terminal's bell rang. Clawddy: an agent's terminal never rings
+        /// one, by sound, the Dock or its border (last review ruling 7); a
+        /// plain Ghostty terminal keeps Ghostty's bell.
+        static func bellRang(on surfaceView: SurfaceView) {
+            guard !surfaceView.isAgentTerminal else { return }
+            NotificationCenter.default.post(
+                name: .ghosttyBellDidRing,
+                object: surfaceView
+            )
         }
 
         private static func selectionChanged(
@@ -1613,12 +1621,13 @@ extension Ghostty {
             title: String,
             body: String,
             requireFocus: Bool = true) {
+            // Clawddy: an agent's terminal posts nothing of its own; the
+            // app's notification, off until the person turns it on, is the
+            // one (flows.md 6.11), and it never asks for a permission or
+            // makes a sound unasked.
+            guard !surfaceView.isAgentTerminal else { return }
             let center = UNUserNotificationCenter.current()
-            center.requestAuthorization(options: [.alert, .sound]) { _, error in
-                if let error = error {
-                    Ghostty.logger.error("Error while requesting notification authorization: \(error, privacy: .public)")
-                }
-            }
+            AgentPermissionRequests.notifications([.alert, .sound], for: "a terminal's notification")
 
             center.getNotificationSettings { settings in
                 guard settings.authorizationStatus == .authorized else { return }
@@ -1643,6 +1652,9 @@ extension Ghostty {
             case GHOSTTY_TARGET_SURFACE:
                 guard let surface = target.target.surface else { return }
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
+                // Clawddy: an agent's terminal gives no notice of a finished
+                // command, by bell or notification (last review ruling 7).
+                guard !surfaceView.isAgentTerminal else { return }
 
                 // Determine if we even care about command finish notifications
                 guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
@@ -1664,10 +1676,7 @@ extension Ghostty {
                 let actions = config.notifyOnCommandFinishAction
 
                 if actions.contains(.bell) {
-                    NotificationCenter.default.post(
-                        name: .ghosttyBellDidRing,
-                        object: surfaceView
-                    )
+                    bellRang(on: surfaceView)
                 }
 
                 if actions.contains(.notify) {
@@ -2239,7 +2248,7 @@ extension Ghostty {
                 guard let surfaceView = self.surfaceView(from: surface) else { return }
                 guard let config = (NSApplication.shared.delegate as? AppDelegate)?.ghostty.config else { return }
 
-                guard config.progressStyle else {
+                guard config.progressStyle, !surfaceView.isAgentTerminal else {
                     Ghostty.logger.debug("progress_report action blocked by config")
                     DispatchQueue.main.async {
                         surfaceView.progressReport = nil
