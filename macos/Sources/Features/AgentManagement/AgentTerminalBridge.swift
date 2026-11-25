@@ -233,6 +233,10 @@ final class AgentBridge {
     private var turnStartTimers: [UUID: any AgentTimer] = [:]
     private var signInTimers: [UUID: any AgentTimer] = [:]
     private var launchScripts: [UUID: URL] = [:]
+    /// Where each launch's script writes its provider's exit status
+    /// (`AgentLaunchCoordinator.exitStatusURL`), read when its terminal
+    /// goes. Kept after the script itself is removed.
+    private var exitStatusFiles: [UUID: URL] = [:]
     let root: AgentDataRoot
     private let providers: AgentProviderTable
     private let scheduler: any AgentScheduler
@@ -617,9 +621,12 @@ final class AgentBridge {
     }
 
     /// Its launch is under way: its CLI does not yet read its input, and has
-    /// not failed or gone.
+    /// not failed, gone, or started asking the person something (a dialog at
+    /// start-up): an agent that asks has started, and holds no start slot.
     private func isComingUp(_ id: UUID) -> Bool {
-        guard let agent = agents[id], agent.record.problem == nil, !agent.runtime.inputReady else { return false }
+        guard let agent = agents[id], agent.record.problem == nil, agent.record.state != .asks,
+              !agent.runtime.inputReady
+        else { return false }
         return agent.surfaceState == .opening || agent.isRunning
     }
 
@@ -1156,6 +1163,7 @@ final class AgentBridge {
             }
             removeLaunchScript(for: agentID)
             launchScripts[agentID] = launch.scriptURL
+            exitStatusFiles[agentID] = AgentLaunchCoordinator.exitStatusURL(script: launch.scriptURL)
             let isNew = host.presentPreparedSurface(
                 agent: agent
             ) {
@@ -1407,6 +1415,12 @@ final class AgentBridge {
                 "ignored \(report.state) on record \(AgentLaunchCoordinator.exitReportID) for \(agent.id): an exit report is a clear with a decimal exit status as its message, here \(report.message ?? "none")")
             return
         }
+        providerExited(agent, status: status, generation: generation)
+    }
+
+    /// Its provider exited with `status`, as its launch script reported in
+    /// the terminal or wrote to its exit status file.
+    private func providerExited(_ agent: AgentInstance, status: Int, generation: UUID) {
         diagnose(.info, "provider of \(agent.id) exited with status \(status), generation \(generation)")
         let effects = apply(
             .provider(
@@ -1662,7 +1676,7 @@ final class AgentBridge {
         }
         // Sends waiting for its start: delivered once it reads its input,
         // given up when the start fails or it asks.
-        if pendingSends[agent.id] != nil, agent.runtime.inputReady || !isComingUp(agent.id) || agent.record.state == .asks {
+        if pendingSends[agent.id] != nil, agent.runtime.inputReady || !isComingUp(agent.id) {
             let id = agent.id
             scheduler.after(0) { [weak self] in self?.deliverPendingSends(of: id) }
         }
@@ -1687,7 +1701,7 @@ final class AgentBridge {
         }
         guard turnStartTimers[id] == nil else { return }
         turnStartTimers[id] = scheduler.timer(
-            interval: providers[agent.provider].turnStartDelay,
+            interval: providers[agent.provider].reports.turnStartDelay,
             repeats: false
         ) { [weak self, weak agent] in
             guard let self, let agent else { return }
@@ -1841,6 +1855,16 @@ final class AgentBridge {
     /// started again by itself (`docs/clawddy-design/flows.md` 2.2).
     private func destroySurface(id: UUID, byUser: Bool) {
         invalidateTimers(for: id)
+        // An exit report the terminal had not read when Ghostty told of the
+        // process's exit is in the launch script's exit status file.
+        if let statusFile = exitStatusFiles.removeValue(forKey: id) {
+            if let agent = agents[id], let generation = agent.launchGeneration, agent.processState != .exited,
+               let data = FileManager.default.contents(atPath: statusFile.path),
+               let status = String(bytes: data, encoding: .utf8).flatMap({ Int($0) }) {
+                providerExited(agent, status: status, generation: generation)
+            }
+            removeFileOffMain(statusFile)
+        }
         removeLaunchScript(for: id)
         if let provider = agents[id]?.provider {
             removeProviderFiles(of: id, provider: provider)

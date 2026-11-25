@@ -140,12 +140,17 @@ final class AgentSearchIndex {
     /// The commands whose titles hold every typed word, with where each word
     /// is: up to 4 for typed text, 5 for an empty field, none while
     /// "settled" lists settled agents.
-    static func commands(_ titles: [String], matching query: String) -> [(index: Int, marks: [NSRange])] {
+    static func commands(
+        _ titles: [String], searchTexts: [String]? = nil, matching query: String
+    ) -> [(index: Int, marks: [NSRange])] {
         let (words, settledOnly) = words(of: query)
         guard !settledOnly else { return [] }
         let matching = titles.indices.compactMap { index -> (index: Int, marks: [NSRange])? in
-            let marks = ranges(of: words, in: titles[index])
-            return marks.count == words.count ? (index, marks) : nil
+            // A command's search text is its title and words after it; only
+            // what matched in the title is marked.
+            let marks = ranges(of: words, in: searchTexts?[index] ?? titles[index])
+            guard marks.count == words.count else { return nil }
+            return (index, marks.filter { NSMaxRange($0) <= (titles[index] as NSString).length })
         }
         return Array(matching.prefix(words.isEmpty ? 5 : 4))
     }

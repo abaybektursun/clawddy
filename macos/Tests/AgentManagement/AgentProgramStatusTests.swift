@@ -540,7 +540,7 @@ struct AgentProgramStatusTests {
         try h.hook(id, at: 22.600, "PreCompact", trigger: "manual")
         #expect(agent.turnState == .inactive)
         try h.osc(id, at: 22.627, working)
-        try h.at(22.627 + h.providers.table.claudeCode.turnStartDelay)
+        try h.at(22.627 + h.providers.table.claudeCode.reports.turnStartDelay)
         #expect(agent.activityState == .executing)
         try h.osc(id, at: 35.840, greetedSummary)
 

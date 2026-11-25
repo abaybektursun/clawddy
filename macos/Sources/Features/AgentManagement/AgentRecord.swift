@@ -37,6 +37,34 @@ struct AgentRecord: Codable, Equatable, Sendable {
         var text: String
         var at: Date
         var by: Sender
+        /// Sent while a turn worked: the CLI holds it behind that turn,
+        /// which it is not the instruction of. Cleared when that turn ends.
+        var queued = false
+
+        init(text: String, at: Date, by: Sender, queued: Bool = false) {
+            self.text = text
+            self.at = at
+            self.by = by
+            self.queued = queued
+        }
+
+        private enum CodingKeys: String, CodingKey { case text, at, by, queued }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            text = try container.decode(String.self, forKey: .text)
+            at = try container.decode(Date.self, forKey: .at)
+            by = try container.decode(Sender.self, forKey: .by)
+            queued = try container.decodeIfPresent(Bool.self, forKey: .queued) ?? false
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(text, forKey: .text)
+            try container.encode(at, forKey: .at)
+            try container.encode(by, forKey: .by)
+            if queued { try container.encode(queued, forKey: .queued) }
+        }
     }
 
     /// Why the agent stopped with a problem. The CLI's own words are `text`
@@ -96,8 +124,9 @@ struct AgentRecord: Codable, Equatable, Sendable {
     var firstInstructionAt: Date?
     /// The last `promptLimit` prompts sent to it, oldest first.
     var prompts: [Prompt] = []
-    /// A prompt sent while it worked, which its CLI holds for the turn.
-    var queued: String?
+    /// The last prompt sent while it worked, which its CLI holds behind
+    /// the turn (`Prompt.queued`).
+    var queued: String? { prompts.last(where: \.queued)?.text }
     var lastMessage: String?
     var lastMessageAt: Date?
     /// What it is doing now, as its CLI reports it while working.
@@ -160,7 +189,7 @@ struct AgentRecord: Codable, Equatable, Sendable {
 extension AgentRecord {
     private enum CodingKeys: String, CodingKey {
         case state, changedAt, unread, settledAt, cutOff, continuedInARow, interrupted
-        case nameSource, firstInstruction, firstInstructionAt, prompts, queued, lastMessage
+        case nameSource, firstInstruction, firstInstructionAt, prompts, lastMessage
         case lastMessageAt, activity, question, problem, limit
     }
 
@@ -179,7 +208,6 @@ extension AgentRecord {
         firstInstruction = try container.decodeIfPresent(String.self, forKey: .firstInstruction)
         firstInstructionAt = try container.decodeIfPresent(Date.self, forKey: .firstInstructionAt)
         prompts = try container.decodeIfPresent([Prompt].self, forKey: .prompts) ?? []
-        queued = try container.decodeIfPresent(String.self, forKey: .queued)
         lastMessage = try container.decodeIfPresent(String.self, forKey: .lastMessage)
         lastMessageAt = try container.decodeIfPresent(Date.self, forKey: .lastMessageAt)
         activity = try container.decodeIfPresent(String.self, forKey: .activity)

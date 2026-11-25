@@ -82,6 +82,16 @@ enum AgentCommand: Hashable {
     static let opensWindow = Set<AgentCommand>(
         [.showAgents, .newAgent, .addProject, .findAgent, .nextWaiting, .keys] + newAgentWithEachCLI)
 
+    /// What find matches the command by: its title, and for "New <CLI>
+    /// agent" the CLI's program name too ("agy" finds "New Antigravity
+    /// agent").
+    var searchText: String {
+        switch self {
+        case .newAgentWith(let provider): "\(title) \(provider.executableName)"
+        default: title
+        }
+    }
+
     /// The menu's title; a project's item takes the project's name when
     /// the menu is shown.
     var title: String {

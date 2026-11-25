@@ -30,7 +30,12 @@ struct AntigravityProvider: Sendable {
         "SessionStart": { [.sessionBound(sessionID: $0.sessionID)] },
         "PreInvocation": { record in
             var events: [AgentDomainEvent] = [.sessionBound(sessionID: record.sessionID)]
-            if record.invocation == "0" { events.append(.promptSubmitted(record.text)) }
+            // agy starts invocation 0 itself, the last prompt repeated, when a
+            // background command ends: the transcript's last step is then no
+            // prompt. Without a step (unreadable) the prompt counts.
+            if record.invocation == "0" && (record.step == nil || record.step == promptStep) {
+                events.append(.promptSubmitted(record.text))
+            }
             return events
         },
         "Stop": { record in
@@ -50,6 +55,13 @@ struct AntigravityProvider: Sendable {
     /// prompt. The report's message is cut at 200 characters and to the
     /// reply's first line, so the reply comes from here.
     static let transcriptFields = ["Stop": "transcriptPath"]
+    /// The events whose record carries the type of the transcript's last
+    /// step at that moment (`AgentRawProviderEvent.step`).
+    static let stepFields = ["PreInvocation": "transcriptPath"]
+    /// The last step's type when the person's prompt starts an invocation
+    /// (agy 1.5.17: a typed prompt, a launch's first prompt, a resumed
+    /// conversation's; `cli-facts.md`, agy, "Under the app").
+    static let promptStep = "USER_INPUT"
     /// What each hook prints. agy treats nothing and `{}` alike for these
     /// events (probed); a PreToolUse hook that printed `{}` would deny the
     /// tool, which is why there is none.
@@ -63,13 +75,12 @@ struct AntigravityProvider: Sendable {
     /// none), and its prompt's record can come before it or up to 1.24 s
     /// after; its trust dialog and sign-in wait on the person once it has
     /// started; and an interrupt gives queued messages back. Its `working`
-    /// never waits, so `turnStartDelay` is never used.
+    /// never waits (`turnStartDelay` 0).
     var entry: AgentProviderEntry {
         AgentProviderEntry(
-            turnStartDelay: 0,
             reports: AgentReportRules(
                 doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false,
-                workingStartsTurn: true, askingAtStartIsStarted: true, interruptReturnsQueuedMessages: true),
+                turnStartDelay: 0, askingAtStartIsStarted: true, interruptReturnsQueuedMessages: true),
             hookEvents: Self.hookEvents,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },

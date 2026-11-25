@@ -46,10 +46,10 @@ extension AgentRecord {
             } else if let activity, !AgentSentence.label(activity).isEmpty {
                 // The step its CLI reports now.
                 base = .cli(activity)
-            } else if let instruction = prompts.last(where: { $0.text != queued })?.text ?? firstInstruction,
+            } else if let instruction = prompts.last(where: { !$0.queued })?.text ?? firstInstruction,
                       !AgentSentence.label(instruction).isEmpty {
                 // Else what it was last told to do, as written; a message
-                // still queued is not what it does now.
+                // still queued behind the turn is not what it does now.
                 base = .cli(instruction)
             } else {
                 base = .app("Working")

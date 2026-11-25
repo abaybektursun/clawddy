@@ -1323,6 +1323,18 @@ esc to cancel                                                <model> · high
 
 Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turns). Launches after the first carried `--settings '{"trustedWorkspaces":[…the harness folder…]}'` from a wrapper of the harness's own, so the trust dialog's "Yes" (which adds the folder to the owner's `trustedWorkspaces`; docs: "The CLI adds entries for you") was never chosen.
 - **A first prompt runs behind the trust dialog.** Launched with `--prompt-interactive=<text>` in a folder nobody trusted, agy showed the trust dialog (`blocked kind=permission` "Trust this folder?") and ran the prompt's turn anyway while the dialog stayed on screen: SessionStart, PreInvocation (invocation 0, the prompt), Stop (the reply) all arrived within 8 s, and the conversation's `.db` was written. Declining the dialog then ended agy; Clawddy recorded the agent as stopped with no exit status (its launch script's exit report did not arrive). Declined with no prompt, in a terminal of the probe's own, agy exited with status 0.
+- **Behind the dialog, with the hook logger** (probe `stage5/trustprompt`, one turn): `blocked kind=auth`,
+  `blocked kind=permission` "Trust this folder?" at 0.16 s, then SessionStart, PreInvocation 0, PostInvocation and
+  Stop by 5.1 s, **no `working` and no `done`**. "No, exit": `idle`, then exit status 0, the bytes
+  `ESC[>4m ESC[<1u CR ESC[<rows>d ESC[?1049l ESC[?25h ESC[?2004l` and the `idle` report (`stage5/decline2.bin`; no exit
+  screen, no resume line). Under Clawddy the launch script's exit report after it was once not read: Ghostty
+  delivers the process's exit (its process watcher) without waiting for its reader to finish the terminal's last
+  bytes.
+- **The wake-up's last transcript step** (probe `stage5/wake2`, one turn): the turn's Stop at 22.4 s, then 2.8 s
+  later PreInvocation 0 with `lastUserInput` the turn's prompt while the transcript's last step was the turn's
+  `PLANNER_RESPONSE` (`initialNumSteps` 4); the terminal stayed `working` until one `done`. Every PreInvocation 0
+  of a prompt the person sent had `USER_INPUT` last (stage 1: a launch's first prompt, typed prompts, a resumed
+  conversation).
 - **Auto mode approves more than `echo`.** With no start-mode flag and the owner's default mode (auto), "Run the shell command: echo chosen" and "…: rm -f no-such-file.txt" both ran without asking. After Shift+Tab twice (auto → plan → default) `echo chosen` asked: `blocked kind=permission` "Approve Bash: echo chosen", menu as under "Screens".
 - **A long command runs in the background and wakes the agent later.** "Run the shell command: sleep 20, then reply…" ran `sleep 20` in the background ("Command duration exceeds the synchronous execution window…", "Waiting for sleep 20 to finish."), and the turn ended with a Stop. A message queued meanwhile then ran as its own turn (PreInvocation 0 with its words, Stop with its reply). When the command ended, agy woke itself: a `SYSTEM_MESSAGE` step in the transcript, then **PreInvocation with `invocationNum` 0 and `lastUserInput` still the previous prompt**, then Stop with the new reply. Nothing in that record but the transcript's last step tells it from a prompt.
 - **A queued message reports nothing until it runs.** Sent while agy works, it shows as `▸ <text> (alt+m to send immediately)` and no hook runs for it; its PreInvocation comes only when agy starts it, as the next turn.

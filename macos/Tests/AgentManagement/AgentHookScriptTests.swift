@@ -218,6 +218,24 @@ struct AgentHookScriptTests {
         #expect(!FileManager.default.fileExists(atPath: fixture.status.appendingPathComponent("hook-errors.log").path))
     }
 
+    /// Final review 3: the bound is in bytes. A text of four-byte characters
+    /// just under the old limit counted in characters (about 1 MB) records
+    /// its beginning, at most `textBytes` bytes, and the hook succeeds.
+    @Test func aTextOfWideCharactersIsBoundInBytes() throws {
+        let fixture = try HookFixture()
+        defer { fixture.remove() }
+        let wide = String(repeating: "🧪", count: AgentHookRuntime.textBytes - 10)
+        let agentID = UUID()
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "session_id": "s", "hook_event_name": "Stop", "prompt_id": "p", "last_assistant_message": wide,
+        ])
+        #expect(try fixture.run(agentID: agentID, provider: .claudeCode, generation: UUID(), payload: payload) == 0)
+        let text = try #require(try fixture.events(agentID).first?.text)
+        #expect(text.utf8.count <= AgentHookRuntime.textBytes && text.utf8.count > AgentHookRuntime.textBytes - 4)
+        #expect(wide.hasPrefix(text))
+        #expect(!FileManager.default.fileExists(atPath: fixture.status.appendingPathComponent("hook-errors.log").path))
+    }
+
     /// A payload without the field records no text, never an empty one; a
     /// failure records Claude's kind and its text; a question comes from deep
     /// in the payload; a session's end and start record why and how.
@@ -453,6 +471,8 @@ private final class HookFixture {
             "HOME": (home ?? root).path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "TMPDIR": root.path,
+            // As in an agent's terminal.
+            "LANG": "en_US.UTF-8",
         ]
         return process
     }

@@ -244,6 +244,9 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
     /// agy's `invocationNum`: 0 at a turn's start, then one more after each
     /// tool result or answer within the turn.
     var invocation: String?
+    /// agy's transcript's last step type when the hook ran (`USER_INPUT`
+    /// for the person's prompt), read by the hook script at PreInvocation.
+    var step: String?
     var model: String?
     var permissionMode: String?
     /// What started a compaction: `manual` (`/compact`) or `auto`.
@@ -266,7 +269,7 @@ struct AgentRawProviderEvent: Decodable, Equatable, Sendable {
 extension AgentRawProviderEvent {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, eventID, provider, launchGeneration, hookEventName
-        case sessionID, turnID, invocation, model, permissionMode, trigger, error, reason, source, text, prompts
+        case sessionID, turnID, invocation, step, model, permissionMode, trigger, error, reason, source, text, prompts
     }
 
     /// The hook script writes "" for each field its payload did not carry;
@@ -287,6 +290,7 @@ extension AgentRawProviderEvent {
         sessionID = try text(.sessionID)
         turnID = try text(.turnID)
         invocation = try text(.invocation)
+        step = try text(.step)
         model = try text(.model)
         permissionMode = try text(.permissionMode)
         trigger = try text(.trigger)
@@ -357,12 +361,16 @@ struct AgentReportRules: Equatable, Sendable {
     /// A `working` report's message names the step under way, which the
     /// agent shows as its activity.
     var workingMessageIsActivity: Bool
+    /// How long a `working` report with no turn under way and no prompt
+    /// must stand before the turn starts (`AgentBridge.updateTurnStartTimer`).
+    /// Claude and Codex report `working` for a command that submits nothing,
+    /// so theirs must stand; agy reports none, so its is 0
+    /// (`workingStartsTurn`).
+    var turnStartDelay: TimeInterval
     /// Every `working` is a turn, so it starts one at once, and the first
     /// prompt record of a turn that started without one is that turn's
-    /// prompt, whichever comes first. agy reports no `working` for a command
-    /// that submits nothing; Claude and Codex do, so theirs must stand for
-    /// `turnStartDelay` first.
-    var workingStartsTurn: Bool
+    /// prompt, whichever comes first.
+    var workingStartsTurn: Bool { turnStartDelay == 0 }
     /// A dialog or a standing sign-in report at start-up shows that the CLI
     /// has started: the start limit (`AgentBridge.startLimit`) stops, and
     /// cannot replace what it asks with "did not start". Claude Code still
@@ -373,14 +381,13 @@ struct AgentReportRules: Equatable, Sendable {
     /// The ones Clawddy sent are then no prompts.
     var interruptReturnsQueuedMessages: Bool
 
-    /// Claude Code's and Codex's.
+    /// Claude Code's; Codex's differ only in `turnStartDelay`.
     static let standard = Self(
         doneWithMessageCompletes: false, signInStandTime: 0, workingMessageIsActivity: true,
-        workingStartsTurn: false, askingAtStartIsStarted: false, interruptReturnsQueuedMessages: false)
+        turnStartDelay: 1, askingAtStartIsStarted: false, interruptReturnsQueuedMessages: false)
 }
 
-/// One provider's entry in the provider table: how long its `working` must
-/// stand to start a turn, how its reports read, which hook events it
+/// One provider's entry in the provider table: how its reports read, which hook events it
 /// subscribes to and what each means, and the functions that integrate,
 /// launch, probe and clean up after it. A test replaces any of them. Every
 /// provider reports its turns in its terminal (OSC 7501); the hooks add
@@ -389,9 +396,6 @@ struct AgentProviderEntry: Sendable {
     /// What one record in the event file means for the agent.
     typealias Meaning = @Sendable (AgentRawProviderEvent) -> [AgentDomainEvent]
 
-    /// How long a `working` report with no turn under way and no prompt
-    /// must stand before the turn starts (`AgentBridge.updateTurnStartTimer`).
-    var turnStartDelay: TimeInterval
     var reports: AgentReportRules
     /// The hook events the provider subscribes to, each with what it means.
     /// The provider's hooks and the hook script's list of the events it
@@ -476,6 +480,9 @@ struct AgentLaunchCoordinator: Sendable {
     /// reports the provider's exit.
     static let exitReportID = "clawddy"
 
+    /// Where the launch script `script` writes its provider's exit status.
+    static func exitStatusURL(script: URL) -> URL { script.appendingPathExtension("status") }
+
     let providers: AgentProviderTable
     let root: AgentDataRoot
 
@@ -546,13 +553,18 @@ struct AgentLaunchCoordinator: Sendable {
         let exports = environment.sorted(by: { $0.key < $1.key }).map {
             "export \($0.key)=\(AgentHookRuntime.shellQuote($0.value))"
         }.joined(separator: "\n")
-        // After the provider returns: the exit report, an OSC 7501 report on
-        // the record `exitReportID` whose `msg` is the exit status in
-        // decimal, base64 as the protocol requires. Then the script ends and
-        // the terminal closes: an agent's terminal is its provider's only.
+        // After the provider returns: its exit status, in decimal, written to
+        // the file `exitStatusURL` names, then the exit report, an OSC 7501
+        // report on the record `exitReportID` whose `msg` is the status,
+        // base64 as the protocol requires. Then the script ends and the
+        // terminal closes: an agent's terminal is its provider's only.
+        // Ghostty tells of the process's exit without waiting to read the
+        // terminal's last bytes, so the report can be lost; the file is
+        // written before the exit, and read when the terminal goes.
         let notice = request.notice.map {
             "printf '\\033[2m%s\\033[0m\\n' \(AgentHookRuntime.shellQuote($0))"
         } ?? ""
+        let scriptURL = root.newLaunchScriptURL(agentID: agentID)
         let script = """
             #!/bin/zsh -l
             \(exports)
@@ -561,9 +573,9 @@ struct AgentLaunchCoordinator: Sendable {
             \(notice)
             \(command)
             command_status=$?
+            printf '%s' "$command_status" > \(AgentHookRuntime.shellQuote(Self.exitStatusURL(script: scriptURL).path))
             printf '\\033]7501;state=clear:id=\(Self.exitReportID):msg=%s\\007' "$(printf %s "$command_status" | /usr/bin/base64)"
             """
-        let scriptURL = root.newLaunchScriptURL(agentID: agentID)
         do {
             try AgentConfig.atomicWrite(Data(script.utf8), to: scriptURL)
             try FileManager.default.setAttributes(

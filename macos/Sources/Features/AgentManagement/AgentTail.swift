@@ -42,16 +42,18 @@ enum AgentTail {
     /// the last row starting with "›", with the blank row above it and its
     /// footer under it. agy's box sits between its last two rules
     /// (`antigravityBox`); while it asks, its menu's title row and rule
-    /// take the box's place. A prompt's echo is a rule too, with "> " and
-    /// the prompt under it: never a menu, so a stopped agy, whose screen
-    /// ends with its last turn and "Resume with -c", shows that turn.
+    /// take the box's place. Only a rule directly under a menu's title is a
+    /// menu's: a prompt's echo (a rule, then "> " and the prompt) or a rule
+    /// in a reply never is, so a stopped agy, whose screen ends with its
+    /// last turn and "Resume with -c", shows that turn.
     static func inputBoxTop(_ rows: [String], provider: AgentProviderID) -> Int? {
         switch provider {
         case .antigravity:
             if let box = antigravityBox(rows) { return box.lowerBound - 1 }
-            guard let rule = rows.indices.last(where: { isAntigravityRule(rows[$0]) && !isEcho(rows, under: $0) })
-            else { return nil }
-            return rule > 0 && !rows[rule - 1].isEmpty ? rule - 1 : rule
+            return rows.indices.last {
+                isAntigravityRule(rows[$0]) && $0 > 0
+                    && antigravityMenuTitles.contains(rows[$0 - 1].trimmingCharacters(in: .whitespaces))
+            }.map { $0 - 1 }
         case .claudeCode:
             let rules = rows.indices.filter { isRule(rows[$0]) }
             guard let last = rules.last else { return nil }
@@ -95,6 +97,10 @@ enum AgentTail {
         else { return nil }
         return (top + 1)..<bottom
     }
+
+    /// The titles agy's menus put over their rule (cli-facts.md, agy,
+    /// "Screens"): the question menu's and the permission menu's.
+    static let antigravityMenuTitles = ["Question", "Command"]
 
     /// A row of agy's rule: nothing but "─".
     private static func isAntigravityRule(_ row: String) -> Bool {

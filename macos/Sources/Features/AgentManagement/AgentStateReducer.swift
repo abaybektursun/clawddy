@@ -101,6 +101,10 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// before the CLI read its input, such as the folder-trust question)
     /// made it ask; it says so again once the CLI reads its input.
     var stateBeforeStartDialog: AgentRecord.State?
+    /// A turn that ended behind that dialog (agy runs a launch's first
+    /// prompt before its folder-trust question is answered): it completes
+    /// when the dialog does, so the agent asks until then.
+    var completedBehindDialog: AgentCompletionID?
     /// A turn its `working` started has not had its prompt's record yet
     /// (`AgentReportRules.workingStartsTurn`): the next prompt record is
     /// that turn's prompt, even after the turn has ended.
@@ -322,7 +326,7 @@ private struct Reduction {
 
         case .inputSettled(let generation):
             guard state.launchGeneration == generation, state.inputSettling else { return }
-            becomeReady()
+            becomeReady(isViewed: false)
 
         case .signInSettled(let generation):
             guard state.launchGeneration == generation, state.processState != .exited,
@@ -338,16 +342,14 @@ private struct Reduction {
         case .sent(let raw, let by):
             // Capped as the CLI's report of it is, so that report matches.
             let prompt = String(raw.prefix(AgentRecord.textLimit))
-            record.prompts.append(AgentRecord.Prompt(text: prompt, at: now, by: by))
+            // Sent into a working CLI, which queues it until the turn ends
+            // (flows.md 4.6). agy reports it only when its own turn starts,
+            // so the send is the only sign it waits.
+            let queued = state.turnState != .inactive && state.turnState != .starting
+            record.prompts.append(AgentRecord.Prompt(text: prompt, at: now, by: by, queued: queued))
             trimPrompts()
             state.promptsDue.append(prompt)
-            if case .active = state.turnState {
-                // Sent into a working CLI, which queues it until the turn
-                // ends (flows.md 4.6). agy reports it only when its own turn
-                // starts, so the send is the only sign it waits.
-                record.queued = prompt
-                if rules.interruptReturnsQueuedMessages { state.sentWhileWorking.append(prompt) }
-            }
+            if queued && rules.interruptReturnsQueuedMessages { state.sentWhileWorking.append(prompt) }
             state.promptAwaitsTurn = true
             if record.firstInstruction == nil {
                 record.firstInstruction = prompt
@@ -362,12 +364,13 @@ private struct Reduction {
 
         case .surfaceDied(let generation, let byUser):
             if let generation, state.launchGeneration != generation { return }
+            endStartDialog(isViewed: false)
             // A provider that was up and went without the user: its terminal
             // closed under it. An exit with a status other than 0 has said
             // so already, with the status.
             if state.processState == .running && !byUser {
                 stop(AgentRecord.Problem(kind: .exited))
-            } else if record.state == .working {
+            } else if record.state == .working || record.state == .asks {
                 // Stopped or closed by the person: the turn is over.
                 finish(interrupted: true)
             }
@@ -465,6 +468,9 @@ private struct Reduction {
             // its exit, with any status, is no launch failure. A launch that
             // already failed because its session is missing keeps saying so.
             let stillLaunching = state.processState == .notStarted || state.processState == .launching
+            // A dialog at start-up goes with its process: the agent is as
+            // the dialog found it, or as the turn behind it ended.
+            endStartDialog(isViewed: isViewed)
             state.processState = .exited
             state.exitStatus = status
             state.activityState = .unknown
@@ -474,8 +480,9 @@ private struct Reduction {
                 stop(stillLaunching
                     ? AgentRecord.Problem(kind: .launch, text: "It exited before its session started.")
                     : AgentRecord.Problem(kind: .exited, status: status))
-            } else if record.state == .working {
-                // `/exit` or Control-D during a turn: the turn is over.
+            } else if record.state == .working || record.state == .asks {
+                // `/exit` or Control-D during a turn: the turn is over, and
+                // a process that has gone asks nothing.
                 finish(interrupted: true)
             }
             effects.append(.providerExited(status))
@@ -546,6 +553,19 @@ private struct Reduction {
             let message = String(text.prefix(AgentRecord.textLimit))
             switch state.turnState {
             case .active, .compaction, .starting: state.pendingMessage = message
+            case .inactive where state.promptCameFirst:
+                // A turn that ran with no report at all, its prompt's record
+                // and now its reply: agy runs a launch's first prompt behind
+                // its folder-trust dialog, reporting nothing. It is that
+                // turn's end.
+                state.promptCameFirst = false
+                state.promptAwaitsTurn = false
+                state.pendingMessage = message
+                complete(
+                    AgentCompletionID(
+                        provider: provider, sessionID: state.sessionID, turnID: nil,
+                        launchGeneration: generation, eventID: eventID),
+                    isViewed: isViewed)
             case .inactive:
                 record.lastMessage = message
                 record.lastMessageAt = now
@@ -661,7 +681,7 @@ private struct Reduction {
                 record.problem = nil
             }
         }
-        noteReadiness(report.state)
+        noteReadiness(report.state, isViewed: isViewed)
         switch report.state {
         case .working:
             state.promptAwaitsTurn = false
@@ -673,8 +693,9 @@ private struct Reduction {
             case .inactive: state.turnState = .starting
             case .starting: break
             case .active, .compaction:
-                // A question answered, or the next step of the turn.
-                if record.state == .asks {
+                // A question answered, or the next step of the turn; a
+                // turn behind a start-up dialog leaves the dialog asking.
+                if record.state == .asks && state.stateBeforeStartDialog == nil {
                     change(to: .working)
                     record.question = nil
                 }
@@ -692,9 +713,10 @@ private struct Reduction {
                 failSignIn(report)
                 return
             }
-            if !state.inputReady {
+            if !state.inputReady && (state.turnState == .inactive || state.turnState == .starting) {
                 // A dialog at start-up, such as the folder-trust question:
-                // no turn. Answered, the agent is as it was.
+                // no turn. Answered, the agent is as it was. (A turn under
+                // way asks within it, whatever its CLI's readiness says.)
                 if record.state != .asks { state.stateBeforeStartDialog = record.state }
                 if rules.askingAtStartIsStarted { effects.append(.startedAsking) }
             } else if state.turnState == .inactive || state.turnState == .starting {
@@ -750,6 +772,9 @@ private struct Reduction {
             if wasUnderWay && record.state != .problem && record.state != .paused {
                 finish(interrupted: true)
                 forgetSendsGivenBack()
+                // An interrupted turn takes no prompt record after it.
+                state.turnAwaitsItsPrompt = false
+                state.promptCameFirst = false
             } else {
                 leaveWorkingWithoutTurn()
             }
@@ -783,13 +808,16 @@ private struct Reduction {
     /// `working` of up to 2.4 s, then `idle`: its first `idle` counts only
     /// after a `working`, or once 3 s pass without one. A `blocked` report,
     /// such as Claude's folder-trust dialog, is never readiness.
-    private mutating func noteReadiness(_ report: Ghostty.Action.ProgramStatus.State) {
+    private mutating func noteReadiness(_ report: Ghostty.Action.ProgramStatus.State, isViewed: Bool) {
         guard !state.inputReady else { return }
+        // A turn run behind a start-up dialog (a `working` or `done` while
+        // it shows) is no answer to it: the CLI still waits on the person.
+        if state.stateBeforeStartDialog != nil && (report == .working || report == .done) { return }
         switch report {
         case .working:
             state.inputSettling = false
             if state.launchPrompted {
-                becomeReady()
+                becomeReady(isViewed: isViewed)
             } else if provider == .codex {
                 state.sawWorking = true
             }
@@ -799,14 +827,14 @@ private struct Reduction {
                 state.inputSettling = true
                 effects.append(.inputSettling)
             } else {
-                becomeReady()
+                becomeReady(isViewed: isViewed)
             }
         case .blocked, .clear:
             break
         }
     }
 
-    private mutating func becomeReady() {
+    private mutating func becomeReady(isViewed: Bool) {
         state.inputReady = true
         state.inputSettling = false
         effects.append(.inputReady)
@@ -814,12 +842,22 @@ private struct Reduction {
             change(to: .finished)
             record.problem = nil
         }
-        if let before = state.stateBeforeStartDialog {
-            state.stateBeforeStartDialog = nil
-            if record.state == .asks {
-                change(to: before)
-                record.question = nil
-            }
+        endStartDialog(isViewed: isViewed)
+    }
+
+    /// The start-up dialog is answered, or its process has gone: the agent
+    /// is as the dialog found it, and a turn that ended behind it completes
+    /// now, once.
+    private mutating func endStartDialog(isViewed: Bool) {
+        guard let before = state.stateBeforeStartDialog else { return }
+        state.stateBeforeStartDialog = nil
+        if record.state == .asks {
+            change(to: before)
+            record.question = nil
+        }
+        if let completion = state.completedBehindDialog {
+            state.completedBehindDialog = nil
+            complete(completion, isViewed: isViewed)
         }
     }
 
@@ -857,8 +895,13 @@ private struct Reduction {
         state.turnState = .active(turnID: turnID)
         state.activityState = activity
         state.prompted = true
-        if record.state != .working { change(to: .working) }
-        clearStop()
+        if state.stateBeforeStartDialog != nil {
+            // Behind a start-up dialog: the agent asks until it is answered.
+            state.stateBeforeStartDialog = .working
+        } else {
+            if record.state != .working { change(to: .working) }
+            clearStop()
+        }
         record.interrupted = false
         record.lastMessage = nil
         record.lastMessageAt = nil
@@ -882,6 +925,11 @@ private struct Reduction {
     /// is viewed.
     private mutating func complete(_ completion: AgentCompletionID, isViewed: Bool) {
         guard state.lastAppliedCompletion != completion else { return }
+        if state.stateBeforeStartDialog != nil {
+            // Behind a start-up dialog: it completes when the dialog ends.
+            state.completedBehindDialog = completion
+            return
+        }
         state.lastAppliedCompletion = completion
         effects.append(.completed)
         finish(interrupted: false)
@@ -906,9 +954,16 @@ private struct Reduction {
         if record.state != .finished { change(to: .finished) }
         record.interrupted = interrupted
         record.cutOff = false
-        record.queued = nil
+        clearQueued()
         record.activity = nil
         record.question = nil
+    }
+
+    /// The turn the queued prompts waited behind has ended.
+    private mutating func clearQueued() {
+        for index in record.prompts.indices where record.prompts[index].queued {
+            record.prompts[index].queued = false
+        }
     }
 
     /// The turn failed: at a usage limit the agent pauses, a sign-in that no
@@ -916,6 +971,10 @@ private struct Reduction {
     /// that has already failed only takes what this failure adds.
     private mutating func fail(_ failure: AgentFailure) {
         endTurn()
+        // A failed turn takes no prompt record after it.
+        state.turnAwaitsItsPrompt = false
+        state.promptCameFirst = false
+        state.promptAwaitsTurn = false
         let text = failure.text?.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = text?.isEmpty == false ? text : nil
         if failure.isUsageLimit {
@@ -946,7 +1005,7 @@ private struct Reduction {
 
     private mutating func finishStopping() {
         record.cutOff = false
-        record.queued = nil
+        clearQueued()
         record.activity = nil
         record.question = nil
         record.interrupted = false
@@ -987,21 +1046,21 @@ private struct Reduction {
         state.prompted = true
         // One Clawddy sent, recorded when it was sent.
         if let due = state.promptsDue.firstIndex(of: text) ?? state.promptsDue.firstIndex(of: String(raw.prefix(AgentRecord.textLimit))) {
-            state.promptsDue.remove(at: due)
-            if queued { record.queued = text }
+            let sent = state.promptsDue.remove(at: due)
+            // Its record shows it waits behind the running turn.
+            if queued, let index = record.prompts.lastIndex(where: { $0.text == sent }) { record.prompts[index].queued = true }
             return
         }
         // Claude's own note that a background command ended comes as a
         // prompt; nobody typed it (seen 2026-11-24, Claude Code 2.1.331).
         if raw.hasPrefix("<task-notification>") { return }
-        record.prompts.append(AgentRecord.Prompt(text: text, at: now, by: .person))
+        record.prompts.append(AgentRecord.Prompt(text: text, at: now, by: .person, queued: queued))
         record.continuedInARow = 0
         trimPrompts()
         if record.firstInstruction == nil {
             record.firstInstruction = text
             record.firstInstructionAt = now
         }
-        if queued { record.queued = text }
     }
 
     private mutating func trimPrompts() {

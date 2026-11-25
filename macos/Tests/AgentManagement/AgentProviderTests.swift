@@ -123,31 +123,38 @@ struct AgentProviderTests {
 
     /// A preferences file of the shape written before the agy work (one
     /// named field per CLI) loads with its values; saving writes the keyed
-    /// shape only. A CLI the file does not name starts unrestricted.
-    @Test func theOldPreferencesShapeStillLoads() throws {
+    /// shape only. Final review 5: a CLI the file does not name starts with
+    /// permission checks when any CLI it names is set to them, else
+    /// without: a person who chose permission checks never gets a new CLI
+    /// without them. The stage-2 builds wrote a third named field,
+    /// `antigravityDefaultStartMode` (harness and test data only); the same
+    /// generated keys read it.
+    @Test(arguments: [
+        (["claudeCode": "standard", "codex": "standard"], "standard"),
+        (["claudeCode": "unrestricted", "codex": "unrestricted"], "unrestricted"),
+        (["claudeCode": "standard", "codex": "unrestricted"], "standard"),
+        (["claudeCode": "unrestricted", "codex": "unrestricted", "antigravity": "standard"], "standard"),
+    ])
+    func theOldPreferencesShapeStillLoads(_ stored: [String: String], _ antigravity: String) throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("preferences.json")
-        try Data("""
-        {
-          "claudeCodeDefaultStartMode" : "standard",
-          "codexDefaultStartMode" : "unrestricted",
-          "schemaVersion" : 1
-        }
-        """.utf8).write(to: url)
+        var object: [String: Any] = ["schemaVersion": 1]
+        for (cli, mode) in stored { object["\(cli)DefaultStartMode"] = mode }
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
 
         let loaded = AgentPreferencesStore.load(from: url)
         #expect(loaded.error == nil)
-        #expect(loaded.preferences.defaultStartMode(for: .claudeCode) == .standard)
-        #expect(loaded.preferences.defaultStartMode(for: .codex) == .unrestricted)
-        #expect(loaded.preferences.defaultStartMode(for: .antigravity) == .unrestricted)
+        #expect(loaded.preferences.defaultStartMode(for: .claudeCode).rawValue == stored["claudeCode"])
+        #expect(loaded.preferences.defaultStartMode(for: .codex).rawValue == stored["codex"])
+        #expect(loaded.preferences.defaultStartMode(for: .antigravity).rawValue == antigravity)
 
         try AgentPreferencesStore.save(loaded.preferences, to: url)
         let written = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         #expect(Set(written.keys) == ["schemaVersion", "defaultStartModes"])
         #expect(written["schemaVersion"] as? Int == 2)
         #expect(written["defaultStartModes"] as? [String: String]
-            == ["claudeCode": "standard", "codex": "unrestricted", "antigravity": "unrestricted"])
+            == ["claudeCode": stored["claudeCode"]!, "codex": stored["codex"]!, "antigravity": antigravity])
         #expect(AgentPreferencesStore.load(from: url) == loaded)
     }
 
@@ -162,7 +169,13 @@ struct AgentProviderTests {
         let loaded = AgentPreferencesStore.load(from: url)
         #expect(loaded.error == nil)
         #expect(loaded.preferences.defaultStartMode(for: .codex) == .standard)
-        #expect(loaded.preferences.defaultStartMode(for: .claudeCode) == .unrestricted)
+        // Codex is set to permission checks, so a CLI the file does not
+        // name starts with them too.
+        #expect(loaded.preferences.defaultStartMode(for: .claudeCode) == .standard)
+        #expect(loaded.preferences.defaultStartMode(for: .antigravity) == .standard)
+        try AgentPreferencesStore.save(loaded.preferences, to: url)
+        let written = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect((written["defaultStartModes"] as? [String: String])?.keys.sorted() == ["antigravity", "claudeCode", "codex"])
     }
 
     @Test func startModesMapToProviderCanonicalArguments() {
@@ -170,8 +183,11 @@ struct AgentProviderTests {
             == ["--dangerously-skip-permissions"])
         #expect(AgentProviderID.codex.startModeArguments(.unrestricted)
             == ["--dangerously-bypass-approvals-and-sandbox"])
+        #expect(AgentProviderID.antigravity.startModeArguments(.unrestricted)
+            == ["--dangerously-skip-permissions"])
         #expect(AgentProviderID.claudeCode.startModeArguments(.standard).isEmpty)
         #expect(AgentProviderID.codex.startModeArguments(.standard).isEmpty)
+        #expect(AgentProviderID.antigravity.startModeArguments(.standard).isEmpty)
     }
 
     @Test func providerTaggedSessionStoreMigratesOnlyClaudeLegacyFiles() throws {

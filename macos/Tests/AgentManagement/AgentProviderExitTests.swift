@@ -8,6 +8,37 @@ import Testing
 /// terminal closes (`docs/clawddy-design/flows.md` 6 and 7).
 @MainActor
 struct AgentProviderExitTests {
+    /// Coordinator item 2 (the real agy, declining its trust dialog):
+    /// Ghostty tells of the process's exit without waiting to read the
+    /// terminal's last bytes, so the exit report can be lost. The launch
+    /// script writes the status to its exit status file before the exit,
+    /// and the terminal's death reads it: status 0 is a clean exit, any
+    /// other the problem with its status. With no file (the script itself
+    /// was killed) the terminal closed under the provider, as before.
+    @Test(arguments: [(0, nil), (1, 1), (nil, nil)] as [(Int?, Int?)])
+    func aLostExitReportIsReadFromTheStatusFile(_ written: Int?, _ problemStatus: Int?) throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent", provider: .antigravity)
+        h.start()
+        try h.activate(id)
+        let script = try #require(try h.launchScripts().first)
+        #expect(try h.launchScript().contains("printf '%s' \"$command_status\" > "))
+        try h.osc(id, "state=idle:app=antigravity")
+        if let written {
+            try Data(String(written).utf8).write(to: h.root.launchDir.appendingPathComponent(script + ".status"))
+        }
+        try h.terminalClosed(id)
+        let agent = try h.agent(id)
+        #expect(agent.processState == .exited)
+        if written == 0 {
+            #expect(agent.record.problem == nil && agent.record.state == .finished)
+        } else {
+            #expect(agent.record.problem == AgentRecord.Problem(kind: .exited, status: problemStatus))
+        }
+        #expect(try !h.launchScripts().contains(script + ".status"))
+    }
+
     /// The exit report ends the launch at once, in the app tick that
     /// delivers it, without touching the terminal, which closes after it.
     /// It ends Codex's launch the same way. What its terminal reports
@@ -119,6 +150,10 @@ struct AgentProviderExitTests {
             let parts = output.components(separatedBy: "\u{1B}]7501;\(body)\u{07}")
             try #require(parts.count == 2, "the exit report is printed once: \(output)")
             #expect(parts[0].contains("provider started"))
+            #expect(try h.launchScripts().contains { name in
+                name.hasSuffix(".sh.status")
+                    && (try? String(contentsOf: h.root.launchDir.appendingPathComponent(name), encoding: .utf8)) == "\(status)"
+            })
             #expect(!parts[0].contains("CLAWDDY_AGENT_ID"))
             #expect(parts[1].isEmpty)
 
@@ -144,7 +179,8 @@ struct AgentProviderExitTests {
     /// launch's environment on top of a plain one, and with zsh reading its
     /// startup files from the harness's home folder, not the user's.
     private func runLaunchScript(_ h: AgentBridgeHarness, _ id: UUID) throws -> String {
-        let names = try h.launchScripts()
+        // An earlier run's exit status file stays beside its script's place.
+        let names = try h.launchScripts().filter { $0.hasSuffix(".sh") }
         try #require(names.count == 1)
         let surface = try #require(h.host.surfaces[id])
         let home = h.folder.appendingPathComponent("home").path

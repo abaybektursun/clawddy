@@ -36,22 +36,27 @@ struct AgentPreferences: Codable, Equatable, Sendable {
         static func named(_ provider: AgentProviderID) -> Key { Key("\(provider.rawValue)DefaultStartMode") }
     }
 
-    /// A CLI the file does not name starts unrestricted, the default; a
-    /// name the file has that no CLI has is dropped.
+    /// A CLI the file does not name (one added since it was written) starts
+    /// with permission checks when any CLI it names is set to them, else
+    /// unrestricted, the default: a person who chose permission checks never
+    /// gets a new CLI without them. A name the file has that no CLI has is
+    /// dropped.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: Key.self)
-        self.init()
+        var stored: [AgentProviderID: AgentStartMode] = [:]
         if let modes = try container.decodeIfPresent([String: AgentStartMode].self, forKey: .defaultStartModes) {
             for (name, mode) in modes {
-                if let provider = AgentProviderID(rawValue: name) { defaultStartModes[provider] = mode }
+                if let provider = AgentProviderID(rawValue: name) { stored[provider] = mode }
             }
         } else {
             for provider in AgentProviderID.allCases {
                 if let mode = try container.decodeIfPresent(AgentStartMode.self, forKey: .named(provider)) {
-                    defaultStartModes[provider] = mode
+                    stored[provider] = mode
                 }
             }
         }
+        self.init(defaultStartMode: stored.values.contains(.standard) ? .standard : .unrestricted)
+        defaultStartModes.merge(stored) { $1 }
     }
 
     /// Always the current shape.

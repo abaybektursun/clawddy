@@ -239,16 +239,19 @@ struct AgentRecordTests {
     /// Any exit or close during a turn ends it: with status 0, or when the
     /// person stops the agent or closes its terminal, as interrupted; with
     /// another status, or a terminal closing under a running CLI, with a
-    /// problem. Outside a turn an exit with status 0 changes nothing.
+    /// problem. Outside a turn an exit with status 0 changes nothing, except
+    /// that a process that has gone asks nothing (final review 7): an agent
+    /// asking is then finished, interrupted.
     @Test func theCLIExits() {
         let interrupted = turnRecord { $0.state = .finished; $0.changedAt = at(8); $0.interrupted = true }
         #expect(reduce(turn(), hook(.providerExited(status: 0)), at: 8).record == interrupted)
         #expect(reduce(turn(), .surfaceDied(generation: generation, byUser: true), at: 8).record == interrupted)
-        for before in [record(), record { $0.state = .asks }] {
-            let exited = AgentStateReducer.reduce(running(before), event: hook(.providerExited(status: 0)))
-            #expect(exited.state.record == before)
-            #expect(exited.effects == [.providerExited(0)])
-        }
+        let quiet = AgentStateReducer.reduce(running(record()), event: hook(.providerExited(status: 0)))
+        #expect(quiet.state.record == record())
+        #expect(quiet.effects == [.providerExited(0)])
+        let asking = AgentStateReducer.reduce(running(record { $0.state = .asks; $0.question = "A?" }), event: hook(.providerExited(status: 0)))
+        #expect(asking.state.record == record { $0.interrupted = true; $0.changedAt = .distantPast })
+        #expect(asking.effects == [.providerExited(0)])
         let crashed = AgentStateReducer.reduce(turn(), event: hook(.providerExited(status: 137)), at: at(8))
         #expect(crashed.state.record == turnRecord {
             $0.state = .problem; $0.changedAt = at(8); $0.problem = AgentRecord.Problem(kind: .exited, status: 137)
@@ -487,7 +490,7 @@ struct AgentRecordTests {
         var stepping = told
         stepping.activity = "Creating empty marker file"
         #expect(stepping.sentence(cli: .claudeCode) == .cli("Creating empty marker file"))
-        stepping.queued = "also \u{1B}[31mthe tests\u{202E}"
+        stepping.prompts.append(AgentRecord.Prompt(text: "also \u{1B}[31mthe tests\u{202E}", at: start, by: .person, queued: true))
         #expect(stepping.sentence(cli: .claudeCode) == .cli("Creating empty marker file You sent: also the tests"))
         #expect(record { $0.state = .working }.sentence(cli: .codex) == .app("Working"))
         let launch = record { $0.state = .problem; $0.problem = AgentRecord.Problem(kind: .launch, text: "bad \u{1B}[1mpath\u{0}") }
@@ -545,6 +548,48 @@ struct AgentRecordTests {
         #expect(sentence(.loginExpired) == .app(provider == .antigravity
             ? "Login expired. Open it and sign in again." : "Login expired. Open it and run /login."))
         #expect(record { $0.state = .paused }.sentence(cli: provider) == .app("Paused at the usage limit. \(cli) gave no reset time."))
+    }
+
+    /// Final review 6: the record knows which prompts wait behind the
+    /// running turn, so the sentence is the running turn's instruction and
+    /// then "You sent:" the last queued one, with two queued and with one
+    /// that repeats the running prompt; each CLI's order of records: Claude
+    /// reports a queued prompt at once, agy when its own turn starts, Codex
+    /// not at all.
+    @Test(arguments: AgentProviderID.allCases)
+    func queuedPromptsAreKnownByTheRecord(_ provider: AgentProviderID) {
+        let nowhere = URL(fileURLWithPath: "/nonexistent")
+        let rules: AgentReportRules = {
+            switch provider {
+            case .claudeCode: return .standard
+            case .codex: return CodexProvider(root: AgentDataRoot(url: nowhere), configFile: nowhere).entry.reports
+            case .antigravity: return AntigravityProvider(root: AgentDataRoot(url: nowhere), dataFolder: nowhere).entry.reports
+            }
+        }()
+        func apply(_ state: AgentRuntimeSnapshot, _ event: AgentRuntimeEvent) -> AgentRuntimeSnapshot {
+            AgentStateReducer.reduce(state, event: event, rules: rules, at: start).state
+        }
+        func event(_ domain: AgentDomainEvent) -> AgentRuntimeEvent {
+            .provider(generation: generation, provider: provider, eventID: UUID().uuidString, event: domain, isViewed: false)
+        }
+        var state = apply(running(record()), .sent(prompt: "count slowly", by: .person))
+        state = apply(state, event(.programStatus(status("state=working"))))
+        switch provider {
+        case .claudeCode, .antigravity: state = apply(state, event(.promptSubmitted("count slowly")))
+        case .codex: state = apply(state, .turnStartSettled(generation: generation))
+        }
+        func send(_ text: String) {
+            state = apply(state, .sent(prompt: text, by: .person))
+            if provider == .claudeCode { state = apply(state, event(.promptSubmitted(text))) }
+        }
+        send("queued one")
+        #expect(state.record.sentence(cli: provider) == .cli("count slowly You sent: queued one"), "\(provider)")
+        send("count slowly")
+        #expect(state.record.sentence(cli: provider) == .cli("count slowly You sent: count slowly"), "\(provider)")
+        #expect(state.record.prompts.map(\.queued) == [false, true, true], "\(provider)")
+        state = apply(state, event(.programStatus(status("state=done", message: provider == .antigravity ? "Counted." : nil))))
+        #expect(state.record.state == .finished && state.record.queued == nil, "\(provider)")
+        #expect(state.record.prompts.allSatisfy { !$0.queued }, "\(provider)")
     }
 
     // MARK: Helpers

@@ -52,7 +52,6 @@ struct ClaudeCodeProvider: Sendable {
     /// Claude's entry in the provider table.
     var entry: AgentProviderEntry {
         AgentProviderEntry(
-            turnStartDelay: 1,
             reports: .standard,
             hookEvents: Self.hookEvents,
             prepareIntegration: { prepareIntegration() },

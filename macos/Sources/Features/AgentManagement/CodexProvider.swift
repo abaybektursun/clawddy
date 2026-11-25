@@ -42,8 +42,11 @@ struct CodexProvider: Sendable {
     /// stands longer than that starts a turn.
     var entry: AgentProviderEntry {
         AgentProviderEntry(
-            turnStartDelay: 3,
-            reports: .standard,
+            reports: {
+                var rules = AgentReportRules.standard
+                rules.turnStartDelay = 3
+                return rules
+            }(),
             hookEvents: Self.hookEvents,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },

@@ -244,7 +244,7 @@ the same total as a badge (none at zero).
 | Opening a settled agent (from find) | Settled | the state before settling | It returns to home at its original place in creation order. |
 | The CLI reports a usage limit | Working | Paused at its usage limit | No continuation is promised. |
 | The reset time passes | Paused | Usage limit reset | Only when the CLI gave a reset time. |
-| Login expired (the CLI reports an authentication failure) | any | Stopped with a problem | The app's sentence "Login expired. Open it and run /login." (Antigravity: "Login expired. Open it and sign in again."); the CLI's message stays in the terminal. Cleared by the next turn (after the person runs /login). agy reports "sign in required" for a moment at some starts even when signed in, so for agy the report counts only once it has stood 2 s, and its next report clears it. |
+| Login expired (the CLI reports an authentication failure) | any | Stopped with a problem | The app's sentence "Login expired. Open it and run /login." (Antigravity: "Login expired. Open it and sign in again."); the CLI's message stays in the terminal. Cleared by the next turn (after the person signs in again: /login in Claude Code and Codex, agy's own sign-in in Antigravity). agy reports "sign in required" for a moment at some starts even when signed in, so for agy the report counts only once it has stood 2 s, and its next report clears it. |
 | The turn fails with an error | Working | Stopped with a problem | The CLI's own message. |
 | The CLI process exits with status 0 (the person typed /exit, Ctrl-D), or the person stops it or closes its terminal | Working | Finished | Sentence: "You interrupted it." The terminal shows its last screen; the agent has no process (4.5). |
 | The same, in any other state | any | unchanged | |
@@ -492,7 +492,12 @@ delivered: a stray key must never choose an option.
   longer applies), and keys held for it are not sent into the dialog.
   Answering it in the terminal leaves a new agent as it was ("No output yet").
   agy runs a first instruction's turn behind the dialog without waiting for
-  the answer (agy 1.5.17), so its reply can already be recorded.
+  the answer (agy 1.5.17), reporting nothing: the agent asks until the
+  dialog is answered, then is Finished unread with that reply, notified
+  once. Declining it ("No, exit") ends agy with status 0, which is an exit
+  the person chose, as Control-D is: the agent is Finished, with the reply
+  if the turn had run, else as it was. A process that has exited never
+  reads as asking, whatever it asked at start.
 
 ### 4.6 Sending text into a CLI
 

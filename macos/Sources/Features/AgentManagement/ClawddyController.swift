@@ -1650,7 +1650,11 @@ extension ClawddyController {
         let query = windowController.palettePanel.textView.string
         let hits = searchIndex.search(query, in: searchSources, currentProject: workspaceModel.currentProjectID)
         let commands = findCommands
-        let chosen = AgentSearchIndex.commands(commands.map(\.title), matching: query)
+        let searchTexts = commands.map { entry in
+            if case .command(let command) = entry.target { return command.searchText }
+            return entry.title
+        }
+        let chosen = AgentSearchIndex.commands(commands.map(\.title), searchTexts: searchTexts, matching: query)
         let now = Date()
         findRows = hits.map { hit in
             .agent(

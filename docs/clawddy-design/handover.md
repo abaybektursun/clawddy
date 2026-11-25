@@ -56,7 +56,8 @@ typing line, waiting, settling, resuming and restart behaviour. The plan is `agy
   and sign in again."
 - `preferences.json` keeps one start mode per CLI in `defaultStartModes` (schema 2); a file of the older shape
   (`claudeCodeDefaultStartMode`, `codexDefaultStartMode`) loads with its values and is rewritten in the new shape
-  at the next save.
+  at the next save. A CLI the file does not name starts with permission checks if any CLI it names has them.
+  Going back to an older build: it ignores the new shape and reads its defaults, so its start modes reset there.
 - The stand-in `macos/Tests/AgentManagement/StandIns/agy`, built from captured bytes; `check.py agy agy_screens`.
 
 How it was proven: unit tests (`AgentAntigravityTests.swift` and the per-CLI tests named in the stage notes), the
@@ -85,10 +86,13 @@ Not proven, or open:
   the rules forbid; later launches were trusted for their session only (`--settings`, from a harness wrapper). The
   answer is proven against the stand-in.
 - With a first prompt, agy runs the prompt's turn behind the trust dialog before it is answered (cli-facts, "Under
-  the app"). Declining the dialog then showed "Antigravity stopped." without an exit status.
-- After agy runs a long command in the background, it wakes itself later and reports the previous prompt again as a
-  new turn's prompt (PreInvocation, invocation 0); Clawddy records that prompt a second time. The transcript's last
-  step (`SYSTEM_MESSAGE`, not `USER_INPUT`) is the only thing that tells them apart. Not fixed.
+  the app"); the agent asks until the dialog is answered. Declining it once showed "Antigravity stopped." without
+  an exit status: Ghostty tells of a process's exit without waiting to read the terminal's last bytes, so the
+  launch script's exit report can be lost, for any CLI. The script now writes the status to a file before it
+  exits, read when the terminal goes.
+- After agy runs a long command in the background, it wakes itself later with PreInvocation 0 and the previous
+  prompt. Fixed after the final review: the hook script records the transcript's last step, and only `USER_INPUT`
+  makes a prompt (probe `stage5/wake2`).
 - In standard start mode agy runs in the owner's default mode (auto), which approves safe commands without asking;
   a permission request needs default mode (Shift+Tab in agy's terminal).
 - Sign-in after start-up, failures (`state=error`) and usage limits from the real agy: not seen.

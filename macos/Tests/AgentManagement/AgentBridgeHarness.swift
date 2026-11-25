@@ -580,7 +580,7 @@ final class AgentBridgeHarness {
     func startTurn(_ id: UUID) throws {
         let provider = try agent(id).provider
         try osc(id, "state=working:app=\(provider == .codex ? "codex" : "claude-code")")
-        scheduler.advance(by: providers.table[provider].turnStartDelay)
+        scheduler.advance(by: providers.table[provider].reports.turnStartDelay)
     }
 
     /// Claude starts a turn and completes it with a bare `done`.

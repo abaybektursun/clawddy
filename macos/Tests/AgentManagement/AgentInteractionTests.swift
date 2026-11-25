@@ -485,7 +485,8 @@ struct AgentInteractionTests {
             #expect(d.h.bridge.agents[review]?.record.unread == false && d.h.bridge.agents[review]?.isRunning == false)
         }
 
-        /// Each CLI the same way: find lists "New <CLI> agent" for its name,
+        /// Each CLI the same way: find lists "New <CLI> agent" for its
+        /// program's name ("agy"; its own name, `aCLIsCommandIsFoundByItsProgramName`),
         /// running it opens the floating new-agent line whose chip names the
         /// CLI when it is not the default, and Return starts an agent of that
         /// CLI.
@@ -495,12 +496,12 @@ struct AgentInteractionTests {
             #expect(d.model.newAgentProvider == .claudeCode)
             for provider in AgentProviderID.allCases {
                 try await d.key(35, .maskCommand)
-                try await d.type(provider.displayName.lowercased())
+                try await d.type(provider.executableName)
                 let title = "New \(provider.displayName) agent"
                 let row = try #require(d.controller.findRows.firstIndex {
                     if case let .command(found, _, _) = $0 { return found == title }
                     return false
-                }, "\(title) for “\(provider.displayName)”")
+                }, "\(title) for “\(provider.executableName)”")
                 for _ in 0..<row { try await d.key(AgentWorkspaceDriver.downArrow) }
                 try await d.key(AgentWorkspaceDriver.returnKey)
                 #expect(d.windowController.paletteShown && d.windowController.palettePanel.mode == .new)

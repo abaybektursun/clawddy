@@ -939,6 +939,43 @@ def check_agy_screens(tmp):
         run.close()
 
 
+def check_agy_wake(tmp):
+    """agy: a background command's wake-up (Stop, then its own PreInvocation 0 with the last prompt), and a first prompt run behind the trust dialog, then "No, exit"."""
+    script = {"steps": [{"wait": "prompt"}, {"wake": "Waiting for sleep 20 to finish.", "after": 1}, {"finish": "slept"}]}
+    run = Run(os.path.join(tmp, "wake"), "agy", ["--add-dir", "$HOOKDIR"], script=script, sid="default")
+    try:
+        run.wait("idle", lambda: "idle" in run.states())
+        run.type("go")
+        run.key("enter")
+        run.wait("two Stops", lambda: len(run.hooks("Stop")) == 2)
+        pre = run.hooks("PreInvocation")
+        expect([(h["invocationNum"], h["lastUserInput"], h["initialNumSteps"]) for h in pre] == [(0, "go", 1), (0, "go", 2)],
+               f"PreInvocation: {pre}")
+        with open(run.hooks("Stop")[-1]["transcriptPath"]) as f:
+            steps = [json.loads(line) for line in f]
+        expect([(t["type"], t.get("content", "")[:7]) for t in steps] ==
+               [("USER_INPUT", "<USER_R"), ("PLANNER_RESPONSE", "Waiting"), ("PLANNER_RESPONSE", "slept")], f"transcript: {steps}")
+        run.wait("done", lambda: run.states()[-1] == "done")
+        expect(run.states()[3:] == ["working", "done"], f"one working, one done: {run.states()}")
+    finally:
+        run.close()
+    run = Run(os.path.join(tmp, "behind"), "agy", ["--add-dir", "$HOOKDIR", "--prompt-interactive=go"],
+              script={"trust": True, "steps": [{"wait": "prompt"}, {"finish": "ok"}]}, sid="default")
+    try:
+        run.wait("Stop behind the dialog", run.hook("Stop"))
+        expect(run.states() == ["?", "blocked", "blocked"], f"no report behind the dialog: {run.states()}")
+        run.key("down")
+        run.key("enter")
+        run.wait("the exit", lambda: run.status is not None)
+        status = run.status
+        expect(os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, f"exit: {status}")
+        expect(run.raw.endswith(b"\x1b[>4m\x1b[<1u\r\x1b[40d\x1b[?1049l\x1b[?25h\x1b[?2004l" + AGY_IDLE),
+               f"decline bytes: {run.raw[-80:]!r}")
+        return "wake-up: Stop, PreInvocation 0 with the last prompt, one done; behind the trust dialog: hooks, no reports; No, exit: idle, status 0"
+    finally:
+        run.close()
+
+
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")]
 
 

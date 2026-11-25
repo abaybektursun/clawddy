@@ -74,6 +74,23 @@ struct AgentFindSettleTests {
         #expect(AgentSearchIndex.commands(["Settle"], matching: "settled ").isEmpty)
     }
 
+    /// Coordinator item 3: each CLI's "New <CLI> agent" is found by the
+    /// CLI's name and by its program's ("agy", "claude", "codex"), through
+    /// the command's search text; only what matched in the title is marked.
+    @Test func aCLIsCommandIsFoundByItsProgramName() {
+        let commands = AgentCommand.newAgentWithEachCLI + [.settle, .rename]
+        for (index, provider) in AgentProviderID.allCases.enumerated() {
+            for query in [provider.executableName, provider.displayName.lowercased()] {
+                let chosen = AgentSearchIndex.commands(
+                    commands.map(\.title), searchTexts: commands.map(\.searchText), matching: query)
+                #expect(chosen.map(\.index) == [index], "\(query)")
+                #expect(chosen.first?.marks.allSatisfy { NSMaxRange($0) <= (commands[index].title as NSString).length } == true)
+            }
+        }
+        #expect(AgentCommand.newAgentWith(.antigravity).searchText == "New Antigravity agent agy")
+        #expect(AgentCommand.settle.searchText == "Settle")
+    }
+
     /// "settled" lists the current project's settled agents only, the rest
     /// of the text filtering them, and no commands.
     @Test func settledListsThisProjectsSettledAgents() {

@@ -94,10 +94,17 @@ The script file: <dir>/standin/<conversation id>.json, else
 <dir>/standin/default.json, in the `claude` stand-in's format (its "screen"
 LINEs and "steps"), with these differences:
   "title":  the conversation's title: the msg of `working` when resumed
-  "trust":  true shows agy's folder-trust dialog first ("Yes" selected)
+  "trust":  true shows agy's folder-trust dialog first ("Yes" selected);
+            a first prompt's turn runs behind it with its hooks and no
+            report; "No, exit" leaves as the real one does (idle, status 0)
   steps:    {"permission": "make test"}   a Bash call that needs approval
                                           (runs at once with --dangerously-
                                           skip-permissions)
+            {"wake": "Waiting.", "after": 2}
+                                          a background command: that reply
+                                          and Stop, then after 2 s agy's own
+                                          PreInvocation 0 with the turn's
+                                          prompt; the next steps follow
             {"fail": KIND, "text": "..."} every kind reports `error`
             {"finish": "text"}            "summary", "plus", "minus" unused
   A prompt submitted while no turn is open opens one; its work is the next
@@ -143,6 +150,7 @@ PERMISSION_OPTIONS = ["Yes, run command",
                       "Yes, and always allow for commands that start with '{w}' (Persist to settings.json)",
                       "No, cancel"]
 TRUST_OPTIONS = ["Yes, I trust this folder", "No, exit"]
+TRUST_MSG = "Trust this folder?"
 FAILED = "failed to construct executor: plan model not specified; you must specify a valid model"
 VALUES = {"--conversation": "conversation", "-r": "conversation", "--resume": "conversation",
           "--prompt-interactive": "prompt", "-i": "prompt", "--add-dir": "add_dir", "--model": "model",
@@ -366,7 +374,9 @@ class Agy(base.StandIn):
     # ---- output ----
     def report(self, state, kind=None, msg=None):
         self.reported = (state, kind, msg)
-        if not self.status_ok:
+        # A turn run behind the trust dialog reports nothing (captured,
+        # probes/stage5/trustprompt: hooks only, no working or done).
+        if not self.status_ok or (self.dialog and state != "blocked"):
             return
         body = f"7501;state={state}" + (f":kind={kind}" if kind else "") + ":app=antigravity"
         if msg:
@@ -447,6 +457,25 @@ class Agy(base.StandIn):
         self.draw()
         self.report("done", msg=cut(message.split("\n")[0], 200))
         self.end_turn()
+
+    def wake(self, waiting, after):
+        """A command left running in the background (captured,
+        probes/stage5/wake2): the turn's reply so far and its Stop, still
+        `working`; after `after` seconds agy starts invocation 0 itself,
+        `lastUserInput` the turn's prompt, the transcript's last step the
+        reply. The script's next steps are that invocation's."""
+        if not self.turn_open:
+            self.start_turn(None)
+        self.add(("text", waiting))
+        if self.sid:
+            self.model_step(content=waiting)
+        self.invocation_hook("PostInvocation")
+        self.hook("Stop", continuationActive=False, error="", executionNum=0, fullyIdle=True,
+                  terminationReason="NO_TOOL_CALL")
+        self.draw()
+        yield ("wait", after)
+        self.invocation = 0
+        self.invocation_hook("PreInvocation")
 
     def fail(self, kind, text=None, resets=None):
         if not self.turn_open:
@@ -552,6 +581,8 @@ class Agy(base.StandIn):
                 yield ("permission",)
         elif "fail" in st:
             self.fail(st["fail"], st.get("text"))
+        elif "wake" in st:
+            yield from self.wake(st["wake"], float(st.get("after", 2)))
         elif "wait" in st:
             yield ("prompt",) if st["wait"] == "prompt" else ("wait", float(st["wait"]))
         else:
@@ -803,7 +834,9 @@ class Agy(base.StandIn):
             return
         self.signed_in = True
         if self.dialog:
-            self.report("blocked", kind="permission", msg="Trust this folder?")
+            # The first prompt's turn runs behind the dialog, unanswered.
+            self.report("blocked", kind="permission", msg=TRUST_MSG)
+            self.begin()
             return
         self.report("idle")
         self.begin()
@@ -827,10 +860,22 @@ class Agy(base.StandIn):
             self.full = True
             self.report("idle")
             self.begin()
-        elif k == "enter" or (k == "ctrl-c" and self.armed == "ctrl-c"):
+        elif k == "enter":
+            self.decline()
+        elif k == "ctrl-c" and self.armed == "ctrl-c":
             self.exit("other")
         elif k == "ctrl-c":
             self.armed = "ctrl-c"
+
+    def decline(self):
+        """"No, exit" on the trust dialog, byte for byte as captured
+        (probes/stage5/decline2.bin): no exit screen, no resume line."""
+        rows = self.size()[0]
+        self.write(f"\x1b[>4m\x1b[<1u\r\x1b[{rows}d\x1b[?1049l\x1b[?25h\x1b[?2004l")
+        self.dialog = None
+        self.report("idle")
+        termios.tcsetattr(0, termios.TCSADRAIN, self.saved)
+        sys.exit(0)
 
     def exit(self, reason, code=0, hung=False):
         self.hung = hung
