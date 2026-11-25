@@ -167,6 +167,28 @@ that holds for Claude Code and is false for agy.
    are built from captured bytes so a change shows up as a failing test
    against a new capture, not as a guess.
 
+## Corrections after stage 1
+
+Stage 1 ran thirteen more starts of the real CLI. The full facts are in
+`docs/clawddy-refactor/cli-facts.md`; where they differ from the text above,
+they win:
+
+- The sign-in report does not come at every start, and it stood for half a
+  second in two starts. It counts only once it has stood for 2 seconds.
+- Default mode shows no hint in an empty input box, and no mode shows one
+  after anything was typed. The box is empty when the text after `>` is empty
+  or ends with "(shift+tab to cycle)".
+- The one live failure ran no hook. Failures come from the terminal report.
+- SessionStart does not fire on a resume, `/clear` starts a new conversation
+  id, and an unknown `--conversation` id silently becomes a new conversation.
+  Every hook record binds the id it carries, and a resume first checks that
+  the conversation still exists.
+- No Stop hook fires after an interrupt.
+- Questions in a report are cut at 180 characters, replies at 200.
+- The transcript already holds the full reply when the Stop hook fires.
+- On a resumed conversation the `working` report carries the conversation's
+  title, which is not an activity.
+
 ## Work, in order
 
 One engineer, one stage at a time, each stage ending with the tests passing
