@@ -50,9 +50,7 @@ struct AgentFailLoudTests {
         defer { h.remove() }
         let url = h.root.preferencesFile
         #expect(AgentPreferencesStore.load(from: url) == AgentPreferencesStore.Loaded(preferences: AgentPreferences()))
-        try AgentPreferencesStore.save(
-            AgentPreferences(claudeCodeDefaultStartMode: .unrestricted, codexDefaultStartMode: .unrestricted),
-            to: url)
+        try AgentPreferencesStore.save(AgentPreferences(), to: url)
         let data = try Data(contentsOf: url)
         try data.prefix(data.count - 2).write(to: url)
 

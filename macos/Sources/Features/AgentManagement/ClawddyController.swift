@@ -589,8 +589,8 @@ final class ClawddyController: NSObject {
         switch command {
         case .newAgent:
             return { [weak self] in self?.newAgentCommand(provider: nil) }
-        case .newClaudeAgent, .newCodexAgent:
-            return { [weak self] in self?.newAgentCommand(provider: command == .newCodexAgent ? .codex : .claudeCode) }
+        case .newAgentWith(let provider):
+            return { [weak self] in self?.newAgentCommand(provider: provider) }
         case .addProject:
             return { [weak self] in
                 self?.showWorkspace()
@@ -1357,8 +1357,7 @@ extension ClawddyController: NSMenuItemValidation {
 // MARK: - The line and the floating new-agent line
 
 extension ClawddyController {
-    /// ⌘N, the plus button, "New Claude Code agent", "New Codex agent"
-    /// (flows.md 6.3, ruling 32): with no project, the folder panel;
+    /// ⌘N, the plus button, "New <CLI> agent" for each CLI (flows.md 6.3, ruling 32): with no project, the folder panel;
     /// everywhere else, home included, the floating new-agent line with the
     /// keys; Escape gives them back to who had them (the tiles, the line or
     /// the terminal), the selection unchanged. Already open, it keeps its

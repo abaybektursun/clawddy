@@ -47,7 +47,7 @@ struct AgentCommandTests {
         let titles = menu.items.map { $0.isSeparatorItem ? "—" : $0.title }
         #expect(titles == [
             "Show agents", "—",
-            "New agent", "New Claude Code agent", "New Codex agent", "Add a project folder…", "—",
+            "New agent", "New Claude Code agent", "New Codex agent", "New Antigravity agent", "Add a project folder…", "—",
             "Smaller tiles", "Larger tiles", "Default tile size", "—",
             "Find or run a command…", "Move earlier", "Move later", "Next waiting agent", "Back to all agents",
             "Previous agent", "Next agent", "Previous project", "Next project", "Open agent", "—",

@@ -106,17 +106,63 @@ struct AgentProviderTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("preferences.json")
 
-        var preferences = AgentPreferencesStore.load(from: url).preferences
-        #expect(preferences.defaultStartMode(for: .claudeCode) == .unrestricted)
-        #expect(preferences.defaultStartMode(for: .codex) == .unrestricted)
+        for changed in AgentProviderID.allCases {
+            try? FileManager.default.removeItem(at: url)
+            var preferences = AgentPreferencesStore.load(from: url).preferences
+            #expect(AgentProviderID.allCases.allSatisfy { preferences.defaultStartMode(for: $0) == .unrestricted })
 
-        preferences.setDefaultStartMode(.standard, for: .codex)
-        try AgentPreferencesStore.save(preferences, to: url)
-        #expect(AgentPreferencesStore.load(from: url) == AgentPreferencesStore.Loaded(preferences: preferences))
-        #expect(AgentPreferencesStore.load(from: url).preferences
-            .defaultStartMode(for: .claudeCode) == .unrestricted)
-        #expect(AgentPreferencesStore.load(from: url).preferences
-            .defaultStartMode(for: .codex) == .standard)
+            preferences.setDefaultStartMode(.standard, for: changed)
+            try AgentPreferencesStore.save(preferences, to: url)
+            let loaded = AgentPreferencesStore.load(from: url)
+            #expect(loaded == AgentPreferencesStore.Loaded(preferences: preferences))
+            for provider in AgentProviderID.allCases {
+                #expect(loaded.preferences.defaultStartMode(for: provider) == (provider == changed ? .standard : .unrestricted))
+            }
+        }
+    }
+
+    /// A preferences file of the shape written before the agy work (one
+    /// named field per CLI) loads with its values; saving writes the keyed
+    /// shape only. A CLI the file does not name starts unrestricted.
+    @Test func theOldPreferencesShapeStillLoads() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("preferences.json")
+        try Data("""
+        {
+          "claudeCodeDefaultStartMode" : "standard",
+          "codexDefaultStartMode" : "unrestricted",
+          "schemaVersion" : 1
+        }
+        """.utf8).write(to: url)
+
+        let loaded = AgentPreferencesStore.load(from: url)
+        #expect(loaded.error == nil)
+        #expect(loaded.preferences.defaultStartMode(for: .claudeCode) == .standard)
+        #expect(loaded.preferences.defaultStartMode(for: .codex) == .unrestricted)
+        #expect(loaded.preferences.defaultStartMode(for: .antigravity) == .unrestricted)
+
+        try AgentPreferencesStore.save(loaded.preferences, to: url)
+        let written = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(Set(written.keys) == ["schemaVersion", "defaultStartModes"])
+        #expect(written["schemaVersion"] as? Int == 2)
+        #expect(written["defaultStartModes"] as? [String: String]
+            == ["claudeCode": "standard", "codex": "unrestricted", "antigravity": "unrestricted"])
+        #expect(AgentPreferencesStore.load(from: url) == loaded)
+    }
+
+    /// A name no CLI has (a file from a later build) is dropped, and the
+    /// rest load.
+    @Test func anUnknownCLIInPreferencesIsDropped() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("preferences.json")
+        try Data(#"{"schemaVersion": 3, "defaultStartModes": {"codex": "standard", "later": "standard"}}"#.utf8).write(to: url)
+
+        let loaded = AgentPreferencesStore.load(from: url)
+        #expect(loaded.error == nil)
+        #expect(loaded.preferences.defaultStartMode(for: .codex) == .standard)
+        #expect(loaded.preferences.defaultStartMode(for: .claudeCode) == .unrestricted)
     }
 
     @Test func startModesMapToProviderCanonicalArguments() {

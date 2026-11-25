@@ -12,7 +12,8 @@ is the real Ghostty terminal running the CLI.
 
 ## Terms
 
-- **Agent**: a lasting stored record of one Claude Code or Codex conversation in
+- **Agent**: a lasting stored record of one Claude Code, Codex or Antigravity
+  (the `agy` program) conversation in
   one project folder: its name, state, last sentence, first instruction, the
   prompts sent to it, its last message, the CLI it runs, the CLI's session id and
   the saved text of its terminal. The CLI process under it
@@ -164,8 +165,8 @@ then at the right the waiting count, Find, New agent and Keys buttons.
   decides it:
   - no tile selected (or the line has focus with one or no tile selected): "New
     agent in <project>"; when the line is set to a CLI that is not the default,
-    it names that CLI: "New Codex agent in <project>" or "New Claude Code agent
-    in <project>".
+    it names that CLI: "New Codex agent in <project>", "New Claude Code agent
+    in <project>" or "New Antigravity agent in <project>".
   - exactly one tile selected and the tiles have focus: "Reply to <agent name>".
   - two or more tiles selected: "To N agents", brighter.
 - Text: 14 pt, one line tall, growing a line at a time to 6 lines, then
@@ -243,7 +244,7 @@ the same total as a badge (none at zero).
 | Opening a settled agent (from find) | Settled | the state before settling | It returns to home at its original place in creation order. |
 | The CLI reports a usage limit | Working | Paused at its usage limit | No continuation is promised. |
 | The reset time passes | Paused | Usage limit reset | Only when the CLI gave a reset time. |
-| Login expired (the CLI reports an authentication failure) | any | Stopped with a problem | The app's sentence "Login expired. Open it and run /login."; the CLI's message stays in the terminal. Cleared by the next turn (after the person runs /login). |
+| Login expired (the CLI reports an authentication failure) | any | Stopped with a problem | The app's sentence "Login expired. Open it and run /login." (Antigravity: "Login expired. Open it and sign in again."); the CLI's message stays in the terminal. Cleared by the next turn (after the person runs /login). agy reports "sign in required" for a moment at some starts even when signed in, so for agy the report counts only once it has stood 2 s, and its next report clears it. |
 | The turn fails with an error | Working | Stopped with a problem | The CLI's own message. |
 | The CLI process exits with status 0 (the person typed /exit, Ctrl-D), or the person stops it or closes its terminal | Working | Finished | Sentence: "You interrupted it." The terminal shows its last screen; the agent has no process (4.5). |
 | The same, in any other state | any | unchanged | |
@@ -395,14 +396,20 @@ The prototype fakes these; the app must do them.
 ### 4.2 The sentence
 
 - Finished: the agent's own last message, from the CLI's hook (Claude Code's Stop
-  hook `last_assistant_message`; Codex's turn-complete payload). Its first
-  paragraph, Markdown marks removed, whitespace collapsed.
-- Has a question: the question text from the CLI's hook, at once.
+  hook `last_assistant_message`; Codex's turn-complete payload; agy's Stop hook,
+  which reads the whole reply from its transcript, since its `done` report
+  carries only the reply's first line, cut at 200 characters, shown until the
+  hook's arrives). Its first paragraph, Markdown marks removed, whitespace
+  collapsed.
+- Has a question: the question text from the CLI's hook, at once (agy: from its
+  status report, which cuts a question at 180 characters).
 - Stopped with a problem: the CLI's own error message when it gives one, except
   for a login that expired: then the app's sentence ("Login expired. Open it and
-  run /login."); the CLI's raw text stays in its terminal.
+  run /login."; for Antigravity, which has no /login, "Login expired. Open it
+  and sign in again."); the CLI's raw text stays in its terminal.
 - Working: the step the CLI reports now (Claude Code's status report names it,
-  e.g. "Creating empty marker file"); else the last instruction it was given, as
+  e.g. "Creating empty marker file"; agy reports no step, and the title its
+  report carries on a resumed conversation is not one); else the last instruction it was given, as
   written, in the CLI-words style (not italic); "Working" only when neither
   exists. Followed by "You sent: <text>" while a message is queued.
 - App-written sentences (used when the CLI gives no sentence, and always for an
@@ -471,7 +478,20 @@ delivered: a stray key must never choose an option.
   ("Open in another terminal. Close it there to continue."). For Claude Code
   the check is its own list of running sessions; Codex lists none, so the sign
   is a running Codex given that conversation's id (a Codex started fresh in
-  another terminal is not seen).
+  another terminal is not seen); agy holds a lock file for each conversation it
+  has open (`presence/<id>.lock` in its data folder), so the sign is that lock
+  held, by any agy. agy itself does not refuse a conversation open elsewhere.
+- Before resuming an agy conversation the app also checks it still exists (its
+  `conversations/<id>.db`): agy would take an id it does not know as a new
+  conversation without a word. A conversation that is gone, for any CLI, makes
+  the agent Stopped with a problem ("<CLI> cannot find this conversation. Type
+  to start fresh.").
+- agy's folder trust dialog, shown at start in a folder nobody trusted, is
+  reported as a permission request: the agent waits on the person (its tile
+  lights and says "Trust this folder?"), it has started (the 30 s limit no
+  longer applies), and keys held for it are not sent into the dialog.
+  Answering it in the terminal leaves a new agent as it was ("No output yet"),
+  or goes on to the first instruction's turn.
 
 ### 4.6 Sending text into a CLI
 
@@ -625,8 +645,8 @@ cancels it there, and a burst can continue. A draft already in the home line
 stays as it was; ⌘Z there is then text undo (3.4).
 
 Choosing the CLI: a new agent uses the default CLI set in the Agent menu. The
-palette (and the Agent menu) has "New Claude Code agent" and "New Codex agent":
-each opens the floating new-agent line for that CLI, and the chip names the CLI
+palette (and the Agent menu) has "New Claude Code agent", "New Codex agent" and
+"New Antigravity agent", one per CLI: each opens the floating new-agent line for that CLI, and the chip names the CLI
 when it is not the default ("New Codex agent in tidepool"). It stays set to that
 CLI, for as many starts as the person types, until it closes; then it returns to
 the default.
@@ -670,7 +690,11 @@ Cancelling a start:
      input is ready.
 4. ⌘↩ sends with interrupting: each working agent is interrupted first (Escape
    into its CLI, waiting until its input is ready), then receives the text, which
-   starts a turn at once. Agents not working receive it as in step 3.
+   starts a turn at once. Agents not working receive it as in step 3. agy puts
+   the messages queued during the turn back into its input when interrupted;
+   they are the person's, so that agent is then skipped as in step 5 ("its
+   terminal holds text you typed") and its queued messages stay in its input,
+   not recorded as sent.
 5. Agents whose terminal already holds text the person typed, or that have a
    question or another menu open, are skipped: the app never types on top of
    half-written words or into a menu.
@@ -793,7 +817,7 @@ Cancelling a start:
    While the palette is open no other app key acts.
 
 Commands in the palette: New agent; New Claude Code agent; New Codex agent;
-Add a project folder…; Settle; Mark as
+New Antigravity agent; Add a project folder…; Settle; Mark as
 unread; Rename; Select every working agent here; Remove project; Smaller
 tiles; Larger tiles; Default tile size; Keys; Go to <project> for each
 project. Each shows its key at the right, and each is listed only where it

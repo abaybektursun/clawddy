@@ -11,9 +11,9 @@ enum AgentCommand: Hashable {
     case showAgents
     case newAgent
     /// A new agent with that CLI, whatever the default: the line (or the
-    /// floating new-agent line) set to it until it loses the keys.
-    case newClaudeAgent
-    case newCodexAgent
+    /// floating new-agent line) set to it until it loses the keys. One per
+    /// CLI, in `AgentProviderID.allCases` order (`newAgentWithEachCLI`).
+    case newAgentWith(AgentProviderID)
     case addProject
     case nextWaiting
     case previousAgent
@@ -54,12 +54,15 @@ enum AgentCommand: Hashable {
     /// The Agent menu's title for the submenu of the first nine places.
     static let openAgentTitle = "Open agent"
 
+    /// "New <CLI> agent" for every CLI.
+    static let newAgentWithEachCLI = AgentProviderID.allCases.map(newAgentWith)
+
     /// The Agent menu's groups (words.md "Agent menu"), with a line between
     /// each; `agentAt` places go in the "Open agent" submenu. The CLI and
     /// notification settings follow, made by the controller.
     static let menuGroups: [[AgentCommand]] = [
         [.showAgents],
-        [.newAgent, .newClaudeAgent, .newCodexAgent, .addProject],
+        [.newAgent] + newAgentWithEachCLI + [.addProject],
         [.smallerTiles, .largerTiles, .defaultTiles],
         [.findAgent, .moveEarlier, .moveLater, .nextWaiting, .backToAllAgents, .previousAgent, .nextAgent,
          .previousProject, .nextProject] + (1...9).map(agentAt),
@@ -69,16 +72,15 @@ enum AgentCommand: Hashable {
 
     /// The commands find lists (flows.md 6.8), in its order; each shows only
     /// where it has an action. "Go to <project>" follows, one per project.
-    static let paletteCommands: [AgentCommand] = [
-        .newAgent, .newClaudeAgent, .newCodexAgent, .addProject, .settle, .markUnread, .rename,
-        .selectWorking, .removeProject, .smallerTiles, .largerTiles, .defaultTiles, .keys,
+    static let paletteCommands: [AgentCommand] = [.newAgent] + newAgentWithEachCLI + [
+        .addProject, .settle, .markUnread, .rename, .selectWorking, .removeProject, .smallerTiles, .largerTiles,
+        .defaultTiles, .keys,
     ]
 
     /// The commands that act while the agent window is closed or another
     /// window is main, opening the window first (final review ruling 1).
-    static let opensWindow: Set<AgentCommand> = [
-        .showAgents, .newAgent, .newClaudeAgent, .newCodexAgent, .addProject, .findAgent, .nextWaiting, .keys,
-    ]
+    static let opensWindow = Set<AgentCommand>(
+        [.showAgents, .newAgent, .addProject, .findAgent, .nextWaiting, .keys] + newAgentWithEachCLI)
 
     /// The menu's title; a project's item takes the project's name when
     /// the menu is shown.
@@ -86,8 +88,7 @@ enum AgentCommand: Hashable {
         switch self {
         case .showAgents: "Show agents"
         case .newAgent: "New agent"
-        case .newClaudeAgent: "New Claude Code agent"
-        case .newCodexAgent: "New Codex agent"
+        case .newAgentWith(let provider): "New \(provider.displayName) agent"
         case .addProject: "Add a project folder…"
         case .nextWaiting: "Next waiting agent"
         case .previousAgent: "Previous agent"

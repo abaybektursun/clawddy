@@ -50,7 +50,7 @@ struct AgentRecordTests {
         let early = reduce(reduce(turn(), hook(.questionReported("Which layout, A or B?"))),
                            report("state=blocked:kind=question", message: "answer: A or B?"), at: 6)
         #expect(early.record == turnRecord { $0.state = .asks; $0.changedAt = at(6); $0.question = "Which layout, A or B?" })
-        #expect(early.record.sentence(cli: "Claude Code") == .cli("Which layout, A or B?"))
+        #expect(early.record.sentence(cli: .claudeCode) == .cli("Which layout, A or B?"))
         // A permission asks too; a hook question with no turn changes nothing.
         #expect(reduce(turn(), report("state=blocked:kind=permission")).record == turnRecord { $0.state = .asks })
         #expect(reduce(running(record()), hook(.questionReported("late"))).record == running(record()).record)
@@ -73,7 +73,7 @@ struct AgentRecordTests {
             $0.state = .finished; $0.changedAt = at(20); $0.unread = true
             $0.lastMessage = "Fixed it.\n\nDetails follow."; $0.lastMessageAt = at(21)
         })
-        #expect(message.record.sentence(cli: "Claude Code") == .cli("Fixed it."))
+        #expect(message.record.sentence(cli: .claudeCode) == .cli("Fixed it."))
         // The Stop record can come before the `done`: it waits for it.
         let early = reduce(reduce(turn(), hook(.messageReported("Early.")), at: 19), report("state=done"), at: 20)
         #expect(early.record == turnRecord {
@@ -106,7 +106,7 @@ struct AgentRecordTests {
     @Test func thePersonInterrupts() {
         let interrupted = reduce(turn(), report("state=idle"), at: 7)
         #expect(interrupted.record == turnRecord { $0.state = .finished; $0.changedAt = at(7); $0.interrupted = true })
-        #expect(interrupted.record.sentence(cli: "Claude Code") == .app("You interrupted it."))
+        #expect(interrupted.record.sentence(cli: .claudeCode) == .app("You interrupted it."))
         // An `idle` with no turn under way, as after `/clear`, interrupts nothing.
         let quiet = running(record { $0.lastMessage = "Done." })
         #expect(reduce(quiet, report("state=idle")).record == quiet.record)
@@ -173,7 +173,7 @@ struct AgentRecordTests {
             $0.limit = AgentRecord.UsageLimit(message: "Claude usage limit reached.", resetsAt: resets)
         }
         #expect(state.record == paused)
-        #expect(state.record.sentence(cli: "Claude Code", time: { _ in "3:00 pm" })
+        #expect(state.record.sentence(cli: .claudeCode, time: { _ in "3:00 pm" })
             == .cli("Claude usage limit reached. Resets at 3:00 pm."))
         #expect(!state.record.isWaitingOnYou)
 
@@ -183,7 +183,7 @@ struct AgentRecordTests {
         expected.changedAt = resets
         #expect(reset.state.record == expected)
         #expect(reset.effects == [.waitingForUser] && reset.state.record.isWaitingOnYou)
-        #expect(reset.state.record.sentence(cli: "Claude Code")
+        #expect(reset.state.record.sentence(cli: .claudeCode)
             == .app("Usage limit reset. Open it to continue."))
         #expect(AgentStateReducer.reduce(turn(), event: .usageLimitReset).state.record == turn().record)
     }
@@ -203,12 +203,12 @@ struct AgentRecordTests {
         let hooked = AgentStateReducer.reduce(blocked.state, event: hook(.turnFailed(AgentFailure(error: "authentication_failed"))))
         #expect(hooked.state.record == expired && hooked.effects.isEmpty)
         // The app's words; the CLI's raw text stays in its terminal.
-        #expect(hooked.state.record.sentence(cli: "Claude Code") == .app("Login expired. Open it and run /login."))
+        #expect(hooked.state.record.sentence(cli: .claudeCode) == .app("Login expired. Open it and run /login."))
         let silent = reduce(turn(), hook(.turnFailed(AgentFailure(error: "authentication_failed"))), at: 5)
         #expect(silent.record == turnRecord {
             $0.state = .problem; $0.changedAt = at(5); $0.problem = AgentRecord.Problem(kind: .loginExpired)
         })
-        #expect(silent.record.sentence(cli: "Claude Code") == .app("Login expired. Open it and run /login."))
+        #expect(silent.record.sentence(cli: .claudeCode) == .app("Login expired. Open it and run /login."))
         let next = reduce(reduce(silent, report("state=working")), hook(.promptSubmitted("again")), at: 9)
         #expect(next.record.state == .working && next.record.problem == nil)
     }
@@ -231,8 +231,8 @@ struct AgentRecordTests {
             $0.state = .problem; $0.changedAt = at(5); $0.problem = AgentRecord.Problem(kind: .error, text: "API Error: overloaded")
         })
         #expect(failed.effects == [.failed])
-        #expect(failed.state.record.sentence(cli: "Codex") == .cli("API Error: overloaded"))
-        #expect(reduce(turn(), report("state=error")).record.sentence(cli: "Codex")
+        #expect(failed.state.record.sentence(cli: .codex) == .cli("API Error: overloaded"))
+        #expect(reduce(turn(), report("state=error")).record.sentence(cli: .codex)
             == .app("Stopped with an error. Open it to see why."))
     }
 
@@ -254,9 +254,9 @@ struct AgentRecordTests {
             $0.state = .problem; $0.changedAt = at(8); $0.problem = AgentRecord.Problem(kind: .exited, status: 137)
         })
         #expect(crashed.effects == [.failed, .providerExited(137)])
-        #expect(crashed.state.record.sentence(cli: "Claude Code") == .app(
+        #expect(crashed.state.record.sentence(cli: .claudeCode) == .app(
             "Claude Code stopped (signal 9). Type here to continue."))
-        #expect(reduce(running(record()), hook(.providerExited(status: 2))).record.sentence(cli: "Codex").text
+        #expect(reduce(running(record()), hook(.providerExited(status: 2))).record.sentence(cli: .codex).text
             == "Codex stopped (status 2). Type here to continue.")
         #expect(reduce(turn(), .surfaceDied(generation: generation, byUser: false), at: 8).record == turnRecord {
             $0.state = .problem; $0.changedAt = at(8); $0.problem = AgentRecord.Problem(kind: .exited)
@@ -288,7 +288,7 @@ struct AgentRecordTests {
             $0.prompts = [AgentRecord.Prompt(text: prompt, at: at(1), by: .app)]
         }
         #expect(state.record == continued)
-        #expect(state.record.sentence(cli: "Claude Code") == .app("Continuing after a restart (1 of 3)"))
+        #expect(state.record.sentence(cli: .claudeCode) == .app("Continuing after a restart (1 of 3)"))
         state.launchGeneration = generation
         state.processState = .running
         state = AgentStateReducer.reduce(state, event: hook(.promptSubmitted(prompt)), at: at(2)).state
@@ -305,7 +305,7 @@ struct AgentRecordTests {
         stopped.problem = AgentRecord.Problem(kind: .cutOffTooOften)
         #expect(fourth.state.record == stopped)
         #expect(fourth.effects == [.failed])
-        #expect(fourth.state.record.sentence(cli: "Claude Code")
+        #expect(fourth.state.record.sentence(cli: .claudeCode)
             == .app("Cut off by three restarts. Open it to continue."))
 
         state.turnState = .active(turnID: nil)
@@ -322,7 +322,7 @@ struct AgentRecordTests {
         })
         #expect(lost.effects == [.failed])
         #expect(lost.state.record.isWaitingOnYou)
-        #expect(lost.state.record.sentence(cli: "Codex") == .app(
+        #expect(lost.state.record.sentence(cli: .codex) == .app(
             "Could not read Codex status. Open it to check."))
     }
 
@@ -359,7 +359,7 @@ struct AgentRecordTests {
         state = reduce(state, report("state=working", message: "Running the tests"))
         state = reduce(state, hook(.promptSubmitted("also log it")))
         #expect(state.record.queued == "also log it")
-        #expect(state.record.sentence(cli: "Claude Code") == .cli("Running the tests You sent: also log it"))
+        #expect(state.record.sentence(cli: .claudeCode) == .cli("Running the tests You sent: also log it"))
         state = reduce(state, report("state=done"))
         #expect(state.record.queued == nil && state.record.firstInstruction == "fix the sheet")
 
@@ -418,7 +418,7 @@ struct AgentRecordTests {
     /// headings, code and tables are not prose; a long paragraph is cut.
     @Test func theSentenceOfRealLookingMessages() {
         func sentence(_ message: String) -> AgentSentence {
-            record { $0.lastMessage = message }.sentence(cli: "Claude Code")
+            record { $0.lastMessage = message }.sentence(cli: .claudeCode)
         }
         #expect(sentence("Fixed it: the chart asked for the **next** day an hour early.\n\nAdded `TideChartTests`; all 186 pass.")
             == .cli("Fixed it: the chart asked for the next day an hour early."))
@@ -452,22 +452,22 @@ struct AgentRecordTests {
         // Only code, or only a table: its first line, as plain text.
         #expect(sentence("```swift\nlet x = retry(3)\n```") == .cli("let x = retry(3)"))
         #expect(sentence("| file | change |\n|---|---|\n| a.swift | +3 |") == .cli("file | change"))
-        #expect(record().sentence(cli: "Claude Code") == .app("No output yet"))
+        #expect(record().sentence(cli: .claudeCode) == .app("No output yet"))
     }
 
     /// The CLI's words reach a label without control characters, escape
     /// sequences or bidirectional overrides, and never longer than the cap.
     @Test func cliWordsAreMadeSafeForALabel() {
-        func sentence(_ message: String) -> String { record { $0.lastMessage = message }.sentence(cli: "Codex").text }
+        func sentence(_ message: String) -> String { record { $0.lastMessage = message }.sentence(cli: .codex).text }
         #expect(sentence("Done \u{202E}evil.exe") == "Done evil.exe")
         #expect(sentence("\u{1B}[31mRed\u{1B}[0m and \u{1B}]0;title\u{07}plain") == "Red and plain")
         #expect(sentence("NUL\u{0}here\u{7F}\u{85}") == "NULhere")
         let long = sentence(String(repeating: "x", count: 30_000))
         #expect(long.count <= AgentSentence.limit + 1)
         let asking = record { $0.state = .asks; $0.question = "Which?\u{2066}\u{1B}[2J" }
-        #expect(asking.sentence(cli: "Codex") == .cli("Which?"))
+        #expect(asking.sentence(cli: .codex) == .cli("Which?"))
         let failing = record { $0.state = .problem; $0.problem = AgentRecord.Problem(kind: .error, text: "\u{1B}[1mBold\u{202D}") }
-        #expect(failing.sentence(cli: "Codex") == .cli("Bold"))
+        #expect(failing.sentence(cli: .codex) == .cli("Bold"))
         #expect(AgentConversationTitle.name(from: "Fix\u{202E} the \u{1B}[31mchart", folder: nil) == "Fix the chart")
     }
 
@@ -482,16 +482,16 @@ struct AgentRecordTests {
                 AgentRecord.Prompt(text: "split the offline chart download into packs so sailors fetch only their coast", at: start, by: .app),
             ]
         }
-        #expect(told.sentence(cli: "Claude Code")
+        #expect(told.sentence(cli: .claudeCode)
             == .cli("split the offline chart download into packs so sailors fetch only their coast"))
         var stepping = told
         stepping.activity = "Creating empty marker file"
-        #expect(stepping.sentence(cli: "Claude Code") == .cli("Creating empty marker file"))
+        #expect(stepping.sentence(cli: .claudeCode) == .cli("Creating empty marker file"))
         stepping.queued = "also \u{1B}[31mthe tests\u{202E}"
-        #expect(stepping.sentence(cli: "Claude Code") == .cli("Creating empty marker file You sent: also the tests"))
-        #expect(record { $0.state = .working }.sentence(cli: "Codex") == .app("Working"))
+        #expect(stepping.sentence(cli: .claudeCode) == .cli("Creating empty marker file You sent: also the tests"))
+        #expect(record { $0.state = .working }.sentence(cli: .codex) == .app("Working"))
         let launch = record { $0.state = .problem; $0.problem = AgentRecord.Problem(kind: .launch, text: "bad \u{1B}[1mpath\u{0}") }
-        #expect(launch.sentence(cli: "Codex") == .app("bad path"))
+        #expect(launch.sentence(cli: .codex) == .app("bad path"))
     }
 
     /// The step Claude's `working` report names is the activity; a bare
@@ -511,7 +511,7 @@ struct AgentRecordTests {
     /// The app's sentences, set in italic, where the CLI gave none.
     @Test func theAppsSentences() {
         func sentence(_ change: (inout AgentRecord) -> Void) -> AgentSentence {
-            record(change).sentence(cli: "Codex", time: { _ in "3:00 pm" })
+            record(change).sentence(cli: .codex, time: { _ in "3:00 pm" })
         }
         #expect(sentence { $0.state = .working } == .app("Working"))
         #expect(sentence { $0.state = .working; $0.activity = "Running the tests" } == .cli("Running the tests"))
@@ -525,6 +525,26 @@ struct AgentRecordTests {
             == .app("Codex is not installed. Install it, then type to start."))
         #expect(sentence { $0.state = .problem; $0.problem = AgentRecord.Problem(kind: .conversationMissing) }
             == .app("Codex cannot find this conversation. Type to start fresh."))
+    }
+
+    /// Every sentence that names the CLI names each CLI the same way
+    /// (words.md, "Sentences the app writes on a tile"); only the step after
+    /// an expired login differs, since agy has no /login.
+    @Test(arguments: AgentProviderID.allCases)
+    func theSentencesNameEachCLI(_ provider: AgentProviderID) {
+        func sentence(_ kind: AgentRecord.Problem.Kind, status: Int? = nil) -> AgentSentence {
+            record { $0.state = .problem; $0.problem = AgentRecord.Problem(kind: kind, status: status) }.sentence(cli: provider)
+        }
+        let cli = provider.displayName
+        #expect(sentence(.notInstalled) == .app("\(cli) is not installed. Install it, then type to start."))
+        #expect(sentence(.conversationMissing) == .app("\(cli) cannot find this conversation. Type to start fresh."))
+        #expect(sentence(.openElsewhere) == .app("Open in another terminal. Close it there to continue."))
+        #expect(sentence(.reportFailed) == .app("Could not read \(cli) status. Open it to check."))
+        #expect(sentence(.didNotStart) == .app("\(cli) did not start in 30 s. Type here to try again."))
+        #expect(sentence(.exited, status: 1) == .app("\(cli) stopped (status 1). Type here to continue."))
+        #expect(sentence(.loginExpired) == .app(provider == .antigravity
+            ? "Login expired. Open it and sign in again." : "Login expired. Open it and run /login."))
+        #expect(record { $0.state = .paused }.sentence(cli: provider) == .app("Paused at the usage limit. \(cli) gave no reset time."))
     }
 
     // MARK: Helpers

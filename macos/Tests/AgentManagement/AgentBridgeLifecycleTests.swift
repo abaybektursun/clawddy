@@ -186,19 +186,24 @@ struct AgentBridgeLifecycleTests {
         #expect(agent.terminal == .idle)
     }
 
-    @Test func missingExecutableIsCouldntStart() throws {
+    /// Every CLI the same way: a missing program stops the agent with the
+    /// sentence that says what to do.
+    @Test(arguments: AgentProviderID.allCases)
+    func missingExecutableIsCouldntStart(_ provider: AgentProviderID) throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
-        let id = try h.addAgent("Agent")
+        let id = try h.addAgent("Agent", provider: provider)
         h.start()
-        // The real Claude launch, on a PATH that has no `claude`.
-        h.providers.prepareLaunch = h.providers.real.claudeCode.prepareLaunch
+        // The real launch, on a PATH that has none of the CLIs.
+        h.providers.prepareLaunch = h.providers.real[provider].prepareLaunch
 
         try h.activate(id)
 
         let agent = try h.agent(id)
         #expect(agent.shownState == .problem)
         #expect(agent.record.problem == AgentRecord.Problem(kind: .notInstalled))
+        #expect(agent.record.sentence(cli: provider)
+            == .app("\(provider.displayName) is not installed. Install it, then type to start."))
         #expect(agent.surfaceState == .failed)
         #expect(agent.processState == .exited)
         #expect(h.host.calls == [])

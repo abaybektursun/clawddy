@@ -54,6 +54,7 @@ extension AgentInteractionTests {
             d.controller.menuNeedsUpdate(menu)
             let settings = try #require(menu.items.first { $0.title == "New agents use" }?.submenu)
             #expect(settings.items.filter { $0.state == .on }.map(\.title) == ["Claude Code"])
+            #expect(settings.items.map(\.title) == ["Claude Code", "Codex", "Antigravity"])
             #expect(menu.items.first { $0.title == "Notify when an agent is waiting" }?.state == .off)
             let help = NSApp.mainMenu?.items.first { $0.submenu?.title == "Help" }?.submenu
             #expect(help?.items.first { $0.keyEquivalent == "?" }?.title == "Keys")

@@ -125,7 +125,7 @@ struct AgentTerminalInputTests {
         h.scheduler.advance(by: AgentBridge.startLimit)
         #expect(failed == [trust])
         #expect(try h.agent(trust).record.problem == AgentRecord.Problem(kind: .didNotStart))
-        #expect(try h.agent(trust).record.sentence(cli: "Claude Code")
+        #expect(try h.agent(trust).record.sentence(cli: .claudeCode)
             == .app("Claude Code did not start in 30 s. Type here to try again."))
     }
 

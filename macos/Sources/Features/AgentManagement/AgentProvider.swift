@@ -32,6 +32,17 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// What the person does in the CLI's terminal after its sign-in ran out
+    /// ("Login expired. Open it and <step>."). agy has no /login: signed
+    /// out, it opens the browser's sign-in at start (its docs, "Local silent
+    /// keyring sign-in").
+    var signInStep: String {
+        switch self {
+        case .claudeCode, .codex: return "run /login"
+        case .antigravity: return "sign in again"
+        }
+    }
+
     func startModeTitle(_ mode: AgentStartMode) -> String {
         switch (self, mode) {
         case (.claudeCode, .unrestricted), (.antigravity, .unrestricted): return "Dangerously skip permissions"
@@ -47,7 +58,7 @@ enum AgentProviderID: String, Codable, CaseIterable, Identifiable, Sendable {
         case (.codex, .unrestricted):
             return "Runs without approval prompts or the Codex sandbox."
         case (.antigravity, .unrestricted):
-            return "Runs commands and edits files without asking."
+            return "Approves every Antigravity tool request without asking."
         case (_, .standard):
             return "Uses the provider’s normal approval and sandbox behavior."
         }

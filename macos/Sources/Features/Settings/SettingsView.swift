@@ -27,10 +27,13 @@ struct SettingsView: View {
 
             GroupBox {
                 VStack(spacing: 0) {
-                    providerRow(.claudeCode)
-                    Divider()
-                        .padding(.leading, 48)
-                    providerRow(.codex)
+                    ForEach(AgentProviderID.allCases) { provider in
+                        if provider != AgentProviderID.allCases.first {
+                            Divider()
+                                .padding(.leading, 48)
+                        }
+                        providerRow(provider)
+                    }
                 }
             }
 

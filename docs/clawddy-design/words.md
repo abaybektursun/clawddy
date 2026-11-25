@@ -3,7 +3,8 @@
 Every string the agent window shows, by where it appears. The written authority
 for words: code uses these exactly. Behaviour is in `flows.md`, keys in
 `shortcuts.md`. Filled-in parts are in angle brackets: `<name>` (an agent's
-name), `<project>`, `<CLI>` ("Claude Code" or "Codex"), `<N>`, `<M>`, `<time>`
+name), `<project>`, `<CLI>` ("Claude Code", "Codex" or "Antigravity"; the program
+Antigravity runs is `agy`), `<N>`, `<M>`, `<time>`
 (the system's short time format, as "3:00 pm"), `<text>`.
 
 ## The standard
@@ -89,13 +90,13 @@ name), `<project>`, `<CLI>` ("Claude Code" or "Codex"), `<N>`, `<M>`, `<time>`
 
 | Where | Text |
 |---|---|
-| Chip | New agent in <project> / New Codex agent in <project> or New Claude Code agent in <project> (only when that CLI is not the default) / Reply to <name> (one tile selected and tiles have focus) / To <N> agents |
+| Chip | New agent in <project> / New <CLI> agent in <project> (only when the line was opened for a CLI that is not the default: New Claude Code agent, New Codex agent, New Antigravity agent) / Reply to <name> (one tile selected and tiles have focus) / To <N> agents |
 | Placeholder | Describe the task / Type to reply, or ⌘N for a new agent (one tile selected and tiles have focus) / One instruction for all <N> |
 | Settled count | <N> settled |
 | Key hint while empty | ⌘N |
 | With several selected and text typed | ⌘↩ interrupt them and send |
 | Send button, VoiceOver | Start / Send to <N> agents |
-| Line, VoiceOver | Task for a new agent in <project> (or "for a new Codex agent", "for a new Claude Code agent" when not the default) / Reply to <name> / Instruction for <N> agents |
+| Line, VoiceOver | Task for a new agent in <project> (or "for a new <CLI> agent" when not the default) / Reply to <name> / Instruction for <N> agents |
 
 ## Inside a terminal
 
@@ -127,8 +128,8 @@ name), `<project>`, `<CLI>` ("Claude Code" or "Codex"), `<N>`, `<M>`, `<time>`
 
 ### Commands (palette rows, with their keys)
 
-Show agents; —; New agent ⌘N; New Claude Code agent; New Codex agent; Add a project folder… ⌘O;
-Settle ⌘D; Mark as unread ⌘U; Rename
+Show agents; —; New agent ⌘N; New Claude Code agent; New Codex agent; New Antigravity agent;
+Add a project folder… ⌘O; Settle ⌘D; Mark as unread ⌘U; Rename
 F2; Select every working agent here; Remove project; Smaller tiles ⌘−;
 Larger tiles ⌘+; Default tile size ⌘0; Keys ⌘?; Go to <project> (one per
 project).
@@ -188,7 +189,7 @@ the CLI-words style, not italic; "Working" only when neither exists.
 | Started, no output yet | No output yet |
 | The person interrupted the turn | You interrupted it. |
 | The CLI exited unexpectedly | <CLI> stopped (status <N>). Type here to continue. (a signal: "stopped (signal <N>)") |
-| Login expired | Login expired. Open it and run /login. |
+| Login expired | Login expired. Open it and run /login. (Antigravity, which has no /login: Login expired. Open it and sign in again.) |
 | The turn failed, no message | Stopped with an error. Open it to see why. |
 | Usage limit, reset time known | Paused at the usage limit, which resets at <time>. |
 | Usage limit, no reset time | Paused at the usage limit. <CLI> gave no reset time. |
@@ -221,17 +222,21 @@ time added if the CLI gave one and its message lacks it: "<message> Resets at
 
 ### Agent menu
 
-New agent ⌘N; New Claude Code agent; New Codex agent; Add a project folder… ⌘O;
-—; Smaller tiles ⌘−; Larger tiles ⌘+; Default tile size ⌘0 (these three at home
+New agent ⌘N; New Claude Code agent; New Codex agent; New Antigravity agent; Add a
+project folder… ⌘O; —; Smaller tiles ⌘−; Larger tiles ⌘+; Default tile size ⌘0 (these three at home
 only; inside a terminal the keys are Ghostty's font size items); —; Find or run
 a command… ⌘P; Move earlier ⌥←; Move later ⌥→ (these two at home only); Next
 waiting agent ⌘J; Back to all agents ⌘⎋; Previous agent ⌘[; Next agent ⌘];
 Previous project ⇧⌘[; Next project ⇧⌘]; Open agent ▸ (the first nine places of
 the current view by name, ⌘1 … ⌘9); —; Settle ⌘D; Mark as unread ⌘U; Rename;
 Select every working agent here; —; Remove project; —; New agents use ▸
-(Claude Code, Codex, one checked); Start new agents ▸ (Without permission checks,
-With permission checks, one checked); Notify when an agent is waiting (checked
-or not).
+(Claude Code, Codex, Antigravity, one checked); Start new agents ▸ (Without
+permission checks, With permission checks, one checked; sets it for every CLI);
+Notify when an agent is waiting (checked or not).
+
+"New <CLI> agent" is one item per CLI, in this order. Find matches them by
+their titles, so "antigravity" finds "New Antigravity agent" ("agy", the
+program's name, does not).
 
 ### Other menus
 
@@ -241,6 +246,17 @@ or not).
 | Edit ▸ Copy | Copy (at home with the tiles in focus it copies the selected agents' sentences as "<name>: <sentence>", one per line) |
 | Help | Keys ⌘? |
 | Window | Ghostty's items; ⌘W closes the agent window |
+
+### Settings window (⌘,)
+
+One row per CLI, in the order above: its name, what its start mode does, and
+the mode chosen.
+
+| CLI | Unrestricted mode: title / what it does | Standard mode: title / what it does |
+|---|---|---|
+| Claude Code | Dangerously skip permissions / Bypasses all Claude Code permission checks. | Standard permissions / Uses the provider’s normal approval and sandbox behavior. |
+| Codex | YOLO / Runs without approval prompts or the Codex sandbox. | as above |
+| Antigravity | Dangerously skip permissions / Approves every Antigravity tool request without asking. (Its flag `--dangerously-skip-permissions`: "Auto-approve all tool permission requests without prompting.") | as above |
 
 ## Alerts and notifications
 

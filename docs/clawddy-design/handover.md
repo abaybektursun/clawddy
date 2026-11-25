@@ -38,6 +38,33 @@ The last narrow pass (Claude Opus 5.5):
 - 1383fdb56 nothing of home shows inside a terminal: home's edge pills go and come with home; the header is hidden at
   home; `AgentWindowView.setRegions` is the one place that says what shows (cause below)
 
+## agy, the Antigravity CLI, as a third CLI (branch `clawddy-agy`)
+
+What was added: an agent can run `agy` (shown as "Antigravity") beside Claude Code and Codex, with the same tiles,
+typing line, waiting, settling, resuming and restart behaviour. The plan is `agy-plan.md`; the facts about agy
+1.5.17 it is built on are in `docs/clawddy-refactor/cli-facts.md`, "agy".
+- `AntigravityProvider.swift`: hooks from a per-agent folder added with `--add-dir` (nothing of the owner's is
+  written: not the project, not `~/.gemini`), the presence-lock check before a resume, the check that a resumed
+  conversation still exists, no `--settings`, never Control-C.
+- `AgentReportRules` in `AgentProvider.swift`: the per-CLI values where agy's status reports differ (a `done`
+  with a message ends its turn; its sign-in report counts after 2 s; its `working` carries no step; and so on).
+- Screen readers for agy's input box and menus (`AgentTail.swift`, `AgentTerminalInput.swift`).
+- Everywhere a CLI is chosen, seen or searched for: "New Antigravity agent" in the Agent menu and find (one
+  command per CLI, generated from `AgentProviderID.allCases`), "New agents use", the line's chip, "Starting
+  Antigravity…", the settings window (one row per CLI), the start mode's words ("Dangerously skip permissions",
+  agy's own flag), and every sentence that names the CLI. agy has no `/login`, so its expired login says "Open it
+  and sign in again."
+- `preferences.json` keeps one start mode per CLI in `defaultStartModes` (schema 2); a file of the older shape
+  (`claudeCodeDefaultStartMode`, `codexDefaultStartMode`) loads with its values and is rewritten in the new shape
+  at the next save.
+- The stand-in `macos/Tests/AgentManagement/StandIns/agy`, built from captured bytes; `check.py agy agy_screens`.
+
+How it was proven: unit tests (`AgentAntigravityTests.swift` and the per-CLI tests named in the stage notes), the
+stand-in checks, and a harness scene with one agent of each CLI in one project taken through working, a question
+and done, pictured at home and inside (`/Volumes/Xcode/GhosttyBuilds/ghostty/harness/agy-stage4/shots/`).
+
+Not proven yet: the real `agy` under the app (stage 5 of the plan).
+
 ## Build
 
 From the repository root:
@@ -113,8 +140,8 @@ Earlier stages: `s10-strips/` (enter, leave, palette, new tile, project switch, 
   in the agent window (shortcuts.md rule 5), so ⌘N from a plain Ghostty window opens a Ghostty window.
 - ⌃⌘F (the system's full screen) is not claimed in the agent window; Ghostty's other unnamed default chords are.
 - From S9, still open: find over 500 stored agents has a p95 near 9.5 ms.
-- The settings window (⌘,) still sets a start mode per CLI while the Agent menu sets one for both: a known
-  inconsistency, left as it is (last review ruling 10).
+- The settings window (⌘,) still sets a start mode per CLI while the Agent menu sets one for all of them: a
+  known inconsistency, left as it is (last review ruling 10).
 - Ghostty's own menu commands for plain terminals (New Tab, Quick Terminal, Close All Windows) and its Dock menu
   are unchanged (last review ruling 10).
 - Undoing a settle during the walk makes that agent the next stop (final review ruling 5), as flows.md 6.6 says.

@@ -166,7 +166,7 @@ struct AgentFlowsTests {
         #expect(continued.record.state == .working && continued.record.cutOff && continued.record.continuedInARow == 1)
         #expect(continued.record.prompts.last?.text == AgentBridge.continueMessage)
         #expect(continued.record.prompts.last?.by == .app)
-        #expect(continued.record.sentence(cli: "Claude Code") == .app("Continuing after a restart (1 of 3)"))
+        #expect(continued.record.sentence(cli: .claudeCode) == .app("Continuing after a restart (1 of 3)"))
 
         // Launched with a prompt, a CLI reads its input at its first working.
         try h.osc(ids[0], "state=working:app=claude-code")
@@ -216,7 +216,7 @@ struct AgentFlowsTests {
         let before = h.providers.launchRequests.count
         h.bridge.continueCutOffAgents(selected: nil, host: h.host)
         #expect(h.providers.launchRequests.dropFirst(before).map(\.agentID) == [busy])
-        #expect(agent.record.sentence(cli: "Claude Code") == .app("Continuing after a restart (2 of 3)"))
+        #expect(agent.record.sentence(cli: .claudeCode) == .app("Continuing after a restart (2 of 3)"))
         #expect(h.notifier.posted.isEmpty)
     }
 
@@ -242,7 +242,7 @@ struct AgentFlowsTests {
         #expect(h.providers.launchRequests.count == before)
         let agent = try h.agent(id)
         #expect(agent.record.problem == AgentRecord.Problem(kind: .cutOffTooOften))
-        #expect(agent.record.sentence(cli: "Claude Code")
+        #expect(agent.record.sentence(cli: .claudeCode)
             == .app("Cut off by three restarts. Open it to continue."))
         #expect(agent.record.isWaitingOnYou)
 
@@ -359,7 +359,7 @@ struct AgentFlowsTests {
         try h.activate(id)
         let agent = try h.agent(id)
         #expect(agent.record.problem == AgentRecord.Problem(kind: .openElsewhere))
-        #expect(agent.record.sentence(cli: "Claude Code")
+        #expect(agent.record.sentence(cli: .claudeCode)
             == .app("Open in another terminal. Close it there to continue."))
         h.providers.prepareLaunch = { _ in
             .success(AgentPreparedLaunch(

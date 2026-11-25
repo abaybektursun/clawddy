@@ -131,6 +131,9 @@ keeps its name there and shows no key.
 | ⌘=, ⌘+, ⌘−, ⌘0 | Ghostty's increase, decrease and reset font size (View menu) | Taken at home for tile density; inside a terminal Ghostty's, unchanged. They change a view and never type or edit. |
 | ⌘Tab, ⌘`, ⌘Q, ⌘H, ⌥⌘H, ⌘M, ⌘Space, ⌘, | System and app conventions | Never taken. |
 
-The CLIs inside: Claude Code and Codex use Control and Option chords, Escape,
-Return, Tab, ⇧Tab and arrows, all of which reach the terminal. None of the ⌘
+The CLIs inside: Claude Code, Codex and Antigravity (`agy`) use Control and
+Option chords, Escape, Return, Tab, ⇧Tab and arrows, all of which reach the
+terminal. The app itself sends agy only paste, Return and Escape, never
+Control-C (with no turn running, a second Control-C ends agy, typed text and
+all). None of the ⌘
 chords above reaches a CLI in Ghostty's default key encoding.

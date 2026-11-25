@@ -14,11 +14,12 @@ const last_file = "/Volumes/Xcode/GhosttyBuilds/ghostty/harness/last"
 #   macos/harness.nu stop [--dir <dir>]                 quit it
 #
 # The scene with the prototype's agents: Tests/AgentManagement/Scenes/prototype.json.
-# --real runs the real `claude` and `codex` from the login-shell PATH instead
-# of the stand-ins: the scene's sessions, stand-in scripts and "command" are
-# left out, so each running agent starts a new session of the real CLI in
-# <dir>/work/<project>. The real CLIs keep their own files where they always
-# do (~/.claude, ~/.codex), outside <dir>.
+# --real runs the real `claude`, `codex` and `agy` from the login-shell PATH
+# instead of the stand-ins: the scene's sessions, stand-in scripts and
+# "command" are left out, so each running agent starts a new session of the
+# real CLI in <dir>/work/<project>. The real CLIs keep their own files where
+# they always do (~/.claude, ~/.codex, ~/.gemini/antigravity-cli), outside
+# <dir>; the app only reads agy's.
 #
 # <dir> must be on the external disk, e.g.
 # /Volumes/Xcode/GhosttyBuilds/ghostty/harness/run1. `send` and `stop` use the
@@ -27,7 +28,7 @@ const last_file = "/Volumes/Xcode/GhosttyBuilds/ghostty/harness/last"
 # selects the agent.
 #
 # What <dir> holds: scene.json (the scene), root/ (the app's data root),
-# work/<project>/ (project folders), bin/ (claude and codex, first on the PATH
+# work/<project>/ (project folders), bin/ (claude, codex and agy, first on the PATH
 # of agent terminals), standin/<session id>.json, ghostty.conf, control.sock,
 # pid, app (the bundle it runs), preferences.plist (the run's preferences,
 # in place of the bundle ID's: the window's saved frame and the workspace's
@@ -39,7 +40,7 @@ const last_file = "/Volumes/Xcode/GhosttyBuilds/ghostty/harness/last"
 # Scene format (JSON; plain, no comments):
 #
 #   {
-#     "command": "/bin/cat",        optional: bin/claude and bin/codex become
+#     "command": "/bin/cat",        optional: bin/claude, bin/codex, bin/agy become
 #                                   scripts that run this program instead of
 #                                   the stand-ins
 #     "selected": "Tom",            optional: the selected agent, by name or
@@ -51,7 +52,7 @@ const last_file = "/Volumes/Xcode/GhosttyBuilds/ghostty/harness/last"
 #         "agents": [
 #           {
 #             "name": "Tom",
-#             "provider": "claudeCode",   or "codex"; default claudeCode
+#             "provider": "claudeCode",   or "codex", "antigravity"; default claudeCode
 #             "session": "<id>",          optional: the saved session its
 #                                         launch resumes (letters, digits, - _ .)
 #             "running": true,            optional: its CLI starts when the harness
@@ -113,7 +114,7 @@ const last_file = "/Volumes/Xcode/GhosttyBuilds/ghostty/harness/last"
 #                                           own flag, true for a moment while a
 #                                           panel becomes key), hidden,
 #                                           sidebarHidden, providers
-#                                           (the claude and codex each launch finds)
+#                                           (the claude, codex and agy each launch finds)
 #   {"key":"cmd+]"}                         a key press: modifiers cmd shift opt
 #                                           ctrl, then a character or return,
 #                                           escape, tab, space, delete, up, ...
@@ -136,7 +137,10 @@ const last_file = "/Volumes/Xcode/GhosttyBuilds/ghostty/harness/last"
 #                                           its CLI started if it is not running
 #   {"start":{"project":"cats","task":"fix it","provider":"codex"}}
 #                                           a new agent from a typed task; name
-#   {"settle":"Tom"}                        settles the agent (working ones too)
+#   {"command":"newAgent:antigravity"}      an Agent menu command chosen: settle,
+#                                           rename, nextWaiting, ...; "New <CLI>
+#                                           agent" is newAgent:<provider>
+#   {"settle":"Tom"}                       settles the agent (working ones too)
 #   {"cancel":"Tom"}                        cancels a start within 6 s;
 #                                           cancelled: false when too late
 #   {"wait":{"agent":"Tom","text":"hi","timeout":5}}

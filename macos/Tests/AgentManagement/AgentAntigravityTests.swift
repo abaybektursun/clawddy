@@ -500,7 +500,8 @@ struct AgentAntigravityBridgeTests {
         h.scheduler.advance(by: 0.02)
         let agent = try h.agent(stuck)
         #expect(agent.record.state == .problem && agent.record.problem?.kind == .loginExpired)
-        #expect(agent.record.sentence(cli: "Antigravity") == .app("Login expired. Open it and run /login."))
+        // agy has no /login.
+        #expect(agent.record.sentence(cli: .antigravity) == .app("Login expired. Open it and sign in again."))
         h.scheduler.advance(by: 5)
         #expect(try h.agent(brief).record.problem == nil && h.agent(brief).record.state == .finished)
         #expect(h.notifier.posted.map(\.identifier) == ["clawddy.\(stuck.uuidString).error"])
@@ -548,7 +549,7 @@ struct AgentAntigravityBridgeTests {
         #expect(agent.record.state == .asks && agent.record.problem == nil)
         try h.osc(id, "state=idle:app=antigravity")
         #expect(agent.record.state == .finished && !agent.record.interrupted && agent.record.lastMessage == nil)
-        #expect(agent.record.sentence(cli: "Antigravity") == .app("No output yet"))
+        #expect(agent.record.sentence(cli: .antigravity) == .app("No output yet"))
 
         let project = try #require(h.config.projects.first)
         let entry = try #require(h.bridge.startAgent(

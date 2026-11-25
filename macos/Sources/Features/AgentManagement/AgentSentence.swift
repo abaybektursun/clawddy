@@ -34,9 +34,10 @@ struct AgentSentence: Equatable, Sendable {
 }
 
 extension AgentRecord {
-    /// The sentence, a function of the record alone. `cli` names the CLI in
-    /// app-written sentences; `time` writes a reset time ("3:00 pm").
-    func sentence(cli: String, time: (Date) -> String = AgentSentence.shortTime) -> AgentSentence {
+    /// The sentence, a function of the record alone. `provider` is the CLI
+    /// app-written sentences name; `time` writes a reset time ("3:00 pm").
+    func sentence(cli provider: AgentProviderID, time: (Date) -> String = AgentSentence.shortTime) -> AgentSentence {
+        let cli = provider.displayName
         switch state {
         case .working:
             var base: AgentSentence
@@ -56,7 +57,7 @@ extension AgentRecord {
         case .asks:
             return question.map { .cli(AgentSentence.oneLine($0)) } ?? .app("Has a question")
         case .problem:
-            return problemSentence(cli: cli)
+            return problemSentence(provider)
         case .finished:
             if interrupted { return .app("You interrupted it.") }
             guard let lastMessage, let sentence = AgentSentence.summary(of: lastMessage) else {
@@ -78,7 +79,8 @@ extension AgentRecord {
         }
     }
 
-    private func problemSentence(cli: String) -> AgentSentence {
+    private func problemSentence(_ provider: AgentProviderID) -> AgentSentence {
+        let cli = provider.displayName
         let text = problem?.text.map { AgentSentence.label($0) }.flatMap { $0.isEmpty ? nil : $0 }
         switch problem?.kind {
         case .error, nil:
@@ -87,7 +89,7 @@ extension AgentRecord {
         case .loginExpired:
             // The CLI's own text ("API Error: 401 · OAuth token has…") stays
             // in its terminal.
-            return .app("Login expired. Open it and run /login.")
+            return .app("Login expired. Open it and \(provider.signInStep).")
         case .exited:
             let how = problem?.status.map { $0 > 128 ? " (signal \($0 - 128))" : " (status \($0))" } ?? ""
             return .app("\(cli) stopped\(how). Type here to continue.")

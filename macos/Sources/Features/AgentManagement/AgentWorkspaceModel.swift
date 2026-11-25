@@ -51,8 +51,8 @@ final class AgentWorkspaceModel {
     /// kept across project switches, entering terminals and quitting; only
     /// sending empties it.
     @ObservationIgnored private(set) var drafts: [UUID: String]
-    /// The CLI the line is set to by "New Claude Code agent" or "New Codex
-    /// agent", until it loses the keys; nil: the default.
+    /// The CLI the line is set to by "New <CLI> agent", until it loses the
+    /// keys; nil: the default.
     var lineProvider: AgentProviderID?
     /// The session's undoable actions (flows.md 3.4): settles, project
     /// removals and starts, newest last.

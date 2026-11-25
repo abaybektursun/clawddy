@@ -100,7 +100,7 @@ extension AgentInstance {
     /// The sentence the window shows (`AgentRecord.sentence`), or, while its
     /// launch waits its turn, the app's words saying so.
     var sentence: AgentSentence {
-        waitsToStart ? .app(Self.waitingToStart) : record.sentence(cli: provider.displayName)
+        waitsToStart ? .app(Self.waitingToStart) : record.sentence(cli: provider)
     }
 
     /// words.md, "Sentences the app writes on a tile".

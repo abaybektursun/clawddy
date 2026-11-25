@@ -1,59 +1,66 @@
 import Foundation
 
+/// What new agents start with, saved in `preferences.json`: one start mode
+/// per CLI, keyed by the CLI's stored name, so a CLI added later needs no
+/// field of its own.
 struct AgentPreferences: Codable, Equatable, Sendable {
-    static let currentSchemaVersion = 1
+    /// 2: `defaultStartModes`. 1 (until the agy work): one named field per
+    /// CLI, `<CLI>DefaultStartMode`, still read.
+    static let currentSchemaVersion = 2
 
-    var schemaVersion: Int
-    var claudeCodeDefaultStartMode: AgentStartMode
-    var codexDefaultStartMode: AgentStartMode
-    var antigravityDefaultStartMode: AgentStartMode
+    private var defaultStartModes: [AgentProviderID: AgentStartMode]
 
-    init(
-        claudeCodeDefaultStartMode: AgentStartMode = .unrestricted,
-        codexDefaultStartMode: AgentStartMode = .unrestricted,
-        antigravityDefaultStartMode: AgentStartMode = .unrestricted
-    ) {
-        schemaVersion = Self.currentSchemaVersion
-        self.claudeCodeDefaultStartMode = claudeCodeDefaultStartMode
-        self.codexDefaultStartMode = codexDefaultStartMode
-        self.antigravityDefaultStartMode = antigravityDefaultStartMode
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case schemaVersion
-        case claudeCodeDefaultStartMode
-        case codexDefaultStartMode
-        case antigravityDefaultStartMode
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
-        claudeCodeDefaultStartMode = try container.decodeIfPresent(
-            AgentStartMode.self,
-            forKey: .claudeCodeDefaultStartMode) ?? .unrestricted
-        codexDefaultStartMode = try container.decodeIfPresent(
-            AgentStartMode.self,
-            forKey: .codexDefaultStartMode) ?? .unrestricted
-        antigravityDefaultStartMode = try container.decodeIfPresent(
-            AgentStartMode.self,
-            forKey: .antigravityDefaultStartMode) ?? .unrestricted
+    /// Every CLI starting `mode`.
+    init(defaultStartMode mode: AgentStartMode = .unrestricted) {
+        defaultStartModes = Dictionary(uniqueKeysWithValues: AgentProviderID.allCases.map { ($0, mode) })
     }
 
     func defaultStartMode(for provider: AgentProviderID) -> AgentStartMode {
-        switch provider {
-        case .claudeCode: return claudeCodeDefaultStartMode
-        case .codex: return codexDefaultStartMode
-        case .antigravity: return antigravityDefaultStartMode
-        }
+        defaultStartModes[provider] ?? .unrestricted
     }
 
     mutating func setDefaultStartMode(_ mode: AgentStartMode, for provider: AgentProviderID) {
-        switch provider {
-        case .claudeCode: claudeCodeDefaultStartMode = mode
-        case .codex: codexDefaultStartMode = mode
-        case .antigravity: antigravityDefaultStartMode = mode
+        defaultStartModes[provider] = mode
+    }
+
+    private struct Key: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init(_ name: String) { stringValue = name }
+        init?(stringValue: String) { self.init(stringValue) }
+        init?(intValue: Int) { nil }
+
+        static let schemaVersion = Key("schemaVersion")
+        static let defaultStartModes = Key("defaultStartModes")
+        /// Schema 1's field for `provider`, e.g. `codexDefaultStartMode`.
+        static func named(_ provider: AgentProviderID) -> Key { Key("\(provider.rawValue)DefaultStartMode") }
+    }
+
+    /// A CLI the file does not name starts unrestricted, the default; a
+    /// name the file has that no CLI has is dropped.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: Key.self)
+        self.init()
+        if let modes = try container.decodeIfPresent([String: AgentStartMode].self, forKey: .defaultStartModes) {
+            for (name, mode) in modes {
+                if let provider = AgentProviderID(rawValue: name) { defaultStartModes[provider] = mode }
+            }
+        } else {
+            for provider in AgentProviderID.allCases {
+                if let mode = try container.decodeIfPresent(AgentStartMode.self, forKey: .named(provider)) {
+                    defaultStartModes[provider] = mode
+                }
+            }
         }
+    }
+
+    /// Always the current shape.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: Key.self)
+        try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
+        try container.encode(
+            Dictionary(uniqueKeysWithValues: defaultStartModes.map { ($0.key.rawValue, $0.value) }),
+            forKey: .defaultStartModes)
     }
 }
 
@@ -76,10 +83,7 @@ enum AgentPreferencesStore {
             return Loaded(preferences: AgentPreferences())
         } catch {
             return Loaded(
-                preferences: AgentPreferences(
-                    claudeCodeDefaultStartMode: .standard,
-                    codexDefaultStartMode: .standard,
-                    antigravityDefaultStartMode: .standard),
+                preferences: AgentPreferences(defaultStartMode: .standard),
                 error: "Agent defaults could not be read from \(url.path) (\(AgentConfig.describeLoadFailure(error))), so new agents start with standard permissions.")
         }
     }

@@ -737,15 +737,16 @@ final class AgentHarness {
             }
             return ["ok": true, "handled": handled, "work": work, "committed": committed, "terminalFrame": terminalFrame as Any]
         case "command":
-            // An Agent menu item chosen, by its command: newCodexAgent,
-            // newClaudeAgent.
+            // An Agent menu item chosen, by its command: settle, rename, ...;
+            // "New <CLI> agent" as newAgent:<provider>, e.g. newAgent:codex.
             guard let name = argument as? String, let controller else { throw Refused(reason: "command takes a command's name.") }
-            let commands: [String: AgentCommand] = [
-                "newCodexAgent": .newCodexAgent, "newClaudeAgent": .newClaudeAgent, "settle": .settle,
+            var commands: [String: AgentCommand] = [
+                "settle": .settle,
                 "removeProject": .removeProject, "findAgent": .findAgent, "undo": .undo, "markUnread": .markUnread,
                 "selectWorking": .selectWorking, "smallerTiles": .smallerTiles, "largerTiles": .largerTiles,
                 "rename": .rename, "nextWaiting": .nextWaiting,
             ]
+            for provider in AgentProviderID.allCases { commands["newAgent:\(provider.rawValue)"] = .newAgentWith(provider) }
             guard let command = commands[name] else { throw Refused(reason: "No command “\(name)”: \(commands.keys.sorted()).") }
             controller.action(for: command, in: controller.keyContext)?()
         case "menuItem":
