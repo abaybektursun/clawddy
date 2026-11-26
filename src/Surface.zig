@@ -569,6 +569,21 @@ pub fn init(
         break :device device;
     };
 
+    // The surface's unique ID, known before its threads start: every message
+    // its mailbox sends carries it, so a message left from a freed surface is
+    // never taken for a new one at the same address.
+    const id: u64 = id: {
+        while (true) {
+            const candidate = candidate: {
+                const rng_impl: std.Random.IoSource = .{ .io = global.io() };
+                const rng = rng_impl.interface();
+                break :candidate rng.int(u64);
+            };
+            if (candidate == 0) continue;
+            break :id candidate;
+        }
+    };
+
     // Create our terminal grid with the initial size
     const app_mailbox: App.Mailbox = .{ .rt_app = rt_app, .mailbox = &app.mailbox };
     var renderer_impl = renderer: {
@@ -582,7 +597,7 @@ pub fn init(
             .config = renderer_config,
             .font_grid = font_grid,
             .size = size,
-            .surface_mailbox = .{ .surface = self, .app = app_mailbox },
+            .surface_mailbox = .{ .surface = self, .id = id, .app = app_mailbox },
             .rt_surface = rt_surface,
             .thread = &self.renderer_thread,
         });
@@ -609,17 +624,7 @@ pub fn init(
     errdefer io_thread.deinit();
 
     self.* = .{
-        .id = id: {
-            while (true) {
-                const candidate = candidate: {
-                    const rng_impl: std.Random.IoSource = .{ .io = global.io() };
-                    const rng = rng_impl.interface();
-                    break :candidate rng.int(u64);
-                };
-                if (candidate == 0) continue;
-                break :id candidate;
-            }
-        },
+        .id = id,
         .alloc = alloc,
         .app = app,
         .rt_app = rt_app,
@@ -717,7 +722,7 @@ pub fn init(
             .renderer_state = &self.renderer_state,
             .renderer_wakeup = render_thread.wakeup,
             .renderer_mailbox = render_thread.mailbox,
-            .surface_mailbox = .{ .surface = self, .app = app_mailbox },
+            .surface_mailbox = .{ .surface = self, .id = id, .app = app_mailbox },
         });
     }
     // Outside the block, IO has now taken ownership of our temporary state
@@ -888,6 +893,7 @@ pub fn close(self: *Surface) void {
 inline fn surfaceMailbox(self: *Surface) Mailbox {
     return .{
         .surface = self,
+        .id = self.id,
         .app = .{ .rt_app = self.rt_app, .mailbox = &self.app.mailbox },
     };
 }

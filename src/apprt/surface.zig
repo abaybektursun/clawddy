@@ -197,6 +197,10 @@ pub const Message = union(enum) {
 /// A surface mailbox.
 pub const Mailbox = struct {
     surface: *Surface,
+    /// The surface's unique ID (`Surface.id`), carried by every message so the
+    /// app delivers it only to that surface, not to a later one that reuses
+    /// the freed surface's address.
+    id: u64,
     app: App.Mailbox,
 
     /// Send a message to the surface.
@@ -211,11 +215,28 @@ pub const Mailbox = struct {
         return self.app.push(.{
             .surface_message = .{
                 .surface = self.surface,
+                .id = self.id,
                 .message = msg,
             },
         }, timeout);
     }
 };
+
+test "Mailbox: a message carries its surface's unique ID" {
+    const testing = std.testing;
+    const global = @import("../global.zig");
+    var rt_app: apprt.App = .{};
+    const queue: *App.Mailbox.Queue = try .create(testing.allocator);
+    defer queue.destroy(testing.allocator);
+    const mailbox: Mailbox = .{
+        .surface = undefined,
+        .id = 42,
+        .app = .{ .rt_app = &rt_app, .mailbox = queue },
+    };
+    _ = mailbox.push(.{ .close = {} }, .{ .instant = {} });
+    const msg = queue.pop(global.io()).?.surface_message;
+    try testing.expectEqual(@as(u64, 42), msg.id);
+}
 
 /// Context for new surface creation to determine inheritance behavior
 pub const NewSurfaceContext = enum(c_int) {

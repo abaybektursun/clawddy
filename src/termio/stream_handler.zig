@@ -2069,6 +2069,7 @@ test "program status: reports are forwarded with a copy of the body" {
     handler.renderer_state = &renderer_state;
     handler.surface_mailbox = .{
         .surface = undefined,
+        .id = 0,
         .app = .{ .rt_app = &rt_app, .mailbox = queue },
     };
 
@@ -2161,6 +2162,7 @@ test "program status: full reset sends one clear" {
     handler.renderer_state = &renderer_state;
     handler.surface_mailbox = .{
         .surface = undefined,
+        .id = 0,
         .app = .{ .rt_app = &rt_app, .mailbox = queue },
     };
     handler.kitty_clipboard_grants = .{};

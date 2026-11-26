@@ -290,7 +290,7 @@ fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
             ),
             .new_window => |msg| try self.newWindow(rt_app, msg),
             .close => |surface| self.closeSurface(surface),
-            .surface_message => |msg| try self.surfaceMessage(msg.surface, msg.message),
+            .surface_message => |msg| try self.surfaceMessage(msg.surface, msg.id, msg.message),
 
             // If we're quitting, then we set the quit flag and stop
             // draining the mailbox immediately. This lets us defer
@@ -529,11 +529,14 @@ pub fn performAllAction(
 }
 
 /// Handle a window message
-fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !void {
+fn surfaceMessage(self: *App, surface: *Surface, id: u64, msg: apprt.surface.Message) !void {
     // We want to ensure our window is still active. Window messages
     // are quite rare and we normally don't have many windows so we do
-    // a simple linear search here.
-    if (self.hasSurface(surface)) {
+    // a simple linear search here. The address alone is not enough: a
+    // surface freed with messages still queued can be followed by a new
+    // one at the same address, which must not take them (its terminal
+    // would close on the old one's child exit).
+    if (self.hasSurface(surface) and surface.id == id) {
         try surface.handleMessage(msg);
     }
 
@@ -574,9 +577,10 @@ pub const Message = union(enum) {
     /// Quit
     quit: void,
 
-    /// A message for a specific surface.
+    /// A message for a specific surface, by its address and its unique ID.
     surface_message: struct {
         surface: *Surface,
+        id: u64,
         message: apprt.surface.Message,
     },
 

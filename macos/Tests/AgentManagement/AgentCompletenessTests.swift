@@ -42,8 +42,10 @@ extension AgentInteractionTests {
             try await d.key(AgentWorkspaceDriver.downArrow)
             try await d.key(AgentWorkspaceDriver.rightArrow)
             menu = try agentMenu()
+            let cursor = d.grid.selection.cursor.flatMap { d.h.bridge.agents[$0] }
+            let at = "cursor \(cursor?.name ?? "none") \(String(describing: cursor?.record.state)) unread \(String(describing: cursor?.record.unread)) problem \(String(describing: cursor?.record.problem)) process \(String(describing: cursor?.processState)) surface \(String(describing: cursor?.surfaceState))"
             for title in ["Settle", "Mark as unread", "Rename", "Move earlier", "Move later"] {
-                #expect(enabled(menu, title) == true, "\(title) on a finished tile")
+                #expect(enabled(menu, title) == true, "\(title) on a finished tile; \(at)")
             }
 
             try await d.key(AgentWorkspaceDriver.returnKey)
