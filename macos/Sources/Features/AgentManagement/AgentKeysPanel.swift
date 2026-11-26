@@ -22,6 +22,7 @@ final class AgentKeysPanel: NSView, AgentActivationClickSafeRegion {
             (["type"], "On one selected tile: replies in its terminal. With none: starts a new agent"),
             (["↩"], "On a tile: open its terminal. In the line: start or send"),
             (["⌘N"], "New agent: a floating line, at home and inside a terminal"),
+            (["⇥"], "In a new-agent line: change the CLI. Shift goes back"),
             (["⌘D"], "Settle. During a walk, settles and moves to the next"),
             (["⌘Z"], "Undo settle or project removal. In an empty line, cancels a start"),
             (["⌘U"], "Mark as unread"),

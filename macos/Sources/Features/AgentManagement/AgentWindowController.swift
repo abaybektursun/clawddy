@@ -70,6 +70,8 @@ struct AgentWindowActions {
     var copy: () -> Void = {}
     /// A pinch: apart (true) or together.
     var pinch: (Bool) -> Void = { _ in }
+    /// The menu of the CLIs a new agent can use, for a press on the chip.
+    var cliMenu: () -> NSMenu = { NSMenu() }
 }
 
 /// Who has the keyboard in the agent window (flows.md 5): exactly one, the
@@ -188,6 +190,8 @@ final class AgentWindowController: NSViewController {
         line.onHeight = { [weak self] in self?.windowView.placeLine() }
         line.textView.command = { [weak self] in self?.actions.lineCommand($0) ?? false }
         line.onText = { [weak self] in self?.actions.draft($0) }
+        line.onChip = { [weak self] in self?.showCLIMenu(under: $0) }
+        palettePanel.onChip = { [weak self] in self?.showCLIMenu(under: $0) }
         palettePanel.textView.command = { [weak self] in self?.actions.paletteCommand($0) ?? false }
         palettePanel.textView.onChange = { [weak self] in
             guard let self else { return }
@@ -559,7 +563,6 @@ final class AgentWindowController: NSViewController {
         line.setFocused(focus == .line)
         grid.lineHasKeys = focus == .line
         grid.syncSelection()
-        if focus != .line, focus != .palette, model.lineProvider != nil { model.lineProvider = nil }
         renderLine(project: config.projects.first { $0.id == model.currentProjectID })
     }
 
@@ -580,9 +583,10 @@ final class AgentWindowController: NSViewController {
         }
         let selection = model.selection(in: project.id)
         let count = selection.selected.count
-        let cli = model.lineProvider.flatMap { $0 == model.newAgentProvider ? nil : $0.displayName + " " } ?? ""
+        let cli = model.newAgentProvider.displayName
         let settled = project.agents.compactMap { bridge.agents[$0.id] }.filter(\.isSettled).count
         let words: AgentLineView.Words
+        lineStartsNewAgent = false
         if count > 1 {
             words = .init(
                 chip: "To \(count) agents", many: true, placeholder: "One instruction for all \(count)",
@@ -592,11 +596,50 @@ final class AgentWindowController: NSViewController {
                 chip: "Reply to \(agent.name)", placeholder: "Type to reply, or ⌘N for a new agent",
                 accessibility: "Reply to \(agent.name)")
         } else {
+            lineStartsNewAgent = true
             words = .init(
-                chip: "New \(cli)agent in \(project.name)", placeholder: "Describe the task",
-                accessibility: "Task for a new \(cli)agent in \(project.name)")
+                chip: "New \(cli) agent in \(project.name)", cli: cli, placeholder: AgentPaletteView.newPlaceholder,
+                accessibility: "Task for a new \(cli) agent in \(project.name)")
         }
         line.show(words, settled: settled, palette: palette)
+    }
+
+    /// The line starts a new agent (its chip names the CLI), rather than
+    /// sending to selected agents.
+    private(set) var lineStartsNewAgent = false
+
+    /// Shows a menu under `view` (the chip). A harness run records it
+    /// instead: a menu would hold the run and could show on the person's
+    /// screen.
+    var showMenu: (NSMenu, NSView) -> Void = { menu, view in
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: view.bounds.maxY + 4), in: view)
+    }
+
+    private func showCLIMenu(under view: NSView) {
+        showMenu(actions.cliMenu(), view)
+    }
+
+    /// The CLI new agents use changed (the chip, its key, the Agent menu):
+    /// every chip that names it follows, and VoiceOver hears the new one.
+    func newAgentProviderChanged() {
+        renderLine(project: config.projects.first { $0.id == model.currentProjectID })
+        if paletteShown, palettePanel.mode == .new, let project = paletteProject {
+            palettePanel.showNew(
+                chip: newAgentChip(in: project), cli: model.newAgentProvider.displayName,
+                accessibility: newAgentAccessibility(in: project), back: paletteBack, palette: palette)
+        }
+        let chip = paletteShown && palettePanel.mode == .new ? palettePanel.chip : line.chip
+        NSAccessibility.post(
+            element: chip, notification: .announcementRequested,
+            userInfo: [.announcement: model.newAgentProvider.displayName, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
+
+    private func newAgentChip(in project: AgentProject) -> String {
+        "New \(model.newAgentProvider.displayName) agent in \(project.name)"
+    }
+
+    private func newAgentAccessibility(in project: AgentProject) -> String {
+        "Task for a new \(model.newAgentProvider.displayName) agent in \(project.name)"
     }
 
     /// Keeps a new agent's tile in view, at once.
@@ -665,14 +708,19 @@ final class AgentWindowController: NSViewController {
     // MARK: The floating new-agent line
 
     var paletteShown: Bool { !windowView.paletteView.isHidden && windowView.paletteView.layer?.opacity != 0 }
+    /// The project the floating new-agent line starts agents in.
+    private var paletteProject: AgentProject?
+    private var paletteBack: String { model.shownAgentID == nil ? "Close" : "Back to terminal" }
 
     /// Opens the floating new-agent line over the terminal or the tiles,
     /// its field with the keys from the first frame (flows.md 6.3, 7);
     /// already open, it turns to new-agent mode, empty.
-    func showNewAgentPalette(chip: String, accessibility: String) {
+    func showNewAgentPalette(in project: AgentProject) {
         let opening = !paletteShown
-        let back = model.shownAgentID == nil ? "Close" : "Back to terminal"
-        palettePanel.showNew(chip: chip, accessibility: accessibility, back: back, palette: palette)
+        paletteProject = project
+        palettePanel.showNew(
+            chip: newAgentChip(in: project), cli: model.newAgentProvider.displayName,
+            accessibility: newAgentAccessibility(in: project), back: paletteBack, palette: palette)
         palettePanel.textView.setText("")
         if opening { windowView.setPalette(shown: true) } else { windowView.needsLayout = true }
         focus(.palette)

@@ -31,7 +31,7 @@ extension AgentInteractionTests {
                 try await open()
                 #expect(d.windowController.paletteShown, what)
                 #expect(palette.mode == .new, what)
-                #expect(palette.chipText == "New agent in ghostty", what)
+                #expect(palette.chipText == "New Claude Code agent in ghostty", what)
                 #expect(d.firstResponder === palette.textView, what)
                 try await d.key(AgentWorkspaceDriver.escape)
                 #expect(!d.windowController.paletteShown, what)
@@ -140,7 +140,7 @@ extension AgentInteractionTests {
             try choose("New agent in ghostty", of: "ghostty")
             try await d.settle()
             #expect(d.model.currentProjectID == (try d.project("ghostty")))
-            #expect(d.windowController.paletteShown && d.windowController.palettePanel.chipText == "New agent in ghostty")
+            #expect(d.windowController.paletteShown && d.windowController.palettePanel.chipText == "New Claude Code agent in ghostty")
             try await d.key(AgentWorkspaceDriver.escape)
 
             // Show in Finder shows its folder.

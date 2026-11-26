@@ -51,9 +51,6 @@ final class AgentWorkspaceModel {
     /// kept across project switches, entering terminals and quitting; only
     /// sending empties it.
     @ObservationIgnored private(set) var drafts: [UUID: String]
-    /// The CLI the line is set to by "New <CLI> agent", until it loses the
-    /// keys; nil: the default.
-    var lineProvider: AgentProviderID?
     /// The session's undoable actions (flows.md 3.4): settles, project
     /// removals and starts, newest last.
     var undo = AgentUndoList()
@@ -85,6 +82,7 @@ final class AgentWorkspaceModel {
 
     init(defaults: UserDefaults? = .standard) {
         self.defaults = defaults
+        newAgentProvider = defaults?.string(forKey: Self.newAgentProviderKey).flatMap(AgentProviderID.init(rawValue:)) ?? .claudeCode
         currentProjectID = defaults?.string(forKey: Self.currentProjectKey).flatMap(UUID.init(uuidString:))
         views = (defaults?.dictionary(forKey: Self.viewsKey) as? [String: String] ?? [:])
             .reduce(into: [:]) { views, pair in
@@ -231,14 +229,12 @@ final class AgentWorkspaceModel {
     }
     static let notifyKey = "clawddy.notifyWhenWaiting"
 
-    /// The CLI "New agent" starts: the one last chosen, Claude Code until
-    /// then.
+    /// The CLI new agents use (flows.md 6.3, "Choosing the CLI"): the one
+    /// last chosen in a new-agent chip, by its key or in the Agent menu,
+    /// Claude Code until then. Set through `ClawddyController`, whose chips
+    /// follow it. Saved, so it stays across quitting.
     var newAgentProvider: AgentProviderID {
-        get {
-            defaults?.string(forKey: Self.newAgentProviderKey)
-                .flatMap(AgentProviderID.init(rawValue:)) ?? .claudeCode
-        }
-        set { defaults?.set(newValue.rawValue, forKey: Self.newAgentProviderKey) }
+        didSet { defaults?.set(newAgentProvider.rawValue, forKey: Self.newAgentProviderKey) }
     }
 
     /// Forgets what the configuration no longer has: a project's view inside

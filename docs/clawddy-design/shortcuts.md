@@ -69,6 +69,7 @@ starts an agent's CLI; a deliberate open (Return, a click, a letter on a tile,
 | Home, line | Return | Start the agent, or with several selected send to all |
 | Home, line | ⇧Return | New line |
 | Home, line | Escape | Back to the tiles; never deletes text; with several selected and an empty line, also collapses the selection |
+| Home, line | Tab, ⇧Tab | Starting a new agent: the next (⇧: previous) installed CLI for new agents, wrapping; the chip names it. Reply or several selected: nothing |
 | Home, line | ↑ with the caret on the first line | Back to the tiles |
 | Inside | everything | The terminal |
 | Palette, find | ↑ ↓ | Move the highlight |
@@ -76,9 +77,14 @@ starts an agent's CLI; a deliberate open (Return, a click, a letter on a tile,
 | Palette, any | Escape | Close; focus returns |
 | Palette, new agent | Return | Start the agent; the field empties and stays open |
 | Palette, new agent | ⇧Return | New line |
+| Palette, new agent | Tab, ⇧Tab | The next (⇧: previous) installed CLI for new agents, as in the line |
+| Palette, find | Tab, ⇧Tab | Nothing |
+| Home, tiles | Tab, ⇧Tab | Nothing |
+| Inside | Tab, ⇧Tab | The terminal (the CLI's own) |
 | Name being edited | Return | Keep the name (empty keeps the old) |
 | Name being edited | Escape | Restore the old name |
 | Name being edited | ⌘ chords | Text editing only; app keys do not act |
+| Name being edited | Tab, ⇧Tab | Nothing |
 
 ### Pointer and trackpad
 
@@ -95,6 +101,7 @@ starts an agent's CLI; a deliberate open (Return, a click, a letter on a tile,
 | Pinch together (inside) | Back to all agents |
 | Pinch apart (home, a tile selected) | Enter the cursor |
 | Click the waiting count | As ⌘J |
+| Click the chip of a new-agent line | Menu of the CLIs for new agents, the current one checked |
 | Drop folders on the window | Add them as projects |
 
 ## What each chord does in Ghostty and macOS

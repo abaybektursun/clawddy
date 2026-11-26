@@ -90,13 +90,15 @@ Antigravity runs is `agy`), `<N>`, `<M>`, `<time>`
 
 | Where | Text |
 |---|---|
-| Chip | New agent in <project> / New <CLI> agent in <project> (only when the line was opened for a CLI that is not the default: New Claude Code agent, New Codex agent, New Antigravity agent) / Reply to <name> (one tile selected and tiles have focus) / To <N> agents |
-| Placeholder | Describe the task / Type to reply, or ⌘N for a new agent (one tile selected and tiles have focus) / One instruction for all <N> |
+| Chip | New <CLI> agent in <project> (New Claude Code agent, New Codex agent, New Antigravity agent; always, while the line starts a new agent) / Reply to <name> (one tile selected and tiles have focus) / To <N> agents |
+| Chip's menu (a click on a new-agent chip) | Claude Code / Codex / Antigravity, the current one checked; one not installed: "<CLI> — not installed", dimmed |
+| Chip, VoiceOver | Pop-up button "CLI for new agents", value <CLI>; on a change it says <CLI> |
+| Placeholder | Describe the task, or Tab to change the CLI / Type to reply, or ⌘N for a new agent (one tile selected and tiles have focus) / One instruction for all <N> |
 | Settled count | <N> settled |
 | Key hint while empty | ⌘N |
 | With several selected and text typed | ⌘↩ interrupt them and send |
 | Send button, VoiceOver | Start / Send to <N> agents |
-| Line, VoiceOver | Task for a new agent in <project> (or "for a new <CLI> agent" when not the default) / Reply to <name> / Instruction for <N> agents |
+| Line, VoiceOver | Task for a new <CLI> agent in <project> / Reply to <name> / Instruction for <N> agents |
 
 ## Inside a terminal
 
@@ -122,8 +124,8 @@ Antigravity runs is `agy`), `<N>`, `<M>`, `<time>`
 | Agent result | <name>, under it the matching line; at the right <project> and the age |
 | Nothing found | Nothing matches. and ⌘↩ start an agent with this text |
 | Result, VoiceOver | "<name>, <state>, <project>. <matching line>"; hint "Press Return to open it." |
-| New-agent chip | New agent in <project>, or New <CLI> agent in <project> when not the default |
-| New-agent placeholder | Describe the task |
+| New-agent chip | New <CLI> agent in <project>, the same control as the line's |
+| New-agent placeholder | Describe the task, or Tab to change the CLI |
 | New-agent hints | ↩ Start another / ⎋ Back to terminal (inside a terminal) or ⎋ Close (at home) |
 
 ### Commands (palette rows, with their keys)
@@ -234,9 +236,10 @@ Select every working agent here; —; Remove project; —; New agents use ▸
 permission checks, With permission checks, one checked; sets it for every CLI);
 Notify when an agent is waiting (checked or not).
 
-"New <CLI> agent" is one item per CLI, in this order. Find matches them by
-their titles, so "antigravity" finds "New Antigravity agent" ("agy", the
-program's name, does not).
+"New <CLI> agent" is one item per CLI, in this order: it sets new agents to
+use that CLI (as "New agents use" does) and opens the floating new-agent line.
+Find matches them by their titles and by the CLI's program name ("agy",
+"codex", "claude").
 
 ### Other menus
 
@@ -288,6 +291,7 @@ Three groups, scrolling when taller than the window:
 | type | On one selected tile: replies in its terminal. With none: starts a new agent |
 | ↩ | On a tile: open its terminal. In the line: start or send |
 | ⌘N | New agent: a floating line, at home and inside a terminal |
+| ⇥ | In a new-agent line: change the CLI. Shift goes back |
 | ⌘D | Settle. During a walk, settles and moves to the next |
 | ⌘Z | Undo settle or project removal. In an empty line, cancels a start |
 | ⌘U | Mark as unread |

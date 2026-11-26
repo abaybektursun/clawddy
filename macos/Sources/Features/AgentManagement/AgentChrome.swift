@@ -260,6 +260,51 @@ final class AgentTextLayer: AgentLayer {
     }
 }
 
+// MARK: - The chip
+
+/// The chip before a line's text, naming where typed text goes (flows.md
+/// "The line"). While the line starts a new agent it names the CLI new
+/// agents use and is the pop-up button that changes it; a reply or an
+/// instruction to several names no CLI, and the chip is words only.
+final class AgentChip: AgentButton {
+    static let maxWidth: CGFloat = 260
+    private let label = AgentTextLayer()
+    private(set) var text = ""
+    /// The CLI it offers to change, nil when it changes nothing.
+    private(set) var cli: String?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        layer?.cornerRadius = 6
+        layer?.addSublayer(label)
+        setAccessibilityLabel("CLI for new agents")
+    }
+
+    /// `many`: "To N agents", brighter. `cli`: the CLI a new agent uses,
+    /// which a press offers to change.
+    func show(_ text: String, many: Bool, cli: String?, palette: ClawddyPalette) {
+        self.text = text
+        self.cli = cli
+        label.text = AgentText(string: text, font: AgentMetrics.bodyMedium, color: (many ? palette.ink : palette.text2).cgColor())
+        fills = many ? (0.12, 0.12, 0.12) : cli == nil ? (0.06, 0.06, 0.06) : (0.06, 0.10, 0.14)
+        isEnabled = cli != nil
+        setAccessibilityElement(cli != nil)
+        setAccessibilityRole(cli == nil ? .staticText : .popUpButton)
+        setAccessibilityValue(cli)
+        toolTip = cli == nil ? nil : "Change the CLI for new agents (Tab)"
+        needsLayout = true
+    }
+
+    /// As wide as its words and its padding, at most 260 pt: past that the
+    /// end of the words, the project's name, is cut.
+    var fittingWidth: CGFloat { min(Self.maxWidth, (label.text?.width ?? 0) + 18) }
+
+    override func layout() {
+        super.layout()
+        label.frame = CGRect(x: 9, y: 3, width: max(0, bounds.width - 18), height: 18)
+    }
+}
+
 // MARK: - Hover
 
 /// A view that shows the pointer over it. The agent window has one

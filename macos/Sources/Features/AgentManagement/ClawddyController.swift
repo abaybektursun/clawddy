@@ -497,7 +497,7 @@ final class ClawddyController: NSObject {
             switch item.title {
             case Self.settingsMenus[0]:
                 item.submenu?.items = AgentProviderID.allCases.map { choice in
-                    let entry = NSMenuItem(title: choice.displayName) { [weak self] in self?.workspaceModel.newAgentProvider = choice }
+                    let entry = NSMenuItem(title: choice.displayName) { [weak self] in self?.setNewAgentProvider(choice) }
                     entry.state = choice == provider ? .on : .off
                     return entry
                 }
@@ -983,7 +983,8 @@ final class ClawddyController: NSObject {
                     self.rename(shown, at: .header)
                 },
                 copy: { [weak self] in self?.copySentences() },
-                pinch: { [weak self] apart in self?.pinch(apart: apart) })
+                pinch: { [weak self] apart in self?.pinch(apart: apart) },
+                cliMenu: { [weak self] in self?.cliMenu() ?? NSMenu() })
             let palette = ClawddyPalette(config: ghostty.config)
             let window = makeAgentWorkspaceWindow(controller: controller, background: palette.canvas.nsColor)
             window.performChord = { [weak self] event in self?.performChord(event) ?? false }
@@ -1361,9 +1362,10 @@ extension ClawddyController {
     /// everywhere else, home included, the floating new-agent line with the
     /// keys; Escape gives them back to who had them (the tiles, the line or
     /// the terminal), the selection unchanged. Already open, it keeps its
-    /// text and takes the keys; find open turns into it. `provider` sets it
-    /// to that CLI while it is open.
+    /// text and takes the keys; find open turns into it. `provider` ("New
+    /// Codex agent") first sets new agents to use that CLI.
     func newAgentCommand(provider: AgentProviderID?) {
+        if let provider { setNewAgentProvider(provider) }
         guard let project = newAgentProject, let windowController else {
             showWorkspace()
             chooseProjectFolder()
@@ -1377,24 +1379,51 @@ extension ClawddyController {
         } else {
             paletteReturn = windowController.focused ?? (workspaceModel.shownAgentID == nil ? .tiles : .terminal)
         }
-        workspaceModel.lineProvider = provider
         floatingProject = project.id
-        windowController.showNewAgentPalette(chip: newAgentChip(in: project), accessibility: newAgentAccessibility(in: project))
+        windowController.showNewAgentPalette(in: project)
         windowController.palettePanel.textView.setText(floatingDrafts[project.id] ?? "")
     }
 
-    /// "New agent in tidepool", or "New Codex agent in tidepool" when the line
-    /// is set to a CLI that is not the default.
-    private func newAgentChip(in project: AgentProject) -> String {
-        "New \(nonDefaultCLI)agent in \(project.name)"
+    /// Sets the CLI new agents use (flows.md 6.3, "Choosing the CLI"): the
+    /// one setting the chips, their key and the Agent menu change.
+    func setNewAgentProvider(_ provider: AgentProviderID) {
+        guard provider != workspaceModel.newAgentProvider else { return }
+        workspaceModel.newAgentProvider = provider
+        windowController?.newAgentProviderChanged()
     }
 
-    private func newAgentAccessibility(in project: AgentProject) -> String {
-        "Task for a new \(nonDefaultCLI)agent in \(project.name)"
+    /// Tab (`step` 1) or Shift-Tab (-1) in a new-agent line: the next or
+    /// previous installed CLI, wrapping; none other installed, nothing.
+    private func stepNewAgentProvider(_ step: Int) {
+        let all = AgentProviderID.allCases
+        guard let index = all.firstIndex(of: workspaceModel.newAgentProvider) else { return }
+        for offset in 1..<all.count {
+            let next = all[(index + step * offset + all.count * offset) % all.count]
+            if isInstalled(next) { return setNewAgentProvider(next) }
+        }
     }
 
-    private var nonDefaultCLI: String {
-        workspaceModel.lineProvider.flatMap { $0 == workspaceModel.newAgentProvider ? nil : $0.displayName + " " } ?? ""
+    /// Not known to be missing: one still being checked counts as there.
+    private func isInstalled(_ provider: AgentProviderID) -> Bool {
+        if case .missing = bridge.providerHealth[provider]?.installation { return false }
+        return true
+    }
+
+    /// The chip's menu: every CLI, the current one checked, one not
+    /// installed dimmed.
+    func cliMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for provider in AgentProviderID.allCases {
+            let installed = isInstalled(provider)
+            let item = NSMenuItem(title: installed ? provider.displayName : "\(provider.displayName) — not installed") { [weak self] in
+                self?.setNewAgentProvider(provider)
+            }
+            item.state = provider == workspaceModel.newAgentProvider ? .on : .off
+            item.isEnabled = installed
+            menu.addItem(item)
+        }
+        return menu
     }
 
     /// A key command in the line (flows.md 3.2, shortcuts.md "Home, line"):
@@ -1417,6 +1446,10 @@ extension ClawddyController {
         case #selector(NSResponder.moveUp(_:)):
             guard line.caretOnFirstLine else { return false }
             windowController?.focus(.tiles)
+            return true
+        case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertBacktab(_:)):
+            guard windowController?.lineStartsNewAgent == true else { return false }
+            stepNewAgentProvider(selector == #selector(NSResponder.insertTab(_:)) ? 1 : -1)
             return true
         default:
             return false
@@ -1446,8 +1479,7 @@ extension ClawddyController {
     @discardableResult
     private func start(_ task: String, in project: AgentProject) -> Bool {
         guard let terminals else { return false }
-        let options = workspaceModel.lineProvider.map { AgentCreationDraft(provider: $0, preferences: preferences) }
-            ?? savedNewAgentOptions()
+        let options = savedNewAgentOptions()
         guard let entry = bridge.startAgent(
             task: task, provider: options.provider, launchProfile: options.launchProfile,
             config: config, project: project, host: terminals)
@@ -1568,6 +1600,9 @@ extension ClawddyController {
         case #selector(NSResponder.cancelOperation(_:)):
             closePalette()
             return true
+        case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertBacktab(_:)):
+            stepNewAgentProvider(selector == #selector(NSResponder.insertTab(_:)) ? 1 : -1)
+            return true
         default:
             return false
         }
@@ -1590,7 +1625,6 @@ extension ClawddyController {
             floatingDrafts[project] = windowController.palettePanel.textView.string
         }
         windowController.hidePalette()
-        workspaceModel.lineProvider = nil
     }
 }
 
@@ -1713,7 +1747,7 @@ extension ClawddyController {
             guard start(text, in: project) else { return }
             paletteReturn = .terminal
             floatingProject = project.id
-            windowController.showNewAgentPalette(chip: newAgentChip(in: project), accessibility: newAgentAccessibility(in: project))
+            windowController.showNewAgentPalette(in: project)
             return
         }
         windowController.hidePalette()

@@ -44,13 +44,16 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
     private let listScroll = NSScrollView()
     private let surface = AgentLayer()
     private let topLight = AgentShapeLayer()
-    private let chip = AgentLayer()
-    private let chipLabel = AgentTextLayer()
+    let chip = AgentChip()
+    /// A press on the new-agent chip: the controller shows the CLIs' menu.
+    var onChip: ((NSView) -> Void)?
     private let divider = AgentLayer()
     private let hints: [(AgentKeyCap, AgentTextLayer)] = [(AgentKeyCap(), AgentTextLayer()), (AgentKeyCap(), AgentTextLayer())]
     private var palette = ClawddyPalette.prototype
     private(set) var mode = Mode.new
     private(set) var chipText = ""
+    /// The field's placeholder starting a new agent, as the line's.
+    static let newPlaceholder = "Describe the task, or Tab to change the CLI"
     /// The tallest the results may be: 46 % of the window's content.
     var listLimit: CGFloat = 400 { didSet { if listLimit != oldValue { needsLayout = true } } }
 
@@ -68,10 +71,7 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
         topLight.fillColor = nil
         topLight.lineWidth = 1
         topLight.masksToBounds = true
-        chip.cornerRadius = 6
-        chip.cornerCurve = .continuous
-        chip.addSublayer(chipLabel)
-        for part in [surface, topLight, chip, divider] as [CALayer] { layer?.addSublayer(part) }
+        for part in [surface, topLight, divider] as [CALayer] { layer?.addSublayer(part) }
         for (key, label) in hints {
             layer?.addSublayer(key)
             layer?.addSublayer(label)
@@ -89,6 +89,11 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
         }
         scroll.documentView = textView
         listScroll.documentView = list
+        addSubview(chip)
+        chip.onPress = { [weak self] in
+            guard let self else { return }
+            self.onChip?(self.chip)
+        }
         textView.onChange = { [weak self] in self?.needsLayout = true }
     }
 
@@ -104,14 +109,14 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
 
     /// New-agent mode: the chip and the field, empty; `back` is what
     /// Escape does, in words.
-    func showNew(chip text: String, accessibility: String, back: String, palette: ClawddyPalette) {
+    func showNew(chip text: String, cli: String, accessibility: String, back: String, palette: ClawddyPalette) {
         mode = .new
         chipText = text
         apply(palette)
-        textView.placeholder = "Describe the task"
+        textView.placeholder = Self.newPlaceholder
         textView.setAccessibilityLabel(accessibility)
-        textView.setAccessibilityPlaceholderValue("Describe the task")
-        chipLabel.text = AgentText(string: text, font: AgentMetrics.bodyMedium, color: palette.text2.cgColor())
+        textView.setAccessibilityPlaceholderValue(Self.newPlaceholder)
+        chip.show(text, many: false, cli: cli, palette: palette)
         for ((key, label), (keys, words)) in zip(hints, [("↩", "Start another"), ("⎋", back)]) {
             key.show(keys, color: palette.text2.cgColor(), fill: ClawddyPalette.white(0.07))
             label.text = AgentText(string: words, font: AgentMetrics.body, color: palette.text2.cgColor())
@@ -153,7 +158,6 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
     private func apply(_ palette: ClawddyPalette) {
         self.palette = palette
         textView.apply(palette)
-        chip.backgroundColor = ClawddyPalette.white(0.06)
         surface.backgroundColor = palette.pop.cgColor()
         surface.borderColor = ClawddyPalette.white(0.14)
         topLight.strokeColor = ClawddyPalette.white(0.08)
@@ -190,11 +194,10 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
         var textX: CGFloat = 16
         if mode == .new {
             let baseline = 14 + textView.firstBaseline
-            let chipWidth = min(260, (chipLabel.text?.width ?? 0) + 18)
-            chip.frame = CGRect(
+            let chipWidth = chip.fittingWidth
+            chip.frame = NSRect(
                 x: 16, y: AgentMetrics.snap(baseline - 3 - AgentMetrics.baseline(AgentMetrics.bodyMedium, lineHeight: 18)),
                 width: chipWidth, height: 24)
-            chipLabel.frame = CGRect(x: 9, y: 3, width: chipWidth - 18, height: 18)
             textX = 16 + chipWidth + 10
         }
         let textHeight = textView.textHeight

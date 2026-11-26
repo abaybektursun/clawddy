@@ -476,6 +476,9 @@ final class AgentHarness {
                 "project": (view as? AgentProjectButton)?.project?.name ?? "", "items": Self.items(of: menu),
             ])
         }
+        controller.windowController?.showMenu = { [weak self] menu, _ in
+            self?.menusShown.append(["for": "chip", "byEvent": false, "control": false, "project": "", "items": Self.items(of: menu)])
+        }
         window.actsAsKey = true
         // The shown terminal draws in the transparent window, for pictures.
         window.forcesTerminalsVisible = true
@@ -595,6 +598,7 @@ final class AgentHarness {
         }
         return [
             "text": field.string, "chip": line.chipText, "placeholder": field.placeholder, "hasKeys": line.isFocused,
+            "chipCLI": line.chip.cli ?? "", "chipFrame": rect(line.convert(line.chip.frame, to: line.superview)),
             "frame": rect(line.frame), "lines": field.lineCount, "marked": field.hasMarkedText(),
             "selected": [field.selectedRange().location, field.selectedRange().length],
             "chipBaseline": Double(height - baselines.chip), "textBaseline": Double(height - baselines.text),
@@ -617,7 +621,7 @@ final class AgentHarness {
     /// key and whether it is enabled.
     static func items(of menu: NSMenu) -> [[String: Any]] {
         menu.items.map { item in
-            ["title": item.isSeparatorItem ? "—" : item.title, "enabled": item.isEnabled,
+            ["title": item.isSeparatorItem ? "—" : item.title, "enabled": item.isEnabled, "checked": item.state == .on,
              "key": item.keyEquivalent.isEmpty ? "" : keyName(item), "submenu": item.submenu != nil]
         }
     }

@@ -27,8 +27,7 @@ final class AgentLineView: NSView, AgentActivationClickSafeRegion {
     private let edge = AgentLayer()
     private let slab = AgentLayer()
     private let topLight = AgentShapeLayer()
-    private let chip = AgentLayer()
-    private let chipLabel = AgentTextLayer()
+    let chip = AgentChip()
     let settled = AgentButton()
     private let settledLabel = AgentTextLayer()
     private let newKey = AgentKeyCap()
@@ -56,6 +55,9 @@ final class AgentLineView: NSView, AgentActivationClickSafeRegion {
     var onHeight: (() -> Void)?
     /// The text changed (the project's draft follows).
     var onText: ((String) -> Void)?
+    /// A press on the chip while it offers the CLI: the controller shows its
+    /// menu under it.
+    var onChip: ((NSView) -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -74,10 +76,7 @@ final class AgentLineView: NSView, AgentActivationClickSafeRegion {
         topLight.fillColor = nil
         topLight.lineWidth = 1
         topLight.masksToBounds = true
-        chip.cornerRadius = 6
-        chip.cornerCurve = .continuous
-        chip.addSublayer(chipLabel)
-        for part in [lift, edge, slab, topLight, chip] as [CALayer] { layer?.addSublayer(part) }
+        for part in [lift, edge, slab, topLight] as [CALayer] { layer?.addSublayer(part) }
 
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
@@ -96,6 +95,11 @@ final class AgentLineView: NSView, AgentActivationClickSafeRegion {
         addSubview(scroll)
         textView.onChange = { [weak self] in self?.textChanged() }
 
+        addSubview(chip)
+        chip.onPress = { [weak self] in
+            guard let self else { return }
+            self.onChip?(self.chip)
+        }
         addSubview(settled)
         settled.fills = (0, 0.05, 0.10)
         settled.layer?.addSublayer(settledLabel)
@@ -138,6 +142,8 @@ final class AgentLineView: NSView, AgentActivationClickSafeRegion {
         /// The chip; `many` sets it brighter ("To N agents").
         var chip: String
         var many = false
+        /// The CLI a new agent uses: the chip then changes it.
+        var cli: String?
         var placeholder: String
         /// The text's VoiceOver label, and the send disk's.
         var accessibility: String
@@ -149,6 +155,7 @@ final class AgentLineView: NSView, AgentActivationClickSafeRegion {
         let text = words.chip, many = words.many, placeholder = words.placeholder
         let accessibility = words.accessibility, sendLabel = words.sendLabel
         let restyle = palette != self.palette || text != chipText || many != self.many || count != settledCount
+            || words.cli != chip.cli
         self.palette = palette
         chipText = text
         self.many = many
@@ -159,8 +166,7 @@ final class AgentLineView: NSView, AgentActivationClickSafeRegion {
         send.setAccessibilityLabel(sendLabel)
         guard restyle else { return }
         textView.apply(palette)
-        chipLabel.text = AgentText(string: text, font: AgentMetrics.bodyMedium, color: (many ? palette.ink : palette.text2).cgColor())
-        chip.backgroundColor = ClawddyPalette.white(many ? 0.12 : 0.06)
+        chip.show(text, many: many, cli: words.cli, palette: palette)
         slab.backgroundColor = palette.raised.cgColor()
         disk.backgroundColor = palette.ink.cgColor()
         arrow.symbol = .init(name: "arrow.up", pointSize: 12, weight: .bold, color: palette.canvas, box: 26, scale: AgentMetrics.scale)
@@ -317,10 +323,9 @@ final class AgentLineView: NSView, AgentActivationClickSafeRegion {
         // The chip, on the first text line's baseline.
         let textTop: CGFloat = 9
         let baseline = textTop + textView.firstBaseline
-        let chipWidth = min(260, (chipLabel.text?.width ?? 0) + 18)
+        let chipWidth = chip.fittingWidth
         let chipTop = AgentMetrics.snap(baseline - 3 - AgentMetrics.baseline(AgentMetrics.bodyMedium, lineHeight: 18))
-        chip.frame = CGRect(x: 10, y: chipTop, width: chipWidth, height: 24)
-        chipLabel.frame = CGRect(x: 9, y: 3, width: chipWidth - 18, height: 18)
+        chip.frame = NSRect(x: 10, y: chipTop, width: chipWidth, height: 24)
 
         // The text between, as tall as its lines.
         let textX = 10 + chipWidth + 10

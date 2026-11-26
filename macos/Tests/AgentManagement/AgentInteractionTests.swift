@@ -487,9 +487,9 @@ struct AgentInteractionTests {
 
         /// Each CLI the same way: find lists "New <CLI> agent" for its
         /// program's name ("agy"; its own name, `aCLIsCommandIsFoundByItsProgramName`),
-        /// running it opens the floating new-agent line whose chip names the
-        /// CLI when it is not the default, and Return starts an agent of that
-        /// CLI.
+        /// running it sets new agents to use that CLI and opens the floating
+        /// new-agent line whose chip names it, Return starts an agent of that
+        /// CLI, and the setting stays after the line closes.
         @Test func eachCLIsNewAgentFromFind() async throws {
             let d = try await AgentWorkspaceDriver(.standard)
             defer { d.close() }
@@ -505,14 +505,15 @@ struct AgentInteractionTests {
                 for _ in 0..<row { try await d.key(AgentWorkspaceDriver.downArrow) }
                 try await d.key(AgentWorkspaceDriver.returnKey)
                 #expect(d.windowController.paletteShown && d.windowController.palettePanel.mode == .new)
-                #expect(d.windowController.palettePanel.chipText
-                    == (provider == .claudeCode ? "New agent in ghostty" : "New \(provider.displayName) agent in ghostty"))
+                #expect(d.windowController.palettePanel.chipText == "New \(provider.displayName) agent in ghostty")
                 try await d.type("tidy the docs")
                 try await d.key(AgentWorkspaceDriver.returnKey)
                 let started = try #require(d.h.config.projects.first { $0.name == "ghostty" }?.agents.last)
                 #expect(d.h.bridge.agents[started.id]?.provider == provider, "\(provider)")
                 try await d.key(AgentWorkspaceDriver.escape)
                 #expect(!d.windowController.paletteShown)
+                #expect(d.model.newAgentProvider == provider)
+                #expect(d.windowController.line.chipText == "New \(provider.displayName) agent in ghostty")
             }
         }
 
@@ -525,7 +526,7 @@ struct AgentInteractionTests {
             #expect(d.windowController.paletteShown)
             #expect(d.window.firstResponder === d.windowController.palettePanel.textView)
             #expect(d.controller.keyContext == .palette)
-            #expect(d.windowController.palettePanel.chipText == "New agent in ghostty")
+            #expect(d.windowController.palettePanel.chipText == "New Claude Code agent in ghostty")
 
             // Return starts it; the field empties and stays open for the next.
             try await d.type("fix the docs")
@@ -841,8 +842,8 @@ struct AgentInteractionTests {
             let d = try await AgentWorkspaceDriver(.standard)
             defer { d.close() }
             let line = d.windowController.line
-            #expect(line.chipText == "New agent in ghostty")
-            #expect(line.textView.placeholder == "Describe the task")
+            #expect(line.chipText == "New Claude Code agent in ghostty")
+            #expect(line.textView.placeholder == "Describe the task, or Tab to change the CLI")
             try await d.key(AgentWorkspaceDriver.downArrow)
             let first = try #require(d.grid.selection.cursor.flatMap { d.h.bridge.agents[$0]?.name })
             #expect(line.chipText == "Reply to \(first)")

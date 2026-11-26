@@ -54,6 +54,11 @@ typing line, waiting, settling, resuming and restart behaviour. The plan is `agy
   Antigravity…", the settings window (one row per CLI), the start mode's words ("Dangerously skip permissions",
   agy's own flag), and every sentence that names the CLI. agy has no `/login`, so its expired login says "Open it
   and sign in again."
+- Choosing the CLI where the task is typed (after the owner could not find it): a new-agent line's chip always
+  names the CLI ("New Codex agent in tidepool"); a click on it opens the CLIs' menu, Tab and ⇧Tab step through
+  the installed ones. It is the one setting "New agents use" shows, saved; "New <CLI> agent" sets it and opens
+  the floating line. Proven with each real CLI started from the line after Tab (Codex started and then refused
+  the owner's configured model, a Codex account matter).
 - `preferences.json` keeps one start mode per CLI in `defaultStartModes` (schema 2); a file of the older shape
   (`claudeCodeDefaultStartMode`, `codexDefaultStartMode`) loads with its values and is rewritten in the new shape
   at the next save. A CLI the file does not name starts with permission checks if any CLI it names has them.

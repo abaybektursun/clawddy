@@ -164,14 +164,16 @@ then at the right the waiting count, Find, New agent and Keys buttons.
 - Chip: always names where typed text will go, and is the only thing that
   decides it:
   - no tile selected (or the line has focus with one or no tile selected): "New
-    agent in <project>"; when the line is set to a CLI that is not the default,
-    it names that CLI: "New Codex agent in <project>", "New Claude Code agent
-    in <project>" or "New Antigravity agent in <project>".
+    <CLI> agent in <project>", always naming the CLI the new agent will use:
+    "New Claude Code agent in <project>", "New Codex agent in <project>" or
+    "New Antigravity agent in <project>". The chip is then the control that
+    changes it (6.3, "Choosing the CLI"). At any width the project's name is
+    what is cut short ("…"), never the CLI.
   - exactly one tile selected and the tiles have focus: "Reply to <agent name>".
   - two or more tiles selected: "To N agents", brighter.
 - Text: 14 pt, one line tall, growing a line at a time to 6 lines, then
-  scrolling. Placeholder: "Describe the task", "Type to reply, or ⌘N for a new
-  agent" (when one tile is selected and the tiles have focus), or "One
+  scrolling. Placeholder: "Describe the task, or Tab to change the CLI", "Type
+  to reply, or ⌘N for a new agent" (when one tile is selected and the tiles have focus), or "One
   instruction for all N". It grows upward over the grid's bottom margin; tiles
   do not resize while the person types.
 - End controls, while empty: "N settled" (when the project has settled agents;
@@ -192,9 +194,9 @@ then at the right the waiting count, Find, New agent and Keys buttons.
 - Find mode: a 17 pt field "Find an agent or run a command", and under it the
   results in groups "Agents", "Settled", "Commands" (6.8).
 - New-agent mode (the floating new-agent line, at home and inside a terminal):
-  the chip "New agent in <project>" (naming the CLI when it is not the default,
-  as on the line, aligned to the first text baseline), the field "Describe the
-  task", and under it "↩ Start another" and "⎋ Back to terminal" (at home "⎋
+  the chip "New <CLI> agent in <project>" (the same control as on the line,
+  aligned to the first text baseline), the field "Describe the task, or Tab to
+  change the CLI", and under it "↩ Start another" and "⎋ Back to terminal" (at home "⎋
   Close").
 
 ### The keys panel
@@ -628,14 +630,15 @@ confirmation:
 At home, from the line:
 1. Typing on a home with no tiles, or with no tile selected, lands in the line;
    the line also takes the keyboard by a click on it.
-2. The chip says "New agent in <project>". The person types the task in plain
-   words (Shift-Return for a new line).
+2. The chip says "New Claude Code agent in <project>" (or the CLI new agents
+   use now). The person types the task in plain words (Shift-Return for a new
+   line).
 3. Return or the send button: a new agent exists at once, Working, at the next
    place at the end of the grid, scrolled into view, appearing with the new-tile
    motion (section 7). Its name is the first five words until the CLI's title
    arrives (4.3). Its CLI starts with the task as the first instruction, using
-   the default CLI and start mode set in the Agent menu ("New agents use",
-   "Start new agents"), unless the line was opened for another CLI (below).
+   the CLI the chip names and the start mode set in the Agent menu ("Start new
+   agents").
 4. The line empties and keeps the keyboard. The selection does not move to the
    new agent. Status line for 6 s: "Started <name>. ⌘Z cancels it."
 5. With one tile selected, text in the line always starts a new agent; it never
@@ -652,12 +655,23 @@ terminal the floating new-agent line stays open with an empty field. So ⌘Z
 cancels it there, and a burst can continue. A draft already in the home line
 stays as it was; ⌘Z there is then text undo (3.4).
 
-Choosing the CLI: a new agent uses the default CLI set in the Agent menu. The
-palette (and the Agent menu) has "New Claude Code agent", "New Codex agent" and
-"New Antigravity agent", one per CLI: each opens the floating new-agent line for that CLI, and the chip names the CLI
-when it is not the default ("New Codex agent in tidepool"). It stays set to that
-CLI, for as many starts as the person types, until it closes; then it returns to
-the default.
+Choosing the CLI: there is one setting, the CLI new agents use, Claude Code
+until it is changed. The chip of a new-agent line (the home line, the floating
+new-agent line) always names it, and is where it is changed:
+- by pointer: a click on the chip opens a menu of the CLIs, the current one
+  checked; one that is not installed shows dimmed as "<CLI> — not installed"
+  and cannot be chosen;
+- by key: Tab, while the line has the keyboard and starts a new agent, moves
+  to the next installed CLI, ⇧Tab to the one before, wrapping; the chip changes
+  at once.
+The Agent menu's "New agents use" is the same setting: a change in any of these
+places shows in the others and stays, across quitting, until it is changed. The
+palette and Agent menu commands "New Claude Code agent", "New Codex agent" and
+"New Antigravity agent" set it to that CLI and open the floating new-agent
+line; nothing returns to another CLI when the line closes. VoiceOver hears the
+chip as a pop-up button whose value is the CLI, and hears the new CLI's name
+when it changes. A reply ("Reply to <name>") or an instruction to several ("To
+N agents") names no CLI, and Tab does nothing there.
 
 Several in a row: type, Return, type, Return. Each starts its own agent, each
 confirmed. Nothing in between needs a click.
