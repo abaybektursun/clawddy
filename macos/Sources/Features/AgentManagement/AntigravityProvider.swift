@@ -33,8 +33,8 @@ struct AntigravityProvider: Sendable {
             // agy starts invocation 0 itself, the last prompt repeated, when a
             // background command ends: the transcript's last step is then no
             // prompt. Without a step (unreadable) the prompt counts.
-            if record.invocation == "0" && (record.step == nil || record.step == promptStep) {
-                events.append(.promptSubmitted(record.text))
+            if record.invocation == "0" {
+                events.append(record.step == nil || record.step == promptStep ? .promptSubmitted(record.text) : .selfStarted)
             }
             return events
         },
@@ -80,7 +80,7 @@ struct AntigravityProvider: Sendable {
         AgentProviderEntry(
             reports: AgentReportRules(
                 doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false,
-                turnStartDelay: 0, askingAtStartIsStarted: true, interruptReturnsQueuedMessages: true),
+                turnStartDelay: 0, askingAtStartIsStarted: true, queuedMessagesRunNextTurn: true),
             hookEvents: Self.hookEvents,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },

@@ -1337,6 +1337,9 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   conversation).
 - **Auto mode approves more than `echo`.** With no start-mode flag and the owner's default mode (auto), "Run the shell command: echo chosen" and "…: rm -f no-such-file.txt" both ran without asking. After Shift+Tab twice (auto → plan → default) `echo chosen` asked: `blocked kind=permission` "Approve Bash: echo chosen", menu as under "Screens".
 - **A long command runs in the background and wakes the agent later.** "Run the shell command: sleep 20, then reply…" ran `sleep 20` in the background ("Command duration exceeds the synchronous execution window…", "Waiting for sleep 20 to finish."), and the turn ended with a Stop. A message queued meanwhile then ran as its own turn (PreInvocation 0 with its words, Stop with its reply). When the command ended, agy woke itself: a `SYSTEM_MESSAGE` step in the transcript, then **PreInvocation with `invocationNum` 0 and `lastUserInput` still the previous prompt**, then Stop with the new reply. Nothing in that record but the transcript's last step tells it from a prompt.
+- **Several queued messages run together** (probe `stage5/queue2`, two turns): two messages typed while a turn
+  ran waited for its `done`, then ran as one turn whose PreInvocation 0 had `lastUserInput` "Reply with the word
+  one.\nReply with the word two." (joined by a newline), one Stop, one `done`.
 - **A queued message reports nothing until it runs.** Sent while agy works, it shows as `▸ <text> (alt+m to send immediately)` and no hook runs for it; its PreInvocation comes only when agy starts it, as the next turn.
 - **Resuming** (`--conversation <id>`, after Clawddy quit and reopened) redraws the conversation's earlier turns; the next prompt's records carry the same id.
 - **Control-D twice** on an empty box ended agy with status 0; Clawddy recorded it finished, with no problem.

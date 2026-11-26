@@ -235,10 +235,22 @@ struct AgentAntigravityHookScriptTests {
             ["type": "GENERIC", "content": "started"], ["type": "PLANNER_RESPONSE", "content": "Waiting for it to finish."],
         ]))
         #expect(wake.step == "PLANNER_RESPONSE")
-        #expect(AntigravityProvider.hookEvents["PreInvocation"]?(wake) == [.sessionBound(sessionID: "c-1")])
+        #expect(AntigravityProvider.hookEvents["PreInvocation"]?(wake) == [.sessionBound(sessionID: "c-1"), .selfStarted])
+        // Review of the fixes, defect 4: a blank line at the end is no step,
+        // and only invocation 0 reads the transcript.
+        let file = sandbox.home.appendingPathComponent(".gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl")
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("\n\n".utf8))
+        try handle.close()
+        #expect(try preInvocation("~/.gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl").step == "PLANNER_RESPONSE")
+        let later = try #require(try sandbox.hook([
+            "hookEventName": "PreInvocation", "conversationId": "c-1", "invocationNum": 1, "lastUserInput": "go",
+            "transcriptPath": "~/.gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl",
+        ]).records.first)
+        #expect(later.step == nil && later.invocation == "1")
         #expect(!FileManager.default.fileExists(atPath: sandbox.root.statusDir.appendingPathComponent("hook-errors.log").path))
 
-        let file = sandbox.home.appendingPathComponent(".gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl")
         try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
         defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
         let unread = try preInvocation("~/.gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl")
@@ -381,7 +393,7 @@ struct AgentAntigravityReducerTests {
         let nowhere = URL(fileURLWithPath: "/nonexistent")
         #expect(Self.rules == AgentReportRules(
             doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false,
-            turnStartDelay: 0, askingAtStartIsStarted: true, interruptReturnsQueuedMessages: true))
+            turnStartDelay: 0, askingAtStartIsStarted: true, queuedMessagesRunNextTurn: true))
         #expect(Self.rules.workingStartsTurn)
         #expect(ClaudeCodeProvider(root: AgentDataRoot(url: nowhere)).entry.reports == .standard)
         var codex = AgentReportRules.standard
@@ -389,7 +401,7 @@ struct AgentAntigravityReducerTests {
         #expect(CodexProvider(root: AgentDataRoot(url: nowhere), configFile: nowhere).entry.reports == codex)
         #expect(AgentReportRules.standard == AgentReportRules(
             doneWithMessageCompletes: false, signInStandTime: 0, workingMessageIsActivity: true,
-            turnStartDelay: 1, askingAtStartIsStarted: false, interruptReturnsQueuedMessages: false))
+            turnStartDelay: 1, askingAtStartIsStarted: false, queuedMessagesRunNextTurn: false))
         #expect(!AgentReportRules.standard.workingStartsTurn && !codex.workingStartsTurn)
     }
 
@@ -960,6 +972,88 @@ struct AgentAntigravityBridgeTests {
         let agent = try h.agent(id)
         #expect(agent.record.prompts.map(\.text) == ["continue", "continue"])
         #expect(agent.record.state == .finished && agent.record.lastMessage == "Two.")
+    }
+
+    /// Review of the fixes, defect 3: a wake-up turn (agy starting an
+    /// invocation itself) waits for no prompt, so the next real prompt,
+    /// its record before its `working`, reads the unread reply, is
+    /// recorded once, and is not queued.
+    @Test func aWakeUpTurnWaitsForNoPrompt() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent", provider: .antigravity)
+        h.start()
+        try agyLaunch(h, id)
+        try h.osc(id, "state=working:app=antigravity")
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", step: "USER_INPUT", text: "sleep, then say slept")
+        try agyHook(h, id, "Stop", session: "c-1", text: "Waiting.")
+        try h.osc(id, "state=done:app=antigravity:msg=\(b64("Waiting."))")
+        try h.osc(id, "state=working:app=antigravity")
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", step: "PLANNER_RESPONSE", text: "sleep, then say slept")
+        try agyHook(h, id, "Stop", session: "c-1", text: "slept")
+        try h.osc(id, "state=done:app=antigravity:msg=\(b64("slept"))")
+        let agent = try h.agent(id)
+        #expect(agent.record.state == .finished && agent.record.unread && agent.record.lastMessage == "slept")
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", step: "USER_INPUT", text: "next")
+        #expect(!agent.record.unread)
+        #expect(agent.record.prompts.map(\.text) == ["sleep, then say slept", "next"] && agent.record.queued == nil)
+        try h.osc(id, "state=working:app=antigravity")
+        #expect(agent.record.sentence(cli: .antigravity) == .cli("next"))
+        try agyHook(h, id, "Stop", session: "c-1", text: "Next.")
+        try h.osc(id, "state=done:app=antigravity:msg=\(b64("Next."))")
+        #expect(agent.record.prompts.map(\.text) == ["sleep, then say slept", "next"])
+        #expect(agent.record.state == .finished && agent.record.lastMessage == "Next.")
+    }
+
+    /// Review of the fixes, defect 3: a turn a `blocked` report started,
+    /// its prompt's record first, then approved, `done`, and a late Stop:
+    /// one completion, one notification.
+    @Test func aTurnABlockedReportStartedCompletesOnce() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let id = try h.addAgent("Agent", provider: .antigravity)
+        h.start()
+        try agyLaunch(h, id)
+        try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", step: "USER_INPUT", text: "run it")
+        try h.osc(id, "state=blocked:kind=permission:app=antigravity:msg=\(b64("Approve Bash: make"))")
+        let agent = try h.agent(id)
+        #expect(agent.record.state == .asks)
+        try h.osc(id, "state=working:app=antigravity")
+        try h.osc(id, "state=done:app=antigravity:msg=\(b64("Ran."))")
+        try agyHook(h, id, "Stop", session: "c-1", text: "Ran it all.")
+        #expect(agent.record.state == .finished && agent.record.lastMessage == "Ran it all.")
+        #expect(h.notifier.posted.filter { $0.identifier.hasSuffix(".completed") }.count == 1)
+    }
+
+    /// Review of the fixes, defect 5: the terminal closed by the person while
+    /// they view an agent whose turn ended behind the dialog leaves it read;
+    /// a terminal that closes under it leaves the reply and the problem,
+    /// not also an unread mark.
+    @Test func aCloseDuringTheDialogKeepsTheReplyWithoutAnUnreadMark() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        h.start()
+        let project = try #require(h.config.projects.first)
+        var ids: [UUID] = []
+        for task in ["fix the chart", "tidy the legend"] {
+            let id = try #require(h.bridge.startAgent(
+                task: task, provider: .antigravity, launchProfile: AgentLaunchProfile(),
+                config: h.config, project: project, host: h.host)).id
+            try h.osc(id, "state=blocked:kind=permission:app=antigravity:msg=\(b64("Trust this folder?"))")
+            try agyHook(h, id, "PreInvocation", session: "c-\(ids.count)", invocation: "0", step: "USER_INPUT", text: task)
+            try agyHook(h, id, "Stop", session: "c-\(ids.count)", text: "Done.")
+            ids.append(id)
+        }
+        h.bridge.isViewed = { $0 == ids[0] }
+        h.bridge.surfaceClosed(id: ids[0], generation: try h.generation(ids[0]), processAlive: true)
+        h.scheduler.advance(by: 0)
+        h.host.answerClose(confirmed: true)
+        h.scheduler.advance(by: 0)
+        let viewed = try h.agent(ids[0])
+        #expect(viewed.record.state == .finished && !viewed.record.unread && viewed.record.lastMessage == "Done.")
+        try h.terminalClosed(ids[1])
+        let killed = try h.agent(ids[1])
+        #expect(killed.record.state == .problem && !killed.record.unread && killed.record.lastMessage == "Done.")
     }
 
     /// Review 8: a message Clawddy sent while agy worked, given back by an

@@ -344,6 +344,9 @@ enum AgentDomainEvent: Equatable, Sendable {
     /// the launch script.
     case sessionEnded
     case providerExited(status: Int)
+    /// The CLI started an invocation itself, no prompt behind it: agy
+    /// waking after a background command (`AntigravityProvider`).
+    case selfStarted
 }
 
 /// How the reducer reads one CLI's terminal reports where the CLIs differ
@@ -376,15 +379,18 @@ struct AgentReportRules: Equatable, Sendable {
     /// cannot replace what it asks with "did not start". Claude Code still
     /// on its trust dialog after 30 s says it did not start.
     var askingAtStartIsStarted: Bool
-    /// An interrupt gives back, unsent, the messages queued while the turn
-    /// worked (agy); Claude folds a queued message into the running turn.
-    /// The ones Clawddy sent are then no prompts.
-    var interruptReturnsQueuedMessages: Bool
+    /// Messages sent while a turn works wait for it to end, then run
+    /// together as the next turn, one prompt joined by newlines; an
+    /// interrupt gives them back unsent, and the ones Clawddy sent are then
+    /// no prompts (agy, probes `stage5/queue2`). Claude Code and Codex fold
+    /// them into the running turn, which ends once (probes.md, "Sending
+    /// while the CLI works").
+    var queuedMessagesRunNextTurn: Bool
 
     /// Claude Code's; Codex's differ only in `turnStartDelay`.
     static let standard = Self(
         doneWithMessageCompletes: false, signInStandTime: 0, workingMessageIsActivity: true,
-        turnStartDelay: 1, askingAtStartIsStarted: false, interruptReturnsQueuedMessages: false)
+        turnStartDelay: 1, askingAtStartIsStarted: false, queuedMessagesRunNextTurn: false)
 }
 
 /// One provider's entry in the provider table: how its reports read, which hook events it

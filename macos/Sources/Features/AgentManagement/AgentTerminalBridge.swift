@@ -234,9 +234,11 @@ final class AgentBridge {
     private var signInTimers: [UUID: any AgentTimer] = [:]
     private var launchScripts: [UUID: URL] = [:]
     /// Where each launch's script writes its provider's exit status
-    /// (`AgentLaunchCoordinator.exitStatusURL`), read when its terminal
-    /// goes. Kept after the script itself is removed.
-    private var exitStatusFiles: [UUID: URL] = [:]
+    /// (`AgentLaunchCoordinator.exitStatusURL`), with the launch it belongs
+    /// to: read only when that launch's terminal goes without the person or
+    /// the app closing it, and removed on every path that ends or replaces
+    /// the launch. Kept after the script itself is removed.
+    private var exitStatusFiles: [UUID: (generation: UUID, url: URL)] = [:]
     let root: AgentDataRoot
     private let providers: AgentProviderTable
     private let scheduler: any AgentScheduler
@@ -1162,8 +1164,9 @@ final class AgentBridge {
                 diagnose(.default, "\(agentID) reports no model or context: \(reason)")
             }
             removeLaunchScript(for: agentID)
+            removeExitStatusFile(for: agentID)
             launchScripts[agentID] = launch.scriptURL
-            exitStatusFiles[agentID] = AgentLaunchCoordinator.exitStatusURL(script: launch.scriptURL)
+            exitStatusFiles[agentID] = (launch.generation, AgentLaunchCoordinator.exitStatusURL(script: launch.scriptURL))
             let isNew = host.presentPreparedSurface(
                 agent: agent
             ) {
@@ -1176,6 +1179,7 @@ final class AgentBridge {
             guard isNew else {
                 // No terminal will run the launch script.
                 removeLaunchScript(for: agentID)
+                removeExitStatusFile(for: agentID)
                 failLaunch(
                     agent,
                     generation: launch.generation,
@@ -1827,6 +1831,7 @@ final class AgentBridge {
     ) {
         invalidateTimers(for: id)
         removeLaunchScript(for: id)
+        removeExitStatusFile(for: id)
         removeProviderFiles(of: id, provider: provider)
         host.removeSurface(id: id)
     }
@@ -1857,20 +1862,20 @@ final class AgentBridge {
         invalidateTimers(for: id)
         // An exit report the terminal had not read when Ghostty told of the
         // process's exit is in the launch script's exit status file.
-        if let statusFile = exitStatusFiles.removeValue(forKey: id) {
-            if let agent = agents[id], let generation = agent.launchGeneration, agent.processState != .exited,
-               let data = FileManager.default.contents(atPath: statusFile.path),
-               let status = String(bytes: data, encoding: .utf8).flatMap({ Int($0) }) {
-                providerExited(agent, status: status, generation: generation)
-            }
-            removeFileOffMain(statusFile)
+        if !byUser, let agent = agents[id], let generation = agent.launchGeneration, agent.processState != .exited,
+           let file = exitStatusFiles[id], file.generation == generation,
+           let data = FileManager.default.contents(atPath: file.url.path),
+           let status = String(bytes: data, encoding: .utf8).flatMap({ Int($0) }) {
+            providerExited(agent, status: status, generation: generation)
         }
+        removeExitStatusFile(for: id)
         removeLaunchScript(for: id)
         if let provider = agents[id]?.provider {
             removeProviderFiles(of: id, provider: provider)
         }
         if let agent = agents[id] {
-            let effects = apply(.surfaceDied(generation: agent.launchGeneration, byUser: byUser), to: agent)
+            let effects = apply(
+                .surfaceDied(generation: agent.launchGeneration, byUser: byUser, isViewed: isViewed(id)), to: agent)
             if effects.contains(.failed) { alert(agent, .error) }
         }
         onSurfaceDeath?(id)
@@ -2047,9 +2052,15 @@ final class AgentBridge {
         removeFileOffMain(url)
     }
 
+    private func removeExitStatusFile(for id: UUID) {
+        guard let file = exitStatusFiles.removeValue(forKey: id) else { return }
+        removeFileOffMain(file.url)
+    }
+
     private func removeAllLaunchScripts(synchronously: Bool = false) {
-        let urls = Array(launchScripts.values)
+        let urls = Array(launchScripts.values) + exitStatusFiles.values.map(\.url)
         launchScripts.removeAll()
+        exitStatusFiles.removeAll()
         let diagnose = diagnose
         let remove: @Sendable () -> Void = {
             for url in urls {

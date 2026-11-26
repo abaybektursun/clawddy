@@ -587,9 +587,29 @@ struct AgentRecordTests {
         send("count slowly")
         #expect(state.record.sentence(cli: provider) == .cli("count slowly You sent: count slowly"), "\(provider)")
         #expect(state.record.prompts.map(\.queued) == [false, true, true], "\(provider)")
+        if provider != .codex { state = apply(state, event(.messageReported("Counted."))) }
         state = apply(state, event(.programStatus(status("state=done", message: provider == .antigravity ? "Counted." : nil))))
-        #expect(state.record.state == .finished && state.record.queued == nil, "\(provider)")
-        #expect(state.record.prompts.allSatisfy { !$0.queued }, "\(provider)")
+        #expect(state.record.state == .finished, "\(provider)")
+        switch provider {
+        case .claudeCode, .codex:
+            // Both folded the queued messages into the turn that ended
+            // (probes.md, "Sending while the CLI works"): nothing waits.
+            #expect(state.record.queued == nil && state.record.prompts.allSatisfy { !$0.queued }, "\(provider)")
+        case .antigravity:
+            // agy runs them together as the next turn (probe stage5/queue2):
+            // they wait until it starts.
+            #expect(state.record.prompts.map(\.queued) == [false, true, true])
+            #expect(state.record.sentence(cli: provider) == .cli("Counted."))
+            state = apply(state, event(.programStatus(status("state=working"))))
+            #expect(state.record.prompts.allSatisfy { !$0.queued })
+            #expect(state.record.sentence(cli: provider) == .cli("count slowly"))
+            state = apply(state, event(.promptSubmitted("queued one\ncount slowly")))
+            #expect(state.record.prompts.map(\.text) == ["count slowly", "queued one", "count slowly"])
+            #expect(state.record.sentence(cli: provider) == .cli("count slowly"))
+            state = apply(state, event(.messageReported("One.")))
+            state = apply(state, event(.programStatus(status("state=done", message: "One."))))
+            #expect(state.record.state == .finished && state.record.sentence(cli: provider) == .cli("One."))
+        }
     }
 
     // MARK: Helpers

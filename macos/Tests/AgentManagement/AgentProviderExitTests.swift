@@ -39,6 +39,38 @@ struct AgentProviderExitTests {
         #expect(try !h.launchScripts().contains(script + ".status"))
     }
 
+    /// Review of the fixes, defect 1: an exit status belongs to one launch.
+    /// Launch 1 exits with status 1 (its report read), the agent is
+    /// restarted before launch 1's terminal closes, and launch 2 goes
+    /// before its terminal closes (the agent removed): launch 1's file is
+    /// gone with launch 1, and nothing from it reaches launch 2. A status
+    /// file of the current launch is not read when the app or the person
+    /// closes the terminal. No file is left in the launch folder.
+    @Test func anExitStatusBelongsToOneLaunch() throws {
+        let h = try AgentBridgeHarness()
+        defer { h.remove() }
+        let first = try h.addAgent("First", provider: .antigravity)
+        let second = try h.addAgent("Second", provider: .antigravity)
+        h.start()
+        try h.activate(first)
+        let script = try #require(try h.launchScripts().first)
+        try h.osc(first, "state=idle:app=antigravity")
+        try Data("1".utf8).write(to: h.root.launchDir.appendingPathComponent(script + ".status"))
+        try h.providerExited(first, status: 1)
+        #expect(try h.agent(first).record.problem == AgentRecord.Problem(kind: .exited, status: 1))
+        try h.activate(first)
+        #expect(try !h.launchScripts().contains(script + ".status"))
+        let posted = h.notifier.posted.count
+
+        try h.activate(second)
+        let current = try #require(try h.launchScripts().first { $0.contains(second.uuidString) })
+        try h.osc(second, "state=idle:app=antigravity")
+        try Data("1".utf8).write(to: h.root.launchDir.appendingPathComponent(current + ".status"))
+        try h.editConfigExternally { $0.removeAll { $0.id == first || $0.id == second } }
+        #expect(h.notifier.posted.count == posted)
+        #expect(try h.launchScripts().filter { $0.hasSuffix(".status") }.isEmpty)
+    }
+
     /// The exit report ends the launch at once, in the app tick that
     /// delivers it, without touching the terminal, which closes after it.
     /// It ends Codex's launch the same way. What its terminal reports

@@ -186,12 +186,14 @@ enum AgentHookRuntime {
           esac
         }
         # The type of the last step of the transcript the field names, in
-        # STEP; empty when none is named or it cannot be read.
+        # STEP; empty when none is named or it cannot be read. Blank lines,
+        # such as one the file ends with, are no step.
         last_step() {
           transcript "$1"
           [ -n "$TRANSCRIPT" ] || return 0
           if [ -r "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-            STEP=$(sanitize "$(/usr/bin/tail -c \(transcriptTailBytes) "$TRANSCRIPT" | /usr/bin/tail -n 1 \
+            STEP=$(sanitize "$(/usr/bin/tail -c \(transcriptTailBytes) "$TRANSCRIPT" \
+              | /usr/bin/awk 'NF { line = $0 } END { printf "%s", line }' \
               | /usr/bin/plutil -extract type raw -o - - 2>/dev/null)")
           else
             log_error "could not read the transcript $TRANSCRIPT; the prompt is recorded"
@@ -254,7 +256,8 @@ enum AgentHookRuntime {
         INVOCATION=
         [ -n "$INVOCATION_FIELD" ] && INVOCATION=$(sanitize "$(extract "$INVOCATION_FIELD")")
         STEP=
-        [ -n "$STEP_FIELD" ] && last_step "$STEP_FIELD"
+        # Only an invocation that starts a turn can be a prompt.
+        [ -n "$STEP_FIELD" ] && [ "$INVOCATION" = 0 ] && last_step "$STEP_FIELD"
         EVENTS="$DIR/$ID.events"
         LOCK="$DIR/$ID.events.lock"
         EVENT_LINE=$(printf \

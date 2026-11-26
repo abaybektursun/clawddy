@@ -76,7 +76,9 @@ What it does
   further hook and writes nothing more to the transcript.
 - Keys: typing edits the box; paste inserts as typed; Return submits. While
   working a submitted message is queued ("▸ text (alt+m to send
-  immediately)") and sent as the next turn when the turn ends. Escape (or
+  immediately)") and sent as the next turn when the turn ends; several are
+  sent together as one prompt, joined by newlines, in one turn (captured,
+  probes/stage5/queue2: PreInvocation 0 with "one.\ntwo.", one Stop). Escape (or
   Control-C) while working interrupts: `idle`, "⎿  Interrupted · What should
   Antigravity CLI do instead?", queued text goes back into the box. Escape on
   a question or permission menu interrupts too (not captured). With text in
