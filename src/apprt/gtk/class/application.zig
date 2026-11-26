@@ -2029,6 +2029,7 @@ pub const Application = extern struct {
             .{
                 .surface_message = .{
                     .surface = surface,
+                    .id = surface_id,
                     .message = .present_surface,
                 },
             },
