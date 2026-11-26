@@ -31,10 +31,10 @@ import Testing
 /// `stage5/trustprompt`); a prompt sent from the app, or typed after the
 /// first key's `idle`, after that. A prompt record may come before its
 /// turn's `working` and before the previous turn's `done`
-/// (`stage5/queue2`). A turn's `done` comes after its start record (its
-/// prompt, or agy's own start): agy runs the PreInvocation hook, which
-/// writes it, before it calls the model, and a reply takes longer than the
-/// record's quarter second. An exit or a terminal death during a turn comes
+/// (`stage5/queue2`). A turn's `done` or `error` comes after its start
+/// record (its prompt, or agy's own start): agy runs the PreInvocation
+/// hook, which writes it, before it calls the model, and a reply or a
+/// failure takes longer than the record's quarter second. An exit or a terminal death during a turn comes
 /// after its prompt's record.
 @MainActor
 struct AgentAntigravityInterleavingTests {
@@ -85,15 +85,18 @@ struct AgentAntigravityInterleavingTests {
         var shows: Shown
         /// The items of the records channel that come before it.
         var afterRecords = 0
+        /// What it shows instead when that record (its index in the
+        /// records channel) has come before it: a quota failure's `error`
+        /// after its Stop.
+        var afterRecord: (index: Int, shows: Shown)?
     }
 
-    /// A record, which comes once `after` items of the reports channel have;
-    /// `shows`: what the tile shows once it has come, for the one record
-    /// that changes it (a quota failure's Stop).
+    /// A record, which comes once `after` items of the reports channel have.
+    /// No record changes what the tile shows, but the Stop that ends the
+    /// turn behind the start dialog.
     struct Record {
         var item: Item
         var after: Int
-        var shows: Shown?
     }
 
     /// One or more turns: both channels, and what must hold at the end.
@@ -102,8 +105,12 @@ struct AgentAntigravityInterleavingTests {
             case completed(reply: String)
             case interrupted
             case failed(text: String)
-            /// Paused at a usage limit, the limit's words these.
-            case paused(text: String)
+            /// Paused at a usage limit with these words, or, when the
+            /// `error` report came before the Stop that notes the limit and
+            /// its words do not match agy's quota rule, a problem with them.
+            case limitOrProblem(text: String)
+            /// Still working: agy wrote the failure's Stop but no report.
+            case working
             /// Its terminal died or agy exited failing: the agent stops with
             /// the problem, and a reply completed before stays unread.
             case stopped
@@ -122,9 +129,10 @@ struct AgentAntigravityInterleavingTests {
             Case(
                 name: "\(name), \(next.name)",
                 reports: reports + next.reports.map {
-                    Report(item: $0.item, shows: $0.shows, afterRecords: $0.afterRecords == 0 ? 0 : $0.afterRecords + records.count)
+                    Report(item: $0.item, shows: $0.shows, afterRecords: $0.afterRecords == 0 ? 0 : $0.afterRecords + records.count,
+                           afterRecord: $0.afterRecord.map { ($0.index + records.count, $0.shows) })
                 },
-                records: records + next.records.map { Record(item: $0.item, after: $0.after + reports.count, shows: $0.shows) },
+                records: records + next.records.map { Record(item: $0.item, after: $0.after + reports.count) },
                 prompts: prompts + next.prompts, completions: completions + next.completions, end: next.end)
         }
     }
@@ -247,29 +255,69 @@ struct AgentAntigravityInterleavingTests {
         return Case(
             name: "failed late",
             reports: [
-                Report(item: .working, shows: works), Report(item: .error("Network \(n)."), shows: problem),
+                Report(item: .working, shows: works), Report(item: .error("Network \(n)."), shows: problem, afterRecords: 1),
                 Report(item: .idle, shows: problem),
             ],
             records: [Record(item: .prompt("task \(n)"), after: 0), Record(item: .stop(nil), after: 1)],
             prompts: ["task \(n)"], completions: 0, end: .failed(text: "Network \(n)."))
     }
 
-    /// A usage limit (probe `stage7/quota2`): the Stop with agy's quota
-    /// error is written 0.9 s before the `error` report (`stage6/midturn2`),
-    /// so it comes before it (the other order: the named test
-    /// `aQuotaFailurePausesAndOtherFailuresStayProblems`); paused, with the
-    /// report's words.
-    static let quotaError = "generatingandexecuting:RESOURCE_EXHAUSTEDcode429:Resourcehasbeenexhaustede.g.checkquota."
+    /// A usage limit (probe `stage7/quota2`): agy's Stop with the quota
+    /// error and its `error` report, in any order. The report makes the
+    /// failure: a usage limit when the Stop came first and noted it, or
+    /// when its own words match agy's quota rule; otherwise a problem with
+    /// its words (the stated bound). The Stop changes nothing by itself.
+    static let quotaError = "generating and executing: RESOURCE_EXHAUSTED code 429: Resource has been exhausted e.g. check quota."
+    static let paused = Shown(state: .paused, replies: [nil])
+    static let problem = Shown(state: .problem, replies: [nil])
     static func quotaFailed(_ n: Int) -> Case {
-        let paused = Shown(state: .paused, replies: [nil])
-        return Case(
+        Case(
             name: "quota",
             reports: [
                 Report(item: .working, shows: works),
-                Report(item: .error("Quota \(n)."), shows: paused, afterRecords: 2),
+                Report(item: .error("Failed \(n)."), shows: problem, afterRecords: 1, afterRecord: (1, paused)),
             ],
-            records: [Record(item: .prompt("task \(n)"), after: 0), Record(item: .failedStop(quotaError), after: 1, shows: paused)],
-            prompts: ["task \(n)"], completions: 0, end: .paused(text: "Quota \(n)."))
+            records: [Record(item: .prompt("task \(n)"), after: 0), Record(item: .failedStop(quotaError), after: 1)],
+            prompts: ["task \(n)"], completions: 0, end: .limitOrProblem(text: "Failed \(n)."))
+    }
+
+    /// A usage limit known from the `error` report's own words alone, no
+    /// Stop with an error.
+    static func quotaByWords(_ n: Int) -> Case {
+        Case(
+            name: "quota by words",
+            reports: [Report(item: .working, shows: works), Report(item: .error("You have exhausted your capacity \(n)."), shows: paused, afterRecords: 1)],
+            records: [Record(item: .prompt("task \(n)"), after: 0)],
+            prompts: ["task \(n)"], completions: 0, end: .limitOrProblem(text: "You have exhausted your capacity \(n)."))
+    }
+
+    /// A send from the app's line between the quota Stop and the `error`;
+    /// agy runs it as the next turn.
+    static func quotaThenSent(_ n: Int) -> Case {
+        let reply = "Again \(n).\nIts second line."
+        return Case(
+            name: "quota, a send in between",
+            reports: [
+                Report(item: .working, shows: works), Report(item: .send("again \(n)"), shows: unchanged),
+                Report(item: .error("Failed \(n)."), shows: problem, afterRecords: 1, afterRecord: (1, paused)),
+                Report(item: .working, shows: works),
+                Report(item: .done("Again \(n)."), shows: finished("Again \(n).", reply), afterRecords: 3),
+            ],
+            records: [
+                Record(item: .prompt("task \(n)"), after: 0), Record(item: .failedStop(quotaError), after: 1),
+                Record(item: .prompt("again \(n)"), after: 3), Record(item: .stop(reply), after: 4),
+            ],
+            prompts: ["task \(n)", "again \(n)"], completions: 1, end: .completed(reply: reply))
+    }
+
+    /// agy wrote the quota Stop and no report (its setup screen over the
+    /// turn, `stage7/quota2`): the agent still works. Only last.
+    static func quotaWithoutReport(_ n: Int) -> Case {
+        Case(
+            name: "quota, no report",
+            reports: [Report(item: .working, shows: works)],
+            records: [Record(item: .prompt("task \(n)"), after: 0), Record(item: .failedStop(quotaError), after: 1)],
+            prompts: ["task \(n)"], completions: 0, end: .working)
     }
 
     /// Sent from the app's line: the send, the `idle` agy reports at the
@@ -290,7 +338,7 @@ struct AgentAntigravityInterleavingTests {
 
     static let kinds: [(Int) -> Case] = [
         normal, afterKey, wakeUp, wakeInTurn, interrupted, permission, question, failedAtOnce, failedEarly, failedLate, quotaFailed,
-        sent,
+        quotaByWords, quotaThenSent, sent,
     ]
 
     /// Turns after which the agent's process is gone: only last.
@@ -325,7 +373,7 @@ struct AgentAntigravityInterleavingTests {
         return turn
     }
 
-    static let lastKinds: [(Int) -> Case] = [diesMidTurn, exitsMidTurn, exitsAfterDone, diesAfterDone]
+    static let lastKinds: [(Int) -> Case] = [diesMidTurn, exitsMidTurn, exitsAfterDone, diesAfterDone, quotaWithoutReport]
 
     /// Two prompts sent while a turn works: agy runs them joined by a
     /// newline as its next turn (`stage5/queue2`), or an interrupt gives
@@ -449,14 +497,22 @@ struct AgentAntigravityInterleavingTests {
     }
 
     static func reduce(_ state: AgentRuntimeSnapshot, _ item: Item, viewed: Bool) throws -> (AgentRuntimeSnapshot, completions: Int) {
+        let (after, completions, _) = try reduceCounting(state, item, viewed: viewed)
+        return (after, completions)
+    }
+
+    /// The state after `item`, and the completions and failures it notified.
+    static func reduceCounting(_ state: AgentRuntimeSnapshot, _ item: Item, viewed: Bool) throws -> (AgentRuntimeSnapshot, Int, Int) {
         var state = state
         var completions = 0
+        var failures = 0
         for event in try events(of: item, viewed: viewed) {
             let reduced = AgentStateReducer.reduce(state, event: event, rules: rules, at: Date(timeIntervalSinceReferenceDate: 0))
             state = reduced.state
             completions += reduced.effects.filter { $0 == .completed }.count
+            failures += reduced.effects.filter { $0 == .failed }.count
         }
-        return (state, completions)
+        return (state, completions, failures)
     }
 
     /// What goes wrong in `order` of `c`: the first step that breaks a rule,
@@ -465,6 +521,12 @@ struct AgentAntigravityInterleavingTests {
         var state = finishedAgent(unread: startedUnread)
         var shown = Shown(state: .finished, replies: ["Before."])
         var completions = 0
+        var failures = 0
+        var recordsCome = Set<Int>()
+        let failureReports = c.reports.filter {
+            if case .report("error", _, _) = $0.item { return true }
+            return $0.item == .death || $0.item == .exit(1)
+        }.count
         for (index, step) in order.enumerated() {
             let item: Item
             let isRecord: Bool
@@ -472,18 +534,22 @@ struct AgentAntigravityInterleavingTests {
             case .report(let r):
                 item = c.reports[r].item
                 isRecord = false
-                shown = Shown(state: c.reports[r].shows.state ?? shown.state, replies: c.reports[r].shows.replies ?? shown.replies)
+                var shows = c.reports[r].shows
+                if let other = c.reports[r].afterRecord, recordsCome.contains(other.index) { shows = other.shows }
+                shown = Shown(state: shows.state ?? shown.state, replies: shows.replies ?? shown.replies)
             case .record(let k):
                 item = c.records[k].item
                 isRecord = true
-                if let shows = c.records[k].shows {
-                    shown = Shown(state: shows.state ?? shown.state, replies: shows.replies ?? shown.replies)
-                }
+                recordsCome.insert(k)
             }
             let before = state.record.state
-            let (after, completed) = try reduce(state, item, viewed: viewed)
+            let (after, completed, failed) = try reduceCounting(state, item, viewed: viewed)
             state = after
             completions += completed
+            failures += failed
+            // One failure, one notification, and only for a problem.
+            if failed > 0 && state.record.state != .problem { return ["step \(index) (\(item))", "notified a failure, shows \(state.record.state)"] }
+            if failures > failureReports { return ["step \(index) (\(item))", "\(failures) failures notified"] }
             let record = state.record
             let replies = shown.replies ?? []
             var found: [String] = []
@@ -514,12 +580,17 @@ struct AgentAntigravityInterleavingTests {
             if record.unread && !c.name.hasSuffix("failed at once") { found.append("unread under a problem") }
         case .stopped:
             if record.problem?.kind != .exited { found.append("problem \(String(describing: record.problem))") }
-        case .paused(let text):
-            if record.state != .paused || record.problem != nil { found.append("not paused: \(record.state)") }
-            if record.limit?.message != text { found.append("limit \(String(describing: record.limit))") }
-            if record.unread { found.append("unread while paused") }
+        case .limitOrProblem(let text):
+            if record.state == .paused {
+                if record.limit?.message != text || record.problem != nil { found.append("limit \(String(describing: record.limit))") }
+            } else if record.problem?.text != text || record.limit != nil {
+                found.append("problem \(String(describing: record.problem)), limit \(String(describing: record.limit))")
+            }
+            if record.unread { found.append("unread under a failure") }
+        case .working:
+            if record.state != .working { found.append("state \(record.state)") }
         }
-        if state.turnState != .inactive { found.append("turn \(state.turnState)") }
+        if state.turnState != .inactive && c.end != .working { found.append("turn \(state.turnState)") }
         if state.promptAwaitsTurn { found.append("promptAwaitsTurn") }
         if state.stateBeforeStartDialog != nil || state.completedBehindDialog != nil { found.append("start dialog left") }
         if state.endedBeforeItsPrompt != nil { found.append("endedBeforeItsPrompt") }
@@ -535,6 +606,9 @@ struct AgentAntigravityInterleavingTests {
     /// How the start dialog ends, with the first prompt's turn behind it.
     enum DialogEnd: CaseIterable {
         case accepted, acceptedThenTurn, declined, closedByPerson, exitedFailing, terminalDied, failed
+        /// The turn behind the dialog fails on a usage limit (its Stop has
+        /// agy's quota error) and the dialog stays open.
+        case quotaBehindOpenDialog
 
         static let reply = "First.\nMore."
         static let nextReply = "Reply 2.\nMore."
@@ -556,6 +630,7 @@ struct AgentAntigravityInterleavingTests {
             case .exitedFailing: return [shown(.exit(1))]
             case .terminalDied: return [shown(.death)]
             case .failed: return [shown(.error("Broke."))]
+            case .quotaBehindOpenDialog: return []
             }
         }
 
@@ -565,7 +640,8 @@ struct AgentAntigravityInterleavingTests {
         var records: [Record] {
             var records = [
                 Record(item: .sessionStart, after: 0), Record(item: .prompt("first task"), after: 0),
-                Record(item: .stop(Self.reply), after: 1),
+                Record(item: self == .quotaBehindOpenDialog ? .failedStop(AgentAntigravityInterleavingTests.quotaError) : .stop(Self.reply),
+                       after: 1),
             ]
             if self == .acceptedThenTurn {
                 records += [Record(item: .prompt("task 2"), after: 2), Record(item: .stop(Self.nextReply), after: 3)]
@@ -578,7 +654,7 @@ struct AgentAntigravityInterleavingTests {
         func shows(after reportsSeen: Int, stopSeen: Bool) -> AgentRecord.State {
             switch (self, reportsSeen) {
             case (_, 0): return .working
-            case (_, 1): return .asks
+            case (_, 1), (.quotaBehindOpenDialog, _): return .asks
             case (.accepted, _), (.declined, 2), (.acceptedThenTurn, 2): return stopSeen ? .finished : .working
             case (.acceptedThenTurn, 3): return .working
             case (.acceptedThenTurn, _), (.declined, _), (.closedByPerson, _): return .finished
@@ -595,7 +671,7 @@ struct AgentAntigravityInterleavingTests {
             case .acceptedThenTurn: return 2
             case .declined: return stopAfter < 3 ? 1 : 0
             case .closedByPerson: return stopAfter < 2 ? 1 : 0
-            case .exitedFailing, .terminalDied, .failed: return 0
+            case .exitedFailing, .terminalDied, .failed, .quotaBehindOpenDialog: return 0
             }
         }
     }
@@ -645,11 +721,17 @@ struct AgentAntigravityInterleavingTests {
         var found: [String] = []
         let record = state.record
         if completions != expected { found.append("\(completions) completions") }
-        let last = end == .acceptedThenTurn ? DialogEnd.nextReply : DialogEnd.reply
+        let last = end == .acceptedThenTurn ? DialogEnd.nextReply : end == .quotaBehindOpenDialog ? nil : DialogEnd.reply
         if record.lastMessage != last { found.append("last reply \(record.lastMessage ?? "nil")") }
         if record.unread != (expected > 0 && !viewed) { found.append("unread \(record.unread)") }
         let prompts = end == .acceptedThenTurn ? ["first task", "task 2"] : ["first task"]
         if record.prompts.map(\.text) != prompts { found.append("prompts \(record.prompts.map(\.text))") }
+        if end == .quotaBehindOpenDialog {
+            // The dialog stays open: it still asks, and the turn behind it
+            // waits.
+            if record.question == nil { found.append("the dialog's question is gone") }
+            return found
+        }
         if state.stateBeforeStartDialog != nil || state.completedBehindDialog != nil { found.append("start dialog left") }
         if state.hiddenTurn { found.append("hiddenTurn") }
         if state.pendingMessage != nil, record.state != .problem { found.append("pendingMessage") }
@@ -711,30 +793,37 @@ struct AgentAntigravityInterleavingTests {
     }
 
     /// The number of runs `allFaults` makes, so a change to the cases shows.
-    static let expectedRuns = 23554
+    static let expectedRuns = 60180
 
-    /// agy's quota failure, by agy's own rule for its errors: the Stop with
-    /// the quota error pauses the agent, and the `error` report that follows
-    /// gives the limit its words; the other order too. A network failure's
-    /// Stop stays a problem with agy's words.
+    /// agy's quota failure (review of the quota commit): the `error` report
+    /// makes the failure. A Stop with the quota error first notes it, and
+    /// the report then pauses at the usage limit with its words; a report
+    /// whose own words match agy's rule pauses whatever the order; a report
+    /// first whose words do not match is a problem, and the late Stop
+    /// changes nothing. A network failure stays a problem. A Stop with an
+    /// error reports no reply.
     @Test func aQuotaFailurePausesAndOtherFailuresStayProblems() throws {
-        let network = "generatingandexecuting:requestfailed:Posthttps://daily-cloudcode-pa.googleapis.com/v1internal:"
-            + "streamGenerateContentaltsse:proxyconnecttcp:dialtcp127.0.0.1:18783:connect:connectionrefused"
+        let network = "generating and executing: request failed: Post https://example.invalid/v1internal:streamGenerateContent?alt=sse: "
+            + "proxyconnect tcp: dial tcp 127.0.0.1:18783: connect: connection refused"
         #expect(AntigravityProvider.isQuota(Self.quotaError))
-        #expect(AntigravityProvider.isQuota("generating and executing: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota)."))
+        #expect(AntigravityProvider.isQuota("generating and executing: request failed: HTTP 429 Too Many Requests"))
         #expect(!AntigravityProvider.isQuota(network))
-        for order in [[Item.failedStop(Self.quotaError), .error("Out of quota.")], [.error("Out of quota."), .failedStop(Self.quotaError)]] {
+        func run(_ items: [Item]) throws -> AgentRuntimeSnapshot {
             var state = Self.finishedAgent(unread: false)
-            for item in [Item.working, .prompt("task")] + order { state = try Self.reduce(state, item, viewed: false).0 }
+            for item in [Item.working, .prompt("task")] + items { state = try Self.reduce(state, item, viewed: false).0 }
+            return state
+        }
+        for order in [[Item.failedStop(Self.quotaError), .error("Something failed.")], [.error("Out of quota."), .failedStop(Self.quotaError)]] {
+            let state = try run(order)
             #expect(state.record.state == .paused && state.record.problem == nil, "\(order)")
-            #expect(state.record.limit?.message == "Out of quota.", "\(order)")
-            #expect(state.record.sentence(cli: .antigravity) == .cli("Out of quota."), "\(order)")
+            #expect(state.record.limit?.message.map { ["Something failed.", "Out of quota."].contains($0) } == true, "\(order)")
         }
-        var state = Self.finishedAgent(unread: false)
-        for item in [Item.working, .prompt("task"), .failedStop(network), .error("There was a network issue.")] {
-            state = try Self.reduce(state, item, viewed: false).0
-        }
-        #expect(state.record.state == .problem && state.record.problem?.text == "There was a network issue.")
+        let late = try run([.error("Something failed."), .failedStop(Self.quotaError)])
+        #expect(late.record.state == .problem && late.record.problem?.text == "Something failed.")
+        let failed = try run([.failedStop(network), .error("There was a network issue.")])
+        #expect(failed.record.state == .problem && failed.record.problem?.text == "There was a network issue.")
+        let noReport = try run([.failedStop(Self.quotaError)])
+        #expect(noReport.record.state == .working && noReport.record.lastMessage == nil)
     }
 
     /// Review of the fixes 2, trigger A: a wake-up turn of its own, its

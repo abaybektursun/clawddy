@@ -24,8 +24,9 @@ struct AntigravityProvider: Sendable {
     /// know changes the id without a word. A turn's prompt is its first
     /// PreInvocation's (`invocationNum` 0); the later ones of the same turn
     /// follow a tool or an answer. Stop brings the full last reply, read
-    /// from the transcript. Failures come only from the terminal's `error`:
-    /// the one live failure seen ran no hook.
+    /// from the transcript. Failures come only from the terminal's `error`;
+    /// a failed turn's Stop carries agy's error and no reply, and one whose
+    /// error matches agy's quota rule notes a usage limit for that report.
     static let hookEvents: [String: AgentProviderEntry.Meaning] = [
         "SessionStart": { [.sessionBound(sessionID: $0.sessionID)] },
         "PreInvocation": { record in
@@ -40,19 +41,21 @@ struct AntigravityProvider: Sendable {
         },
         "Stop": { record in
             var events: [AgentDomainEvent] = [.sessionBound(sessionID: record.sessionID)]
-            events += record.text.map { [.messageReported($0)] } ?? []
-            // A turn that failed on a usage limit, by agy's own rule for
-            // its errors (cli-facts, "A 429 from a gateway").
-            if let error = record.error, isQuota(error) {
-                events.append(.turnFailed(AgentFailure(error: AgentFailure.usageLimitKind)))
+            // A Stop with an error ended a failed turn: it reports no reply,
+            // and one on a usage limit, by agy's own rule for its errors,
+            // leaves only a note (cli-facts, "A 429 from a gateway").
+            if let error = record.error {
+                if isQuota(error) { events.append(.usageLimitNoted) }
+            } else {
+                events += record.text.map { [.messageReported($0)] } ?? []
             }
             return events
         },
     ]
 
-    /// agy's own test for a quota failure (`QUOTA_RE` in its program text),
-    /// matched against the error as the hook script keeps it: spaces and
-    /// parentheses dropped, so "429" is matched only where it stands alone.
+    /// agy's own test for a quota failure (`QUOTA_RE` in its program text):
+    /// on its Stop's error (as the hook script keeps it, words apart) and on
+    /// its `error` report's words.
     static func isQuota(_ error: String) -> Bool {
         error.range(of: #"RESOURCE_EXHAUSTED|quota|\b429\b|exhausted\s*your\s*capacity|rate.?limit"#,
                     options: [.regularExpression, .caseInsensitive]) != nil
@@ -96,7 +99,7 @@ struct AntigravityProvider: Sendable {
             reports: AgentReportRules(
                 doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false,
                 turnStartDelay: 0, askingAtStartIsStarted: true, queuedMessagesRunNextTurn: true,
-                failureRecordComesFirst: true),
+                usageLimitByQuotaWords: true),
             hookEvents: Self.hookEvents,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },

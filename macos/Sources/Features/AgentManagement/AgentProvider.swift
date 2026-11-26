@@ -334,6 +334,10 @@ enum AgentDomainEvent: Equatable, Sendable {
     /// a `working` waits to settle, since the prompt's record can arrive
     /// after a short turn has ended.
     case promptSubmitted(String?)
+    /// The turn under way failed on a usage limit, by agy's quota rule on
+    /// its Stop's error: a note only; the terminal's `error` report makes
+    /// the failure.
+    case usageLimitNoted
     /// The CLI started a step of its own, with no prompt (agy, when a
     /// background command ends): a reply reported before it is not this
     /// step's.
@@ -389,11 +393,9 @@ struct AgentReportRules: Equatable, Sendable {
     /// them into the running turn, which ends once (probes.md, "Sending
     /// while the CLI works").
     var queuedMessagesRunNextTurn: Bool
-    /// The record that tells a failure's kind is written before the
-    /// failure's `error` report (agy's Stop, 0.9 s before it, probe
-    /// `stage6/midturn2`), not after it (Claude's StopFailure): an `error`
-    /// that follows a usage limit is that limit's words.
-    var failureRecordComesFirst = false
+    /// An `error` report whose words match agy's quota rule
+    /// (`AntigravityProvider.isQuota`) is a usage limit (agy).
+    var usageLimitByQuotaWords = false
 
     /// Claude Code's; Codex's differ only in `turnStartDelay`.
     static let standard = Self(

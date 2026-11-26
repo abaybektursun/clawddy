@@ -1396,9 +1396,11 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   rewrote agy's `cache/onboarding.json` (`enterpriseOnboardingComplete` false); the owner's `settings.json` was
   unchanged. agy's own test for a quota failure, in its program text, is `QUOTA_RE =
   /RESOURCE_EXHAUSTED|quota|\b429\b|exhausted your capacity|rate.?limit/i`; the captured error matches it, a network
-  failure's ("…request failed… connection refused") does not. The app reads the Stop's `error` with that rule (as
-  the hook script keeps it, spaces and parentheses dropped): a match is a usage limit (paused), and the `error` report
-  around it gives the limit its words; no reset time is given, so none is shown.
+  failure's ("…request failed… connection refused") does not. The app: the terminal's `error` report makes every agy
+  failure; a Stop whose `error` matches the rule (the hook script keeps the error's words apart, at most 4 KiB) only
+  notes the turn's failure as a usage limit, and the `error` report then pauses the agent with its words, as it does
+  when its own words match the rule; otherwise it is a problem. No reset time is given, so none is shown. Bound: an
+  `error` report before its Stop whose words do not match shows a usage limit as a problem with agy's words.
 - **`ANTIGRAVITY_EXECUTABLE_DATA_DIR`** does not move agy's data folder: set to an empty folder, agy left it empty and
   used `~/.gemini/antigravity-cli` as before (a new log there). In the program text it is the data folder agy gives
   its sidecars. No variable was found that moves agy's settings while its sign-in works.

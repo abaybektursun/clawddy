@@ -237,6 +237,35 @@ struct AgentHookScriptTests {
     }
 
     /// A payload without the field records no text, never an empty one; a
+    /// An error is kept bounded and with its spaces, so agy's quota rule
+    /// sees "429" as a word: at most 4 KiB, only safe characters; Claude's
+    /// kinds and a missing error as before (review of the quota commit).
+    @Test func anErrorKeepsItsWordsBounded() throws {
+        let fixture = try HookFixture()
+        defer { fixture.remove() }
+        func record(_ provider: AgentProviderID, _ payload: [String: Any]) throws -> AgentRawProviderEvent {
+            let agentID = UUID()
+            #expect(try fixture.run(
+                agentID: agentID, provider: provider, generation: UUID(),
+                payload: JSONSerialization.data(withJSONObject: payload)) == 0)
+            let events = try fixture.events(agentID)
+            try #require(events.count == 1)
+            return events[0]
+        }
+        let agy = try record(.antigravity, [
+            "hookEventName": "Stop", "conversationId": "c", "terminationReason": "ERROR",
+            "error": "generating and executing: request failed: HTTP 429 (Too Many Requests) \"quoted\" status=429",
+        ])
+        #expect(agy.error == "generating and executing: request failed: HTTP 429 Too Many Requests quoted status=429")
+        #expect(agy.error.map(AntigravityProvider.isQuota) == true)
+        let long = try record(.antigravity, ["hookEventName": "Stop", "conversationId": "c", "error": String(repeating: "page ", count: 4000)])
+        #expect(long.error?.utf8.count == 4096)
+        let claude = try record(.claudeCode, ["session_id": "s", "hook_event_name": "StopFailure", "error": "rate_limit"])
+        #expect(claude.error == "rate_limit")
+        let none = try record(.codex, ["session_id": "s", "hook_event_name": "agent-turn-complete", "turn-id": "u"])
+        #expect(none.error == nil)
+    }
+
     /// failure records Claude's kind and its text; a question comes from deep
     /// in the payload; a session's end and start record why and how.
     @Test func eachEventRecordsItsOwnFields() throws {

@@ -118,6 +118,13 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// turn no report showed (any Stop is its reply). nil: no Stop to come
     /// is that turn's.
     var replyOpening: String?
+    /// This turn's Stop noted a usage limit (agy's quota rule on its error):
+    /// the `error` report that makes the failure makes it a usage limit.
+    /// Cleared when the turn ends and where a waiting Stop is dropped.
+    var usageLimitNoted = false
+    /// This turn's start record (its prompt, or agy's own start) has come,
+    /// so a Stop that comes now is this turn's. Cleared when a turn ends.
+    var turnStartRecorded = false
     /// Prompts Clawddy sent while the turn worked, which the CLI holds
     /// until the turn ends (`AgentReportRules.queuedMessagesRunNextTurn`).
     var sentWhileWorking: [String] = []
@@ -512,7 +519,7 @@ private struct Reduction {
         switch domainEvent {
         case .turnCompleted, .messageReported:
             confirmProviderAlive()
-        case .turnFailed, .promptSubmitted, .selfStarted, .questionReported:
+        case .turnFailed, .promptSubmitted, .selfStarted, .usageLimitNoted, .questionReported:
             // A prompt or a failure the event file delivers after the exit
             // report starts or fails no turn: the provider has gone.
             guard state.processState != .exited else { return }
@@ -557,7 +564,9 @@ private struct Reduction {
             // turn (agy queues it), and the Stop waiting is this turn's.
             if rules.workingStartsTurn && underWay != .inactive && !Self.isQueued(text, sent: state.sentWhileWorking) {
                 state.pendingMessage = nil
+                state.usageLimitNoted = false
             }
+            state.turnStartRecorded = true
             if let text {
                 recordPrompt(text, queued: !rules.queuedMessagesRunNextTurn && underWay != .starting && underWay != .inactive)
             }
@@ -569,7 +578,17 @@ private struct Reduction {
         case .selfStarted:
             // A Stop waiting in the turn came before agy started its next
             // step itself (a wake-up): an earlier step's or turn's.
-            if rules.workingStartsTurn && state.turnState != .inactive { state.pendingMessage = nil }
+            if rules.workingStartsTurn && state.turnState != .inactive {
+                state.pendingMessage = nil
+                state.usageLimitNoted = false
+            }
+            state.turnStartRecorded = true
+
+        case .usageLimitNoted:
+            // Only on the turn under way whose start record has come: the
+            // Stop of a turn already ended (its `error` came first), or of an
+            // earlier turn, notes nothing.
+            if state.turnStartRecorded, case .active = state.turnState { state.usageLimitNoted = true }
 
         case .messageReported(let text):
             // Claude's `Stop` is written just before its `done`, but the
@@ -827,20 +846,16 @@ private struct Reduction {
             }
 
         case .error:
-            // agy's usage limit came first, from its Stop, with no words: the
-            // report is its words, and the agent stays paused. A limit that
-            // has its words meets a new failure.
-            if rules.failureRecordComesFirst, record.state == .paused, record.limit?.message == nil {
-                let text = report.message?.trimmingCharacters(in: .whitespacesAndNewlines)
-                if let text, !text.isEmpty { record.limit?.message = text }
-                return
-            }
             // Never a blip: a failure can come 106 ms after its `working`.
             if state.turnState == .starting { startTurn(activity: .executing) }
             // A failure this report raises has its `StopFailure` record to
             // come; one the record raised first has had it.
-            if record.state != .problem && record.state != .paused && !rules.failureRecordComesFirst { state.stopFailuresDue += 1 }
-            fail(AgentFailure(text: report.message))
+            if record.state != .problem && record.state != .paused { state.stopFailuresDue += 1 }
+            // agy: a usage limit when this turn's Stop noted one, or when the
+            // report's own words match agy's quota rule.
+            let quotaWords = rules.usageLimitByQuotaWords && report.message.map(AntigravityProvider.isQuota) == true
+            let limit = state.usageLimitNoted || quotaWords
+            fail(AgentFailure(error: limit ? AgentFailure.usageLimitKind : nil, text: report.message))
         }
     }
 
@@ -978,6 +993,8 @@ private struct Reduction {
     private mutating func endTurn() {
         state.turnState = .inactive
         state.activityState = .idle
+        state.usageLimitNoted = false
+        state.turnStartRecorded = false
     }
 
     /// Records `completion` once: the agent is finished, unread unless it
@@ -1037,13 +1054,10 @@ private struct Reduction {
         let text = failure.text?.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = text?.isEmpty == false ? text : nil
         if failure.isUsageLimit {
-            // With no words of its own, the failure report's (agy's `error`
-            // that came before its Stop) are the limit's.
-            let reported = record.problem?.kind == .error ? record.problem?.text : nil
             if record.state != .paused { change(to: .paused) }
             record.problem = nil
             record.limit = AgentRecord.UsageLimit(
-                message: message ?? record.limit?.message ?? reported,
+                message: message ?? record.limit?.message,
                 resetsAt: failure.resetsAt ?? record.limit?.resetsAt)
             finishStopping()
             return

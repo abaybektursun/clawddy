@@ -416,7 +416,7 @@ struct AgentAntigravityReducerTests {
         #expect(Self.rules == AgentReportRules(
             doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false,
             turnStartDelay: 0, askingAtStartIsStarted: true, queuedMessagesRunNextTurn: true,
-            failureRecordComesFirst: true))
+            usageLimitByQuotaWords: true))
         #expect(Self.rules.workingStartsTurn)
         #expect(ClaudeCodeProvider(root: AgentDataRoot(url: nowhere)).entry.reports == .standard)
         var codex = AgentReportRules.standard
