@@ -1152,7 +1152,7 @@ pub const ProgramStatus = extern struct {
 
 test "ghostty.h ProgramStatus.Report layout" {
     const testing = std.testing;
-    const C = @import("ghostty.h").ghostty_action_program_status_report_s;
+    const C = @import("ghostty-h").ghostty_action_program_status_report_s;
     try testing.expectEqual(@sizeOf(C), @sizeOf(ProgramStatus.Report));
     inline for (.{ "state", "kind", "progress", "id", "app", "title", "message" }) |name| {
         try testing.expectEqual(@offsetOf(C, name), @offsetOf(ProgramStatus.Report, name));

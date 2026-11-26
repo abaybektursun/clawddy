@@ -139,7 +139,9 @@ Found on the way, in the terminal core (main has it too; `18a2627b1`, GTK call s
   another's failed 3 times in 60 before and 0 in 60 after.
 - The GTK line is not compiled on this machine.
 - The unfiltered `./build.nu test` hung twice in its Xcode test step and left a test library where the framework
-  symlink belongs. Run Zig tests with `-Dtest-filter`.
+  symlink belongs. Run Zig tests with `-Dtest-filter`; `-Dtest-filter=""` runs them all (4235 passed, 26 skipped,
+  after the layout test of the program status report named the header's module as the build does; main's did not
+  compile).
 
 ## Build
 

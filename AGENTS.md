@@ -48,7 +48,7 @@ A file for [guiding coding agents](https://agents.md/).
   - Always pass `-Dtest-filter`. Without a filter the step also runs
     `xcodebuild test`, which has hung here and leaves a test library where
     the `macos/GhosttyKit.xcframework` symlink belongs; the app's tests are
-    `macos/build.nu --action test`.
+    `macos/build.nu --action test`. `-Dtest-filter=""` runs every Zig test.
 - **Test filter (Zig)**: `./build.nu test -Dtest-filter=<test name>`
 - **Formatting (Zig)**: `zig fmt .`
 - **Formatting (Swift)**: `swiftlint lint --strict --fix`
