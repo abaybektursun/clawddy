@@ -45,8 +45,10 @@ A file for [guiding coding agents](https://agents.md/).
   runs beside the live app. The production app (`--identity production`) is
   built only at switch-over, with the live app quit; see `macos/AGENTS.md`.
 - **Test (Zig):** `./build.nu test`
-  - Prefer to run targeted tests with `-Dtest-filter` because the full
-    test suite is slow to run.
+  - Always pass `-Dtest-filter`. Without a filter the step also runs
+    `xcodebuild test`, which has hung here and leaves a test library where
+    the `macos/GhosttyKit.xcframework` symlink belongs; the app's tests are
+    `macos/build.nu --action test`.
 - **Test filter (Zig)**: `./build.nu test -Dtest-filter=<test name>`
 - **Formatting (Zig)**: `zig fmt .`
 - **Formatting (Swift)**: `swiftlint lint --strict --fix`

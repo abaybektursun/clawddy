@@ -132,6 +132,15 @@ Not proven, or open:
 - A failed turn whose Stop comes with no `error` report leaves the agent working (the report makes failures): measured,
   the report came 0.9 s after the Stop in the network failure; behind the gateway's setup screen none came.
 
+Found on the way, in the terminal core (main has it too; `18a2627b1`, GTK call site `cbe8aab52`):
+- The app delivered a terminal's queued messages by the terminal's address alone. A terminal closed while starting
+  left its child's exit queued, and a new terminal at the same address took it and closed: another agent stopped as
+  "exited". Every such message now carries the terminal's unique ID. A test that started an agent right before
+  another's failed 3 times in 60 before and 0 in 60 after.
+- The GTK line is not compiled on this machine.
+- The unfiltered `./build.nu test` hung twice in its Xcode test step and left a test library where the framework
+  symlink belongs. Run Zig tests with `-Dtest-filter`.
+
 ## Build
 
 From the repository root:
