@@ -77,22 +77,24 @@ The trust dialog shows on the tile as waiting on the person ("Trust this folder?
 2,290 keys over Claude Code, Codex and agy stand-ins mixed: 0 lost or misrouted keys, 0 activations; idle main
 thread with 40 mixed agents 0.21 % (0.16 % recorded above for Claude only).
 
-Fixed by the real run: a message sent while agy works is now shown as queued (agy reports it only when its turn
-starts, so the app marks it at the send, for every CLI); scenes give an agy agent's saved conversation its file in
-the stand-in's data folder.
+Fixed by the real run and the reviews after it:
+- A message sent while agy works is shown as queued (agy reports it only when its turn starts, so the app marks it
+  at the send, for every CLI).
+- With a first prompt, agy runs the prompt's turn behind the trust dialog before it is answered (cli-facts, "Under
+  the app"). The agent asks until the dialog is answered, then is finished and unread with the reply.
+- Declining the dialog once showed "Antigravity stopped." without an exit status: Ghostty tells of a process's exit
+  without waiting to read the terminal's last bytes, so the launch script's exit report can be lost, for any CLI.
+  The script now also writes the status to a file that belongs to that one launch, read when its terminal goes.
+- After agy runs a long command in the background, it wakes itself later with PreInvocation 0 and the previous
+  prompt. The hook script records the transcript's last step, and only `USER_INPUT` makes a prompt.
+- agy's hook records arrive up to a quarter of a second after its terminal reports. Every order the two can
+  arrive in is tested (`AgentAntigravityInterleavingTests.swift`: 1,048 possible merges of the two, 4,174 runs).
+- Scenes give an agy agent's saved conversation its file in the stand-in's data folder.
 
 Not proven, or open:
 - Answering the trust dialog "Yes" with the real agy: agy saves that answer into the owner's trusted folders, which
   the rules forbid; later launches were trusted for their session only (`--settings`, from a harness wrapper). The
   answer is proven against the stand-in.
-- With a first prompt, agy runs the prompt's turn behind the trust dialog before it is answered (cli-facts, "Under
-  the app"); the agent asks until the dialog is answered. Declining it once showed "Antigravity stopped." without
-  an exit status: Ghostty tells of a process's exit without waiting to read the terminal's last bytes, so the
-  launch script's exit report can be lost, for any CLI. The script now writes the status to a file before it
-  exits, read when the terminal goes.
-- After agy runs a long command in the background, it wakes itself later with PreInvocation 0 and the previous
-  prompt. Fixed after the final review: the hook script records the transcript's last step, and only `USER_INPUT`
-  makes a prompt (probe `stage5/wake2`).
 - In standard start mode agy runs in the owner's default mode (auto), which approves safe commands without asking;
   a permission request needs default mode (Shift+Tab in agy's terminal).
 - Sign-in after start-up, failures (`state=error`) and usage limits from the real agy: not seen.
