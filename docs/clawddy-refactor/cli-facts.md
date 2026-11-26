@@ -1337,6 +1337,32 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   conversation).
 - **Auto mode approves more than `echo`.** With no start-mode flag and the owner's default mode (auto), "Run the shell command: echo chosen" and "…: rm -f no-such-file.txt" both ran without asking. After Shift+Tab twice (auto → plan → default) `echo chosen` asked: `blocked kind=permission` "Approve Bash: echo chosen", menu as under "Screens".
 - **A long command runs in the background and wakes the agent later.** "Run the shell command: sleep 20, then reply…" ran `sleep 20` in the background ("Command duration exceeds the synchronous execution window…", "Waiting for sleep 20 to finish."), and the turn ended with a Stop. A message queued meanwhile then ran as its own turn (PreInvocation 0 with its words, Stop with its reply). When the command ended, agy woke itself: a `SYSTEM_MESSAGE` step in the transcript, then **PreInvocation with `invocationNum` 0 and `lastUserInput` still the previous prompt**, then Stop with the new reply. Nothing in that record but the transcript's last step tells it from a prompt.
+- **Signed out** (probe `stage6/signedout`, a throwaway `HOME`, no model turn): `blocked kind=auth` "Sign in required"
+  at 0.15 s and no other report; the screen "Welcome to the Antigravity CLI. You are currently not signed in.",
+  "Select login method:", "> 1. Google OAuth", "  2. Use a Google Cloud project". Nothing opens a browser until a
+  method is chosen (a stub `open` first on the `PATH` was never called). agy makes its data folder under that `HOME`.
+- **A failure before any model call** (proxy variables naming a closed port, under the app): `working`, then about 6 s
+  later `error` "failed to construct executor: plan model not specified; you must specify a valid model", the screen
+  "⚠ <that text>" and "Error ID: …", and **no hook record** (a prompt typed in the terminal is then in no record).
+  The process keeps its environment: the next prompt in it fails the same way.
+- **A network failure during a turn** (probe `stage6/midturn2`, a local proxy killed 4 s into a turn, one turn):
+  agy stays `working` and retries, the spinner line "Model unavailable (attempt N/9), retrying in Ns..." (attempt 2 at
+  +5 s, 4 at +25 s); at +148 s a **Stop record** with `terminationReason` "ERROR", `fullyIdle` true, no reply, and
+  `error` "generating and executing: request failed: Post \"https://…/v1internal:streamGenerateContent?alt=sse\":
+  proxyconnect tcp: dial tcp 127.0.0.1:<port>: connect: connection refused"; 0.9 s later
+  `ESC]7501;state=error:app=antigravity:msg=<base64 "There was a network issue connecting to the server, please try
+  again.">BEL`, the screen "⚠ <that text>" and "Error ID: …". Escape: `idle`.
+- **What the app does with an `error` report** (agy, and the same code for every CLI): the turn fails with the
+  report's message as the problem's text, shown as the tile's sentence as agy wrote it and kept in the agent's record
+  (`status/<agent>.record.json`, `problem.text`). The Stop record's `error` reaches the event file with only
+  `[:alnum:]_.:/-` kept (spaces dropped) and changes nothing: agy's failures come from the terminal (ruling 3). A
+  usage-limit message would arrive the same way and show as a problem with agy's own words (not as "paused", which
+  only Claude's `rate_limit` kind gives); it is in the record and on screen when one comes. Not seen.
+- **`done` and its Stop** (every captured pair with its transcript: 10 in stage 1, 2, 5, plus `stage6/donelink`): the
+  `done` message is the reply's first line exactly as written (Markdown kept), cut to 199 characters and "…" when the
+  line is longer than 200; the Stop record's reply (the transcript's last `PLANNER_RESPONSE` with content) begins
+  with it. `stage6/donelink`: a 239-character first line with a link, bold and code came as its first 199 characters
+  and "…".
 - **Several queued messages run together** (probe `stage5/queue2`, two turns): two messages typed while a turn
   ran waited for its `done`, then ran as one turn whose PreInvocation 0 had `lastUserInput` "Reply with the word
   one.\nReply with the word two." (joined by a newline), one Stop, one `done`.

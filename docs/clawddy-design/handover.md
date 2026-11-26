@@ -91,13 +91,31 @@ Fixed by the real run and the reviews after it:
   arrive in is tested (`AgentAntigravityInterleavingTests.swift`: 1,048 possible merges of the two, 4,174 runs).
 - Scenes give an agy agent's saved conversation its file in the stand-in's data folder.
 
+Proven later with the real agy under the harness (stage 6, 21 short turns; notes outside the repo):
+- Signed out (a throwaway `HOME`, a stub `open`): the tile shows "Login expired. Open it and sign in again." 2 s after
+  agy's sign-in report, keeps it past the 30 s start limit, and keys typed while it started were not sent into the
+  sign-in screen ("What you typed while it was starting was not sent.").
+- A failure before a turn and one during a turn (network cut through a local proxy): the tile shows agy's own error
+  text as a problem ("There was a network issue connecting to the server, please try again." after agy's 2 minutes
+  of retries); after the cause went and agy was restarted, the next prompt worked. An `error` report's text is the
+  problem's text in the agent's record; a usage-limit message would land the same way.
+- A 14-turn session (files read, made, edited, renamed, deleted, commands, a question, a background command, a
+  resume after quitting the app): every turn's state, prompt and full reply right; every file in the project, none
+  in the hook folder, which held only `hooks.json`, rewritten only by the app at each launch; the Stop hook took
+  0.21 s with a 2 KB transcript and 0.18 s with 37 KB.
+
 Not proven, or open:
 - Answering the trust dialog "Yes" with the real agy: agy saves that answer into the owner's trusted folders, which
   the rules forbid; later launches were trusted for their session only (`--settings`, from a harness wrapper). The
   answer is proven against the stand-in.
 - In standard start mode agy runs in the owner's default mode (auto), which approves safe commands without asking;
   a permission request needs default mode (Shift+Tab in agy's terminal).
-- Sign-in after start-up, failures (`state=error`) and usage limits from the real agy: not seen.
+- The hook folder is part of the agent's workspace, and the model sees it: in the 14-turn session it once looked for a
+  project file there (a failed read), `cd`'d into the project in every command, and when asked called the folder a
+  runtime directory it took for its default command folder (agy's real working folder was the project). No file
+  went there. A cost of decision 1 of the plan; nothing in the app changes it.
+- A usage limit from the real agy: cannot be forced; not seen.
+- A real sign-in completed after start-up: not done (it would use the owner's account).
 
 ## Build
 

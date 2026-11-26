@@ -274,10 +274,10 @@ only visible difference between agents is the name on the chip.
 
 | Open | How |
 | --- | --- |
-| What agy reports when the usage limit is reached | Cannot be forced. The Stop record's `error` text is logged as it arrives; the usage-limit sentence is wired only from a real capture. The same gap is open for Claude and Codex. |
-| What a signed-out agy reports after start-up | Needs the owner signed out of agy; not done without being asked. |
-| `state=error` on a live failure | Documented, not seen. Stage 1 tries a turn with no network. |
-| Whether a hook folder inside the workspace changes what the agent does | One long real session in stage 5; the folder holds one small file. |
+| What agy reports when the usage limit is reached | Still open: cannot be forced. An `error` report's text becomes the problem's text in the record and on the tile; a usage-limit message would land there (cli-facts, "Under the app"). The same gap is open for Claude and Codex. |
+| What a signed-out agy reports after start-up | Proven at start (stage 6, a throwaway `HOME`): `blocked kind=auth` stands, the login method menu shows, the tile shows the login problem after 2 s. A sign-in completed afterwards: not done. |
+| `state=error` on a live failure | Proven (stage 6): before a turn, and during one after agy's retries (a Stop with `terminationReason` "ERROR", then `error`). |
+| Whether a hook folder inside the workspace changes what the agent does | Measured (stage 6, 14 turns): no file went there and nothing was edited there, but the model sees the folder: one failed read there, explicit `cd`s into the project, and it took the folder for its default command folder. A cost of decision 1. |
 
 ## Later options, not in this plan
 
