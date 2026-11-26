@@ -183,7 +183,7 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
 
     override func layout() {
         super.layout()
-        let width = bounds.width
+        let width = bounds.width, height = bounds.height
         surface.frame = bounds
         surface.shadowPath = CGPath.continuousRoundedRect(bounds, radius: 12)
         // Inside the 1 pt rim, so the two never fuse into one line.
@@ -234,8 +234,12 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
         }
         if textView.lineCount > textView.maxLines { textView.scrollRangeToVisible(textView.selectedRange()) }
         // Its height follows its text: a host that sized it for other text
-        // places it again.
-        if preferredHeight != bounds.height { onHeight?() }
+        // places it again, at once, and it is laid out at its new height in
+        // this same pass.
+        if preferredHeight != height {
+            onHeight?()
+            if bounds.height != height { layout() }
+        }
     }
 
     /// The pointer moved to `point` (window coordinates), from the window's

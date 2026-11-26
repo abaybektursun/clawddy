@@ -260,17 +260,50 @@ extension AgentInteractionTests {
             #expect(d.model.newAgentProvider == .codex)
         }
 
-        /// The chip's hover ends when its menu closes.
+        /// The chip's hover ends when its menu closes, through the window's
+        /// one owner of hover: the pointer moving inside the chip lights it
+        /// again.
         @Test func theChipsHoverEndsWithItsMenu() async throws {
             let d = try await AgentWorkspaceDriver(.standard)
             defer { d.close() }
             let chip = d.windowController.line.chip
-            var hoveredDuringMenu: Bool?
-            d.windowController.showMenu = { _, _ in hoveredDuringMenu = chip.isHovered }
-            chip.isHovered = true
-            try await d.click(at: chip.convert(NSPoint(x: chip.bounds.midX, y: chip.bounds.midY), to: nil))
-            #expect(hoveredDuringMenu != nil)
+            d.windowController.showMenu = { _, _ in }
+            let inside = chip.convert(NSPoint(x: chip.bounds.midX, y: chip.bounds.midY), to: nil)
+            d.windowController.windowView.pointerMoved(to: inside)
+            #expect(chip.isHovered)
+            try await d.click(at: inside)
             #expect(!chip.isHovered && chip.phase == .rest)
+            d.windowController.windowView.pointerMoved(to: NSPoint(x: inside.x + 1, y: inside.y))
+            #expect(chip.isHovered)
+        }
+
+        /// The floating line reaches its new height in the same layout pass
+        /// as the change, as the home line does.
+        @Test func theFloatingLineGrowsInOneLayoutPass() async throws {
+            let d = try await AgentWorkspaceDriver(.standard)
+            defer { d.close() }
+            let palette = d.windowController.palettePanel
+            d.controller.setNewAgentProvider(.codex)
+            try await d.key(45, .maskCommand)
+            let room = palette.textView.frame.width - 2 * (palette.textView.textContainer?.lineFragmentPadding ?? 0) - 2
+            var words = "t"
+            while ((words + " t") as NSString).size(withAttributes: [.font: palette.textView.font as Any]).width <= room { words += " t" }
+            try await d.type(words)
+            #expect(palette.textView.lineCount == 1)
+            d.controller.setNewAgentProvider(.antigravity)
+            // One pass of the panel's own layout.
+            palette.layoutSubtreeIfNeeded()
+            #expect(palette.textView.lineCount == 2)
+            #expect(palette.frame.height == palette.preferredHeight)
+        }
+
+        /// A changed CLI is said to VoiceOver whatever window is open, or
+        /// none, as the bridge says an agent's news.
+        @Test func aChangedCLIIsAnnounced() async throws {
+            let d = try await AgentWorkspaceDriver(.standard)
+            defer { d.close() }
+            d.controller.setNewAgentProvider(.codex)
+            #expect(d.h.notifier.announced.last == "Codex")
         }
 
         /// A start uses the CLI the chip names.

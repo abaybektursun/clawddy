@@ -1904,6 +1904,11 @@ final class AgentBridge {
     /// Both say the agent's name, then its sentence (words.md,
     /// "Notification"); a finished turn whose message has not arrived yet
     /// says "Finished".
+    /// Says `message` to VoiceOver, whatever window is open, or none.
+    func announce(_ message: String) {
+        notifier.announce(message)
+    }
+
     private func alert(_ agent: AgentInstance, _ kind: NotificationKind) {
         // A settled agent is silent (ruling 2); its record still takes what
         // its CLI reports, so undo shows the truth.

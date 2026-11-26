@@ -192,7 +192,7 @@ final class AgentWindowController: NSViewController {
         line.onText = { [weak self] in self?.actions.draft($0) }
         line.onChip = { [weak self] in self?.showCLIMenu(under: $0) }
         palettePanel.onChip = { [weak self] in self?.showCLIMenu(under: $0) }
-        palettePanel.onHeight = { [weak self] in self?.windowView.needsLayout = true }
+        palettePanel.onHeight = { [weak self] in self?.windowView.placePalette() }
         palettePanel.textView.command = { [weak self] in self?.actions.paletteCommand($0) ?? false }
         palettePanel.textView.onChange = { [weak self] in
             guard let self else { return }
@@ -619,8 +619,8 @@ final class AgentWindowController: NSViewController {
     private func showCLIMenu(under view: NSView) {
         showMenu(actions.cliMenu(), view)
         // The menu's tracking took the pointer's exit: the chip's hover ends
-        // with it.
-        (view as? AgentButton)?.isHovered = false
+        // with it, through the window's one owner of hover.
+        windowView.pointerMoved(to: nil)
     }
 
     /// The CLI new agents use changed (the chip, its key, the Agent menu):
@@ -632,10 +632,8 @@ final class AgentWindowController: NSViewController {
                 chip: newAgentChip(in: project), cli: model.newAgentProvider.displayName,
                 accessibility: newAgentAccessibility(in: project), back: paletteBack, palette: palette)
         }
-        // Heard wherever the keys are, as the status line's words are.
-        NSAccessibility.post(
-            element: NSApp.mainWindow as Any, notification: .announcementRequested,
-            userInfo: [.announcement: model.newAgentProvider.displayName, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+        // Heard wherever the keys are, with or without a window.
+        bridge.announce(model.newAgentProvider.displayName)
     }
 
     private func newAgentChip(in project: AgentProject) -> String {
@@ -1104,11 +1102,7 @@ final class AgentWindowView: NSView {
         veil.frame = NSRect(x: 0, y: bar, width: width, height: stage)
         dropOutline.frame = bounds
         zoomCover.frame = bounds
-        paletteView.listLimit = (stage * 0.46).rounded()
-        let paletteWidth = min(AgentPaletteView.maxWidth, (width * 0.88).rounded())
-        set(paletteView, NSRect(
-            x: ((width - paletteWidth) / 2).rounded(), y: bar + (stage * 0.13).rounded(),
-            width: paletteWidth, height: paletteView.preferredHeight))
+        placePalette()
         let launch = AgentFirstLaunchView.size
         set(firstLaunch, NSRect(
             x: ((width - launch.width) / 2).rounded(), y: (bar + (height - bar - launch.height) / 2).rounded(),
@@ -1118,6 +1112,18 @@ final class AgentWindowView: NSView {
 
     private func set(_ view: NSView, _ frame: NSRect) {
         if view.frame != frame { view.frame = frame }
+    }
+
+    /// The palette: under the top bar, its top 13 % into the stage, at most
+    /// 88 % of the window wide, as tall as its text and results; set at once
+    /// as it grows, as the line is.
+    func placePalette() {
+        let stage = max(0, bounds.height - AgentTopBar.height)
+        paletteView.listLimit = (stage * 0.46).rounded()
+        let paletteWidth = min(AgentPaletteView.maxWidth, (bounds.width * 0.88).rounded())
+        set(paletteView, NSRect(
+            x: ((bounds.width - paletteWidth) / 2).rounded(), y: AgentTopBar.height + (stage * 0.13).rounded(),
+            width: paletteWidth, height: paletteView.preferredHeight))
     }
 
     /// The line: centred, at most 960 wide and 24 from each side, its bottom
