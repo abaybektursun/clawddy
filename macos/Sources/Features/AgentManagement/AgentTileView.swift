@@ -129,6 +129,9 @@ final class AgentTileView: NSView, AgentActivationClickSafeRegion, AgentHoverabl
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityHelp("Press Return to open its terminal, or type to reply.")
+        // VoiceOver reads it from the start: its drawing waits for the
+        // grid's refresh tick, a few tiles at a time, and its words with it.
+        applyAccessibility(shownNow(agent))
         observer = AgentObserver { [weak self] in self?.refresh() }
     }
 
@@ -300,6 +303,11 @@ final class AgentTileView: NSView, AgentActivationClickSafeRegion, AgentHoverabl
         body.name = "tileBody:\(shown.name)"
         seam.name = "tileSeam:\(shown.name)"
         surface.name = "tileSurface:\(shown.name)"
+        applyAccessibility(shown)
+    }
+
+    /// What VoiceOver reads of it: its name, state, age and sentence.
+    private func applyAccessibility(_ shown: Shown) {
         setAccessibilityLabel(shown.name)
         let ageSeconds = now().timeIntervalSince(shown.changedAt)
         setAccessibilityValue("\(shown.state.name), \(shown.state.agePhrase(ageSeconds)). \(shown.sentence.text)")

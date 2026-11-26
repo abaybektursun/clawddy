@@ -110,15 +110,6 @@ struct AntigravityProvider: Sendable {
             .appendingPathComponent("agy", isDirectory: true)
     }
 
-    /// Where the hook folder was before it moved out of the data folder.
-    /// A conversation made with it still lists it; removed, agy skips it
-    /// without a word (cli-facts, "A remembered folder that no longer
-    /// exists"), so a resume runs one set of hooks.
-    static func formerHookFolder(root: AgentDataRoot, agentID: UUID) -> URL {
-        root.runtimeDir.appendingPathComponent(agentID.uuidString, isDirectory: true)
-            .appendingPathComponent("agy", isDirectory: true)
-    }
-
     /// The hooks file agy loads from a folder given with `--add-dir`: each
     /// event of the table runs the hook script with this launch's identity
     /// as arguments.
@@ -152,8 +143,6 @@ struct AntigravityProvider: Sendable {
         let folder = Self.hookFolder(root: root, agentID: request.agentID)
         let hooksFile = folder.appendingPathComponent(".agents/hooks.json")
         do {
-            let former = Self.formerHookFolder(root: root, agentID: request.agentID)
-            if former != folder { try FileManager.default.removeItemIfPresent(at: former) }
             try FileManager.default.createDirectory(
                 at: hooksFile.deletingLastPathComponent(),
                 withIntermediateDirectories: true,
@@ -162,6 +151,9 @@ struct AntigravityProvider: Sendable {
                 withJSONObject: hooks(agentID: request.agentID, generation: request.launchGeneration),
                 options: [.prettyPrinted, .sortedKeys])
             try AgentConfig.atomicWrite(data, to: hooksFile)
+            // Its commands carry the agent's identity, as Claude's settings
+            // file does: the person's alone.
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: hooksFile.path)
         } catch {
             // Without its hooks the agent would run with no conversation to
             // resume and no prompts or replies to show.
@@ -233,6 +225,6 @@ struct AntigravityProvider: Sendable {
     }
 
     func cleanup(agentID: UUID) throws {
-        try FileManager.default.removeItemIfPresent(at: Self.hookFolder(root: root, agentID: agentID))
+        try FileManager.default.removeItemIfPresent(at: Self.hookFolder(root: root, agentID: agentID).deletingLastPathComponent())
     }
 }

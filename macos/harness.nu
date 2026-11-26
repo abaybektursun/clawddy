@@ -305,6 +305,13 @@ def "main shot" [
     main send $request --dir $dir
 }
 
+# The run's agy hook folders, which the app keeps in the per-user cache
+# folder (`AgentHarness.root(of:)`), outside the harness folder.
+def remove-hook-folders [dir: string] {
+    let folder = (^getconf DARWIN_USER_CACHE_DIR | str trim | path join "clawddy-harness" ($dir | path basename))
+    if ($folder | path exists) { rm -r $folder }
+}
+
 # Quit the app started on the folder, and only that process.
 def "main stop" [
     --dir: string   # the harness folder; default: the one last started
@@ -319,6 +326,7 @@ def "main stop" [
     let deadline = (date now) + 10sec
     loop {
         if (^ps -p $pid | complete).exit_code != 0 {
+            remove-hook-folders $dir
             print $"stopped pid ($pid)"
             return
         }
@@ -327,5 +335,6 @@ def "main stop" [
     }
     # It did not quit: end that pid, which `running-pid` matched to this app.
     ^kill $pid
+    remove-hook-folders $dir
     print $"killed pid ($pid)"
 }

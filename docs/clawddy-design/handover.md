@@ -114,8 +114,8 @@ Not proven, or open:
   path and the model takes the first as its default command folder; inside the data folder the hook folder sorted
   first, and in 3 of 3 runs the model first looked for the project's `notes.txt` there. It now lives in the per-user
   cache folder (`/var/folders/…/C/<app data folder name>/<agent id>/agy`), which sorts after any project under
-  `/Users` or `/Volumes`: 0 of 3 runs touched it (plan decision 1). A launch removes the former folder, so a
-  conversation made with it runs one set of hooks. A project under `/var` would still sort after it.
+  `/Users` or `/Volumes`: 0 of 3 runs touched it (plan decision 1). It would still sort before a project under
+  `/var` itself. Closing an agent's terminal removes the agent's hook folder; `harness.nu stop` removes the run's.
 - A usage limit from the real agy: cannot be forced; not seen.
 - A real sign-in completed after start-up: not done (it would use the owner's account).
 

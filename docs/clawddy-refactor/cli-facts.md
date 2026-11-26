@@ -1365,7 +1365,10 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   with it. `stage6/donelink`: a 239-character first line with a link, bold and code came as its first 199 characters
   and "…", the reply's later lines (an empty one, one starting with two spaces) only in the Stop. 7 more captured
   `done`s have no transcript to compare (probes without hooks). No captured reply began with a blank line or spaces;
-  that case is not seen. So an uncut line is the reply's whole first line (the reply equals it or goes on after a
+  that case is not seen; nor is a carriage return, spaces or tabs before a line break, or a cut line with a character
+  made of several Unicode scalars in its first 199 (38 replies in 18 probe conversations: none). The app matches an
+  uncut line only before a bare line feed and counts a cut in characters, so such a reply, if agy sends one, shows
+  `done`'s first line instead of its whole text: no other harm. So an uncut line is the reply's whole first line (the reply equals it or goes on after a
   line break), and only a 200-character line ending in "…" is a beginning. Hook records keep their order, so a
   Stop that came before a turn's prompt record (or agy's own start) is an earlier turn's, even with the same first
   line. A Stop that does not open with its turn's `done` line is another turn's or an earlier step's:

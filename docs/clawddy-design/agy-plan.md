@@ -98,10 +98,9 @@ what it saw, it named the hook folder its default command folder. So the folder
 is `<per-user cache folder>/<app data folder name>/<agent id>/agy`, the cache
 folder being macOS's `/var/folders/…/C/` (`DARWIN_USER_CACHE_DIR`), which sorts
 after every project under `/Users` or `/Volumes`; there 0 of 3 runs touched it
-and the model names the project first and as its default. A project under
-`/var` itself would still sort first; none is expected. A launch removes the
-folder's former place, so a conversation made with it runs one set of hooks:
-agy skips a remembered folder that is gone.
+and the model names the project first and as its default. The hook folder
+would still sort before a project under `/var` itself; none is expected. No
+shipped build used the folder's former place, so no conversation lists it.
 
 Rejected: writing into the project (shows up in the owner's git status and in
 their own agy sessions); a global hook (changes every agy session on the

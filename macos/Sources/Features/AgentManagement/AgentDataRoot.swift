@@ -17,13 +17,13 @@ struct AgentDataRoot: Equatable, Sendable {
     /// sorted by path and gives the model the first as the one it works in
     /// (cli-facts, "Workspace folders, sorted"), so the app's are in the
     /// per-user cache folder under `/var/folders`, which sorts after every
-    /// project under `/Users` or `/Volumes`. Inside `runtime` when none is
-    /// given (tests).
+    /// project under `/Users` or `/Volumes`. Inside the root when none is
+    /// given (tests). Each agent's folder there is its own alone.
     let agyHookBase: URL
 
     init(url: URL, agyHookBase: URL? = nil) {
         self.url = url
-        self.agyHookBase = agyHookBase ?? url.appendingPathComponent("runtime", isDirectory: true)
+        self.agyHookBase = agyHookBase ?? url.appendingPathComponent("agy-hooks", isDirectory: true)
     }
 
     /// The per-user cache folder macOS keeps under `/var/folders`

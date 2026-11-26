@@ -132,10 +132,14 @@ extension AgentInteractionTests {
             d.grid.select(.only(review))
             #expect(d.selectedNames == ["review"])
             let others = d.grid.order.filter { $0 != review }
-            // Every tile has drawn what it shows (the refresh tick draws
-            // tiles not yet drawn, a few at a time).
+            // Every tile has drawn what it shows (the refresh tick gives
+            // tiles not yet drawn their text, a few at a time, and each text
+            // layer draws it at the next display pass).
+            func displayed(_ layer: CALayer) -> Bool {
+                !layer.needsDisplay() && (layer.sublayers ?? []).allSatisfy(displayed)
+            }
             try await d.waitUntil("every tile drew", seconds: 3) {
-                d.grid.tiles.values.allSatisfy { $0.hasDrawnScreen && !$0.isStale }
+                d.grid.tiles.values.allSatisfy { $0.hasDrawnScreen && !$0.isStale && $0.layer.map(displayed) == true }
             }
             let frames = others.map { d.grid.tiles[$0]?.frame }
             let draws = others.map { d.grid.tiles[$0]?.draws ?? 0 }

@@ -684,6 +684,21 @@ struct AgentAntigravityInterleavingTests {
         #expect(state.record.prompts.map(\.text) == ["sleep, then say slept"])
     }
 
+    /// Review of the fixes 2, trigger A, in the order that review found the
+    /// double completion in: the wake-up turn's `done` before its self-start
+    /// record and its Stop. Two completions, the wake-up's reply last.
+    @Test func aWakeUpTurnsDoneBeforeItsSelfStartAndStop() throws {
+        let order: [Item] = [.working, .prompt("sleep, then say slept"), .stop("Waiting.\nThe command runs."), .done("Waiting."),
+                             .working, .done("slept"), .selfStart, .stop("slept\nThe command ended.")]
+        var state = Self.finishedAgent(unread: false)
+        var completions = 0
+        for item in order { let r = try Self.reduce(state, item, viewed: false); state = r.0; completions += r.1 }
+        #expect(completions == 2)
+        #expect(state.record.state == .finished && state.record.lastMessage == "slept\nThe command ended.")
+        #expect(state.record.prompts.map(\.text) == ["sleep, then say slept"])
+        #expect(state.pendingMessage == nil && !state.hiddenTurn)
+    }
+
     /// Review of the pairing, fault 2: the Stop of the turn before comes
     /// once the next turn works (before that turn's prompt record: the hook
     /// channel keeps its order), and that turn's `done` before its own

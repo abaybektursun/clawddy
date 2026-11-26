@@ -9,7 +9,9 @@ import UserNotifications
 /// person (`concealEveryWindow`); the workspace window, also under every
 /// normal window and out of every switcher, acts as the key and main window
 /// (`AgentWorkspaceWindow.actsAsKey`). It reads and writes Clawddy's data
-/// only under `<dir>`:
+/// under `<dir>`, except agy's hook folders, which are where the app keeps
+/// them, in `<per-user cache folder>/clawddy-harness/<dir's name>/`
+/// (`root(of:)`; `harness.nu stop` removes them):
 ///
 /// - `scene.json`: the scene; `harness.nu help` documents its format
 /// - `root/`: the data root, written from the scene when it has no `agents.json`

@@ -66,8 +66,13 @@ struct AgentAntigravityLaunchTests {
             #expect(NSArray(array: value as? [Any] ?? []).isEqual(to: [["type": "command", "command": command, "timeout": 10]]), "\(event)")
         }
 
+        // The person's alone, as Claude's settings file is.
+        let mode = try FileManager.default.attributesOfItem(atPath: folder.appendingPathComponent(".agents/hooks.json").path)[.posixPermissions]
+        #expect((mode as? NSNumber)?.intValue == 0o600)
+
+        // Closing removes the agent's folder, not only `agy` inside it.
         try sandbox.provider.cleanup(agentID: first.agentID)
-        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        #expect(!FileManager.default.fileExists(atPath: folder.deletingLastPathComponent().path))
 
         // It goes with the agent's other files.
         _ = try sandbox.provider.prepareLaunch(first).get()
@@ -91,24 +96,6 @@ struct AgentAntigravityLaunchTests {
         for project in ["/Users/someone/projects/lagoon", "/Users/someone/Desktop/reef", "/Volumes/Work/harbour", "/private/tmp/tide"] {
             #expect(project < dev.path && project < production.path, "\(project)")
         }
-    }
-
-    /// A launch removes the hook folder of the place it had before (inside
-    /// the data folder): a conversation made with it still lists it, and
-    /// agy skips a listed folder that is gone, so a resume runs one set of
-    /// hooks, the new folder's.
-    @Test func aLaunchRemovesTheFormerHookFolder() throws {
-        let sandbox = try AgySandbox()
-        defer { sandbox.remove() }
-        let request = sandbox.request()
-        let former = AntigravityProvider.formerHookFolder(root: sandbox.root, agentID: request.agentID)
-        try FileManager.default.createDirectory(at: former.appendingPathComponent(".agents"), withIntermediateDirectories: true)
-        try Data("{}".utf8).write(to: former.appendingPathComponent(".agents/hooks.json"))
-        let launch = try sandbox.provider.prepareLaunch(request).get()
-        #expect(!FileManager.default.fileExists(atPath: former.path))
-        let folder = AntigravityProvider.hookFolder(root: sandbox.root, agentID: request.agentID)
-        #expect(Array(launch.arguments[0...1]) == ["--add-dir", folder.path])
-        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent(".agents/hooks.json").path))
     }
 
     /// A launch whose hook folder cannot be written fails, saying where.
