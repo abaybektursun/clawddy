@@ -125,6 +125,9 @@ Not proven, or open:
   after its retries, a Stop with an `error` matching agy's own quota rule; the app shows that as paused at the usage
   limit, with the `error` report's words and no reset time. The `error` report of a quota failure itself was not seen
   (with a gateway agy shows its first-run setup, whose terms were not accepted), nor a limit from Google's servers.
+- The trust dialog's "Yes" with the real agy stays unproven: no variable moves agy's settings away from the owner's
+  (`ANTIGRAVITY_EXECUTABLE_DATA_DIR` is for its sidecars). `AGY_CLI_HIDE_ACCOUNT_INFO=1` keeps the account out of
+  the banner, for pictures.
 - A real sign-in completed after start-up: not done (it would use the owner's account).
 
 ## Build

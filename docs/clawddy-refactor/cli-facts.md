@@ -1399,6 +1399,11 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   failure's ("…request failed… connection refused") does not. The app reads the Stop's `error` with that rule (as
   the hook script keeps it, spaces and parentheses dropped): a match is a usage limit (paused), and the `error` report
   around it gives the limit its words; no reset time is given, so none is shown.
+- **`ANTIGRAVITY_EXECUTABLE_DATA_DIR`** does not move agy's data folder: set to an empty folder, agy left it empty and
+  used `~/.gemini/antigravity-cli` as before (a new log there). In the program text it is the data folder agy gives
+  its sidecars. No variable was found that moves agy's settings while its sign-in works.
+- **`AGY_CLI_HIDE_ACCOUNT_INFO=1`** keeps the account's address and plan out of the banner (the changelog's words;
+  seen: the banner line shows the folder and the model only). For pictures of a real agy.
 - **Several queued messages run together** (probe `stage5/queue2`, two turns): two messages typed while a turn
   ran waited for its `done`, then ran as one turn whose PreInvocation 0 had `lastUserInput` "Reply with the word
   one.\nReply with the word two." (joined by a newline), one Stop, one `done`.
