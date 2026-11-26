@@ -54,7 +54,7 @@ struct AgentAntigravityLaunchTests {
         let two = try sandbox.provider.prepareLaunch(second).get()
         #expect(one.arguments[0...1] == two.arguments[0...1])
         let folder = URL(fileURLWithPath: two.arguments[1])
-        #expect(folder == sandbox.root.runtimeDir.appendingPathComponent("\(first.agentID.uuidString)/agy", isDirectory: true))
+        #expect(folder == sandbox.root.agyHookBase.appendingPathComponent("\(first.agentID.uuidString)/agy", isDirectory: true))
 
         let hooks = try #require(JSONSerialization.jsonObject(
             with: Data(contentsOf: folder.appendingPathComponent(".agents/hooks.json"))) as? [String: [String: Any]])
@@ -76,13 +76,48 @@ struct AgentAntigravityLaunchTests {
         #expect(!FileManager.default.fileExists(atPath: folder.path))
     }
 
+    /// agy lists its workspace folders sorted by path and gives the model
+    /// the first as the one it works in (cli-facts, "Workspace folders,
+    /// sorted"): the app's hook folder sorts after any project under
+    /// `/Users` or `/Volumes`, and each app identity has its own.
+    @Test func theAppsHookFolderSortsAfterItsProjects() {
+        let home = URL(fileURLWithPath: "/Users/someone", isDirectory: true)
+        let agent = UUID()
+        let dev = AntigravityProvider.hookFolder(
+            root: AgentDataRoot.resolve(directoryName: "clawddy-dev", isRunningTests: false, homeDirectory: home), agentID: agent)
+        let production = AntigravityProvider.hookFolder(root: AgentDataRoot.production(homeDirectory: home), agentID: agent)
+        #expect(dev.path.hasPrefix("/var/folders/") && dev.path.hasSuffix("/clawddy-dev/\(agent.uuidString)/agy"))
+        #expect(production.path.hasSuffix("/ghostty-agents/\(agent.uuidString)/agy"))
+        for project in ["/Users/someone/projects/lagoon", "/Users/someone/Desktop/reef", "/Volumes/Work/harbour", "/private/tmp/tide"] {
+            #expect(project < dev.path && project < production.path, "\(project)")
+        }
+    }
+
+    /// A launch removes the hook folder of the place it had before (inside
+    /// the data folder): a conversation made with it still lists it, and
+    /// agy skips a listed folder that is gone, so a resume runs one set of
+    /// hooks, the new folder's.
+    @Test func aLaunchRemovesTheFormerHookFolder() throws {
+        let sandbox = try AgySandbox()
+        defer { sandbox.remove() }
+        let request = sandbox.request()
+        let former = AntigravityProvider.formerHookFolder(root: sandbox.root, agentID: request.agentID)
+        try FileManager.default.createDirectory(at: former.appendingPathComponent(".agents"), withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: former.appendingPathComponent(".agents/hooks.json"))
+        let launch = try sandbox.provider.prepareLaunch(request).get()
+        #expect(!FileManager.default.fileExists(atPath: former.path))
+        let folder = AntigravityProvider.hookFolder(root: sandbox.root, agentID: request.agentID)
+        #expect(Array(launch.arguments[0...1]) == ["--add-dir", folder.path])
+        #expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent(".agents/hooks.json").path))
+    }
+
     /// A launch whose hook folder cannot be written fails, saying where.
     @Test func anUnwritableHookFolderFailsTheLaunch() throws {
         let sandbox = try AgySandbox()
         defer { sandbox.remove() }
         let request = sandbox.request()
-        try FileManager.default.createDirectory(at: sandbox.root.runtimeDir, withIntermediateDirectories: true)
-        try Data().write(to: sandbox.root.runtimeDir.appendingPathComponent(request.agentID.uuidString))
+        try FileManager.default.createDirectory(at: sandbox.root.agyHookBase, withIntermediateDirectories: true)
+        try Data().write(to: sandbox.root.agyHookBase.appendingPathComponent(request.agentID.uuidString))
         guard case .failure(let issue) = sandbox.provider.prepareLaunch(request) else {
             Issue.record("A launch ran without its hooks.")
             return
@@ -1316,7 +1351,9 @@ final class AgySandbox {
 
     init() throws {
         folder = FileManager.default.temporaryDirectory.appendingPathComponent("clawddy-agy-\(UUID().uuidString)", isDirectory: true)
-        root = AgentDataRoot(url: folder.appendingPathComponent("root", isDirectory: true))
+        root = AgentDataRoot(
+            url: folder.appendingPathComponent("root", isDirectory: true),
+            agyHookBase: folder.appendingPathComponent("hook-cache", isDirectory: true))
         home = folder.appendingPathComponent("home", isDirectory: true)
         bin = folder.appendingPathComponent("bin", isDirectory: true)
         data = home.appendingPathComponent(".gemini/antigravity-cli", isDirectory: true)

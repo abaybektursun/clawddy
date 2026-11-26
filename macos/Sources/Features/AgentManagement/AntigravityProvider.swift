@@ -100,11 +100,21 @@ struct AntigravityProvider: Sendable {
     }
 
     /// The agent's hook folder, added to each of its launches with
-    /// `--add-dir`: inside its runtime folder, which goes with the agent's
-    /// other files (`AgentDataRoot.removeFiles`). Its path never changes: a
-    /// resumed conversation runs the hooks of every folder it was made with,
-    /// so a new path would run both sets.
+    /// `--add-dir`: under `AgentDataRoot.agyHookBase`, so that it sorts after
+    /// the project, and removed with the agent's other files
+    /// (`AgentDataRoot.removeFiles`). Its path never changes: a resumed
+    /// conversation runs the hooks of every folder it was made with, so a
+    /// new path would run both sets.
     static func hookFolder(root: AgentDataRoot, agentID: UUID) -> URL {
+        root.agyHookBase.appendingPathComponent(agentID.uuidString, isDirectory: true)
+            .appendingPathComponent("agy", isDirectory: true)
+    }
+
+    /// Where the hook folder was before it moved out of the data folder.
+    /// A conversation made with it still lists it; removed, agy skips it
+    /// without a word (cli-facts, "A remembered folder that no longer
+    /// exists"), so a resume runs one set of hooks.
+    static func formerHookFolder(root: AgentDataRoot, agentID: UUID) -> URL {
         root.runtimeDir.appendingPathComponent(agentID.uuidString, isDirectory: true)
             .appendingPathComponent("agy", isDirectory: true)
     }
@@ -142,6 +152,8 @@ struct AntigravityProvider: Sendable {
         let folder = Self.hookFolder(root: root, agentID: request.agentID)
         let hooksFile = folder.appendingPathComponent(".agents/hooks.json")
         do {
+            let former = Self.formerHookFolder(root: root, agentID: request.agentID)
+            if former != folder { try FileManager.default.removeItemIfPresent(at: former) }
             try FileManager.default.createDirectory(
                 at: hooksFile.deletingLastPathComponent(),
                 withIntermediateDirectories: true,

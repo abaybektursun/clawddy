@@ -110,10 +110,12 @@ Not proven, or open:
   answer is proven against the stand-in.
 - In standard start mode agy runs in the owner's default mode (auto), which approves safe commands without asking;
   a permission request needs default mode (Shift+Tab in agy's terminal).
-- The hook folder is part of the agent's workspace, and the model sees it: in the 14-turn session it once looked for a
-  project file there (a failed read), `cd`'d into the project in every command, and when asked called the folder a
-  runtime directory it took for its default command folder (agy's real working folder was the project). No file
-  went there. A cost of decision 1 of the plan; nothing in the app changes it.
+- The hook folder is part of the agent's workspace, second in the model's list. agy sorts the workspace folders by
+  path and the model takes the first as its default command folder; inside the data folder the hook folder sorted
+  first, and in 3 of 3 runs the model first looked for the project's `notes.txt` there. It now lives in the per-user
+  cache folder (`/var/folders/…/C/<app data folder name>/<agent id>/agy`), which sorts after any project under
+  `/Users` or `/Volumes`: 0 of 3 runs touched it (plan decision 1). A launch removes the former folder, so a
+  conversation made with it runs one set of hooks. A project under `/var` would still sort after it.
 - A usage limit from the real agy: cannot be forced; not seen.
 - A real sign-in completed after start-up: not done (it would use the owner's account).
 

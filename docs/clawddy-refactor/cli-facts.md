@@ -1254,7 +1254,7 @@ No PostInvocation, **no Stop**, and nothing more in the transcript after the pro
 
 ### Resuming by hand
 
-- **A conversation keeps the folders it was made with**, so one Clawddy made runs the agent's hooks (`<data root>/runtime/<agent id>/agy/.agents/hooks.json`) when the person resumes it by hand in another terminal while that folder exists. Clawddy removes the folder when the agent's terminal closes (and with the agent), and keeps it after a quit. Records from such a hand run carry the generation of the agent's last launch: the app takes them only while that launch runs (they then count as its own: binding, prompts, replies; the two would share one conversation, which agy allows); otherwise they are a stale launch's and change nothing but the agent's last-active time.
+- **A conversation keeps the folders it was made with**, so one Clawddy made runs the agent's hooks (`<per-user cache folder>/<app data folder name>/<agent id>/agy/.agents/hooks.json`; before the move `<data root>/runtime/<agent id>/agy`) when the person resumes it by hand in another terminal while that folder exists. Clawddy removes the folder when the agent's terminal closes (and with the agent), and keeps it after a quit. Records from such a hand run carry the generation of the agent's last launch: the app takes them only while that launch runs (they then count as its own: binding, prompts, replies; the two would share one conversation, which agy allows); otherwise they are a stale launch's and change nothing but the agent's last-active time.
 - **A remembered folder that no longer exists is skipped without a word**: a conversation made with `--add-dir <folder>`, the folder deleted, then `--conversation <id>` with no folder: no message on screen, agy's log says "loaded 0 named hooks from 0 hooks.json file(s)", and a prompt runs as usual (probe `stage2/gone-a`, `gone-b`, two model turns).
 
 ### The presence lock
@@ -1366,6 +1366,17 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   `done`s have no transcript to compare (probes without hooks). No captured reply began with a blank line or spaces;
   that case is not seen. A Stop that does not begin with its turn's `done` is another turn's or an earlier step's:
   the wake-up's first Stop ("Waiting…", `stage5/wake2`) comes inside the turn whose `done` is the wake-up's reply.
+- **Workspace folders, sorted** (the hook-place probes, 9 model turns, `redesign-notes/agy/stage6/hookplace.txt`): agy
+  sorts its workspace folders by path, whatever the order of the launch folder and `--add-dir` (all 138 conversations
+  in agy's `cache/conversation_metadata.json` list `WorkspaceURIs` sorted; the hook records' `workspacePaths` too),
+  and the model takes the first as its folder and its "default command folder". Asked "List your workspace folders in
+  the order you were given them and name your default command folder", it answered the sorted order and the first
+  folder, with the hook folder sorting first (`…/s7-a-out/hookdir` before `…/s7-a-ws`) and last alike. Given
+  "Read notes.txt and summarize it in one sentence.", 3 of 3 runs with the hook folder first read `notes.txt` there
+  first (a failed read, then the project's); 0 of 3 with it last. agy keeps `/var/folders/…` as given (no
+  `/private` added), so a folder there sorts after `/Users` and `/Volumes`; hooks load from it with no trust
+  question. No other way loads hooks: `--settings` hooks are not loaded (docs), the global and plugin places are
+  under `~/.gemini/config`, and no environment variable moves that folder (binary strings).
 - **Several queued messages run together** (probe `stage5/queue2`, two turns): two messages typed while a turn
   ran waited for its `done`, then ran as one turn whose PreInvocation 0 had `lastUserInput` "Reply with the word
   one.\nReply with the word two." (joined by a newline), one Stop, one `done`.

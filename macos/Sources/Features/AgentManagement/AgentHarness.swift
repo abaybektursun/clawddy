@@ -196,8 +196,14 @@ final class AgentHarness {
         method_setImplementation(mouseMethod, imp_implementationWithBlock(pinnedMouse))
     }
 
+    /// agy's hook folders where the app keeps them, in the per-user cache
+    /// folder, so a harness run with the real agy sees its folders in the
+    /// app's order.
     nonisolated static func root(of directory: URL) -> AgentDataRoot {
-        AgentDataRoot(url: directory.appendingPathComponent("root", isDirectory: true))
+        AgentDataRoot(
+            url: directory.appendingPathComponent("root", isDirectory: true),
+            agyHookBase: AgentDataRoot.userCacheDirectory
+                .appendingPathComponent("clawddy-harness/\(directory.lastPathComponent)", isDirectory: true))
     }
 
     let directory: URL

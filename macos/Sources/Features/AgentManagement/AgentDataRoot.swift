@@ -12,6 +12,29 @@ struct AgentDataRoot: Equatable, Sendable {
     static let devBundleIdentifier = "com.mitchellh.ghostty.clawddy-dev"
 
     let url: URL
+    /// Where agy's hook folders go, one per agent
+    /// (`AntigravityProvider.hookFolder`). agy lists its workspace folders
+    /// sorted by path and gives the model the first as the one it works in
+    /// (cli-facts, "Workspace folders, sorted"), so the app's are in the
+    /// per-user cache folder under `/var/folders`, which sorts after every
+    /// project under `/Users` or `/Volumes`. Inside `runtime` when none is
+    /// given (tests).
+    let agyHookBase: URL
+
+    init(url: URL, agyHookBase: URL? = nil) {
+        self.url = url
+        self.agyHookBase = agyHookBase ?? url.appendingPathComponent("runtime", isDirectory: true)
+    }
+
+    /// The per-user cache folder macOS keeps under `/var/folders`
+    /// (`DARWIN_USER_CACHE_DIR`), as macOS names it: not resolved through the
+    /// `/var` link, which agy keeps as given.
+    static var userCacheDirectory: URL {
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        let length = confstr(_CS_DARWIN_USER_CACHE_DIR, &buffer, buffer.count)
+        guard length > 0, length <= buffer.count else { fatalError("The per-user cache folder could not be read.") }
+        return URL(fileURLWithPath: String(cString: buffer), isDirectory: true)
+    }
 
     var agentsFile: URL { url.appendingPathComponent("agents.json") }
     var stateFile: URL { url.appendingPathComponent("state.json") }
@@ -47,15 +70,19 @@ struct AgentDataRoot: Equatable, Sendable {
         guard let directoryName, !directoryName.isEmpty else {
             fatalError("Info.plist key \(infoKey) is missing or empty; set CLAWDDY_DATA_DIRECTORY_NAME.")
         }
-        return AgentDataRoot(url: homeDirectory
-            .appendingPathComponent(".config", isDirectory: true)
-            .appendingPathComponent(directoryName, isDirectory: true))
+        return AgentDataRoot(
+            url: homeDirectory
+                .appendingPathComponent(".config", isDirectory: true)
+                .appendingPathComponent(directoryName, isDirectory: true),
+            agyHookBase: userCacheDirectory.appendingPathComponent(directoryName, isDirectory: true))
     }
 
     static func production(homeDirectory: URL) -> AgentDataRoot {
-        AgentDataRoot(url: homeDirectory
-            .appendingPathComponent(".config", isDirectory: true)
-            .appendingPathComponent(productionDirectoryName, isDirectory: true))
+        AgentDataRoot(
+            url: homeDirectory
+                .appendingPathComponent(".config", isDirectory: true)
+                .appendingPathComponent(productionDirectoryName, isDirectory: true),
+            agyHookBase: userCacheDirectory.appendingPathComponent(productionDirectoryName, isDirectory: true))
     }
 
     /// Where a one-time change of this root backs up what it replaces:
@@ -106,6 +133,7 @@ struct AgentDataRoot: Equatable, Sendable {
             try fm.removeItemIfPresent(at: statusDir.appendingPathComponent(name))
         }
         try fm.removeItemIfPresent(at: runtimeDir.appendingPathComponent(agentID.uuidString))
+        try fm.removeItemIfPresent(at: agyHookBase.appendingPathComponent(agentID.uuidString))
     }
 
     /// Empties the launch folder, creating it if needed. Called once at

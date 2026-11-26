@@ -88,12 +88,30 @@ each agent gets `<Clawddy data>/agy/<agent id>/.agents/hooks.json`, written at
 launch, whose commands are the existing hook script with the agent's identity
 as arguments. This is the same shape as Claude's per-agent settings file.
 
+Where the folder lives matters (the hook-place probes): agy lists its workspace
+folders **sorted by path**, whatever the argument order, and the model takes
+the first as its own folder and default command folder. A hook folder inside
+the data folder (`~/.config/<app>/runtime/…`, or the harness's `root/runtime`)
+sorts before most projects: in 3 of 3 runs of "Read notes.txt and summarize it
+in one sentence." the model first read `notes.txt` in the hook folder, and asked
+what it saw, it named the hook folder its default command folder. So the folder
+is `<per-user cache folder>/<app data folder name>/<agent id>/agy`, the cache
+folder being macOS's `/var/folders/…/C/` (`DARWIN_USER_CACHE_DIR`), which sorts
+after every project under `/Users` or `/Volumes`; there 0 of 3 runs touched it
+and the model names the project first and as its default. A project under
+`/var` itself would still sort first; none is expected. A launch removes the
+folder's former place, so a conversation made with it runs one set of hooks:
+agy skips a remembered folder that is gone.
+
 Rejected: writing into the project (shows up in the owner's git status and in
 their own agy sessions); a global hook (changes every agy session on the
 machine); a plugin (installing one edits the owner's config).
 
 Cost of this choice: the folder is part of the agent's workspace, so the
-agent can see it. It holds one small file.
+agent can see it, second in its list. It holds one small file. No other way
+loads hooks without writing the owner's files: `--settings` hooks are not
+loaded (docs), the global and plugin places are under `~/.gemini/config`, and
+the binary reads no variable that moves that folder.
 
 **2. `--settings` is not used.**
 It works per session and is not saved (probed), but a key passed there
@@ -277,7 +295,7 @@ only visible difference between agents is the name on the chip.
 | What agy reports when the usage limit is reached | Still open: cannot be forced. An `error` report's text becomes the problem's text in the record and on the tile; a usage-limit message would land there (cli-facts, "Under the app"). The same gap is open for Claude and Codex. |
 | What a signed-out agy reports after start-up | Proven at start (stage 6, a throwaway `HOME`): `blocked kind=auth` stands, the login method menu shows, the tile shows the login problem after 2 s. A sign-in completed afterwards: not done. |
 | `state=error` on a live failure | Proven (stage 6): before a turn, and during one after agy's retries (a Stop with `terminationReason` "ERROR", then `error`). |
-| Whether a hook folder inside the workspace changes what the agent does | Measured (stage 6, 14 turns): no file went there and nothing was edited there, but the model sees the folder: one failed read there, explicit `cd`s into the project, and it took the folder for its default command folder. A cost of decision 1. |
+| Whether a hook folder inside the workspace changes what the agent does | Measured (stage 6, 14 turns): no file went there, but with the folder sorting first the model read there once and took it for its default command folder. Cause and fix (the hook-place probes): agy sorts the folders by path; the folder moved to the per-user cache folder, which sorts after the project: 0 of 3 runs touched it against 3 of 3 before (decision 1). |
 
 ## Later options, not in this plan
 
