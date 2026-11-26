@@ -237,7 +237,8 @@ enum AgentHookRuntime {
         TRIGGER=$(sanitize "$(extract trigger)")
         # A failure's error: Claude's kind, or agy's own words, bounded and
         # with its spaces, so its words stay apart (agy's quota rule).
-        ERROR=$(extract error | /usr/bin/head -c 65536 | LC_ALL=C /usr/bin/tr -cd '[:alnum:] _.:/=-' | /usr/bin/head -c 4096)
+        ERROR=$(extract error | /usr/bin/head -c 65536)
+        ERROR=$(printf '%s' "$ERROR" | LC_ALL=C /usr/bin/tr '\\n\\t\\r' '   ' | LC_ALL=C /usr/bin/tr -cd '[:alnum:] _.:/=-' | /usr/bin/head -c 4096)
         REASON=$(sanitize "$(extract reason)")
         SOURCE=$(sanitize "$(extract source)")
         EVENT_ID=$(sanitize "$(/usr/bin/uuidgen 2>/dev/null)")

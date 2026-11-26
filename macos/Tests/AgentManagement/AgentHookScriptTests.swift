@@ -236,7 +236,6 @@ struct AgentHookScriptTests {
         #expect(!FileManager.default.fileExists(atPath: fixture.status.appendingPathComponent("hook-errors.log").path))
     }
 
-    /// A payload without the field records no text, never an empty one; a
     /// An error is kept bounded and with its spaces, so agy's quota rule
     /// sees "429" as a word: at most 4 KiB, only safe characters; Claude's
     /// kinds and a missing error as before (review of the quota commit).
@@ -257,6 +256,10 @@ struct AgentHookScriptTests {
             "error": "generating and executing: request failed: HTTP 429 (Too Many Requests) \"quoted\" status=429",
         ])
         #expect(agy.error == "generating and executing: request failed: HTTP 429 Too Many Requests quoted status=429")
+        // Line breaks and tabs keep the words apart.
+        let broken = try record(.antigravity, ["hookEventName": "Stop", "conversationId": "c", "error": "HTTP\n429\tToo Many\r\nRequests"])
+        #expect(broken.error == "HTTP 429 Too Many  Requests")
+        #expect(broken.error.map(AntigravityProvider.isQuota) == true)
         #expect(agy.error.map(AntigravityProvider.isQuota) == true)
         let long = try record(.antigravity, ["hookEventName": "Stop", "conversationId": "c", "error": String(repeating: "page ", count: 4000)])
         #expect(long.error?.utf8.count == 4096)
@@ -266,6 +269,7 @@ struct AgentHookScriptTests {
         #expect(none.error == nil)
     }
 
+    /// A payload without the field records no text, never an empty one; a
     /// failure records Claude's kind and its text; a question comes from deep
     /// in the payload; a session's end and start record why and how.
     @Test func eachEventRecordsItsOwnFields() throws {

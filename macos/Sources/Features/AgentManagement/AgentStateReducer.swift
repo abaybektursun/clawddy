@@ -122,8 +122,9 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// the `error` report that makes the failure makes it a usage limit.
     /// Cleared when the turn ends and where a waiting Stop is dropped.
     var usageLimitNoted = false
-    /// This turn's start record (its prompt, or agy's own start) has come,
-    /// so a Stop that comes now is this turn's. Cleared when a turn ends.
+    /// This turn's start record (its prompt, or agy's own start) has come
+    /// while the turn was under way, so a Stop that comes now is this
+    /// turn's. Never set with no turn under way; cleared when a turn ends.
     var turnStartRecorded = false
     /// Prompts Clawddy sent while the turn worked, which the CLI holds
     /// until the turn ends (`AgentReportRules.queuedMessagesRunNextTurn`).
@@ -394,6 +395,7 @@ private struct Reduction {
             state.processState = .exited
             state.activityState = .unknown
             state.turnState = .inactive
+            forgetTurnMarks()
             state.resumingSessionID = nil
             state.inputReady = false
 
@@ -492,6 +494,7 @@ private struct Reduction {
             state.exitStatus = status
             state.activityState = .unknown
             state.turnState = .inactive
+            forgetTurnMarks()
             state.inputReady = false
             if failing {
                 stop(stillLaunching
@@ -566,7 +569,9 @@ private struct Reduction {
                 state.pendingMessage = nil
                 state.usageLimitNoted = false
             }
-            state.turnStartRecorded = true
+            // Only for a turn under way: a record that comes with none (before
+            // its `working`, or late after an interrupt) marks nothing.
+            if case .active = underWay { state.turnStartRecorded = true }
             if let text {
                 recordPrompt(text, queued: !rules.queuedMessagesRunNextTurn && underWay != .starting && underWay != .inactive)
             }
@@ -582,7 +587,7 @@ private struct Reduction {
                 state.pendingMessage = nil
                 state.usageLimitNoted = false
             }
-            state.turnStartRecorded = true
+            if case .active = state.turnState { state.turnStartRecorded = true }
 
         case .usageLimitNoted:
             // Only on the turn under way whose start record has come: the
@@ -993,6 +998,11 @@ private struct Reduction {
     private mutating func endTurn() {
         state.turnState = .inactive
         state.activityState = .idle
+        forgetTurnMarks()
+    }
+
+    /// The quota note and the start-record mark belong to a turn under way.
+    private mutating func forgetTurnMarks() {
         state.usageLimitNoted = false
         state.turnStartRecorded = false
     }

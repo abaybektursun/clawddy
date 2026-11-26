@@ -56,7 +56,7 @@ struct AgentAntigravityInterleavingTests {
         /// The person closes agy's terminal.
         case close
         /// A failed turn's Stop: no reply, agy's error as the hook script
-        /// keeps it (spaces and parentheses dropped).
+        /// keeps it (words apart, at most 4 KiB).
         case failedStop(String)
 
         static let working = Item.report(state: "working", kind: nil, message: nil)
@@ -263,7 +263,9 @@ struct AgentAntigravityInterleavingTests {
     }
 
     /// A usage limit (probe `stage7/quota2`): agy's Stop with the quota
-    /// error and its `error` report, in any order. The report makes the
+    /// error and its `error` report, in any order; the prompt record after
+    /// the `working` (one before it marks no turn, so the note is not
+    /// taken: the named test `aQuotaFailurePausesAndOtherFailuresStayProblems`). The report makes the
     /// failure: a usage limit when the Stop came first and noted it, or
     /// when its own words match agy's quota rule; otherwise a problem with
     /// its words (the stated bound). The Stop changes nothing by itself.
@@ -277,7 +279,7 @@ struct AgentAntigravityInterleavingTests {
                 Report(item: .working, shows: works),
                 Report(item: .error("Failed \(n)."), shows: problem, afterRecords: 1, afterRecord: (1, paused)),
             ],
-            records: [Record(item: .prompt("task \(n)"), after: 0), Record(item: .failedStop(quotaError), after: 1)],
+            records: [Record(item: .prompt("task \(n)"), after: 1), Record(item: .failedStop(quotaError), after: 1)],
             prompts: ["task \(n)"], completions: 0, end: .limitOrProblem(text: "Failed \(n)."))
     }
 
@@ -304,7 +306,7 @@ struct AgentAntigravityInterleavingTests {
                 Report(item: .done("Again \(n)."), shows: finished("Again \(n).", reply), afterRecords: 3),
             ],
             records: [
-                Record(item: .prompt("task \(n)"), after: 0), Record(item: .failedStop(quotaError), after: 1),
+                Record(item: .prompt("task \(n)"), after: 1), Record(item: .failedStop(quotaError), after: 1),
                 Record(item: .prompt("again \(n)"), after: 3), Record(item: .stop(reply), after: 4),
             ],
             prompts: ["task \(n)", "again \(n)"], completions: 1, end: .completed(reply: reply))
@@ -591,6 +593,8 @@ struct AgentAntigravityInterleavingTests {
             if record.state != .working { found.append("state \(record.state)") }
         }
         if state.turnState != .inactive && c.end != .working { found.append("turn \(state.turnState)") }
+        // The quota note and the start-record mark rest with no turn under way.
+        if c.end != .working && (state.usageLimitNoted || state.turnStartRecorded) { found.append("a quota note or start mark left") }
         if state.promptAwaitsTurn { found.append("promptAwaitsTurn") }
         if state.stateBeforeStartDialog != nil || state.completedBehindDialog != nil { found.append("start dialog left") }
         if state.endedBeforeItsPrompt != nil { found.append("endedBeforeItsPrompt") }
@@ -793,7 +797,7 @@ struct AgentAntigravityInterleavingTests {
     }
 
     /// The number of runs `allFaults` makes, so a change to the cases shows.
-    static let expectedRuns = 60180
+    static let expectedRuns = 44788
 
     /// agy's quota failure (review of the quota commit): the `error` report
     /// makes the failure. A Stop with the quota error first notes it, and
@@ -824,6 +828,13 @@ struct AgentAntigravityInterleavingTests {
         #expect(failed.record.state == .problem && failed.record.problem?.text == "There was a network issue.")
         let noReport = try run([.failedStop(Self.quotaError)])
         #expect(noReport.record.state == .working && noReport.record.lastMessage == nil)
+        // The prompt record before the `working`: no turn was under way to
+        // mark, so the Stop notes nothing and the report is a problem.
+        var early = Self.finishedAgent(unread: false)
+        for item in [Item.prompt("task"), .working, .failedStop(Self.quotaError), .error("Something failed.")] {
+            early = try Self.reduce(early, item, viewed: false).0
+        }
+        #expect(early.record.state == .problem && early.record.problem?.text == "Something failed.")
     }
 
     /// Review of the fixes 2, trigger A: a wake-up turn of its own, its

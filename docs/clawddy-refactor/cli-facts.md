@@ -1355,10 +1355,9 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   again.">BEL`, the screen "⚠ <that text>" and "Error ID: …". Escape: `idle`.
 - **What the app does with an `error` report** (agy, and the same code for every CLI): the turn fails with the
   report's message as the problem's text, shown as the tile's sentence as agy wrote it and kept in the agent's record
-  (`status/<agent>.record.json`, `problem.text`). The Stop record's `error` reaches the event file with only
-  `[:alnum:]_.:/-` kept (spaces dropped) and changes nothing: agy's failures come from the terminal (ruling 3). A
-  usage-limit message would arrive the same way and show as a problem with agy's own words (not as "paused", which
-  only Claude's `rate_limit` kind gives); it is in the record and on screen when one comes. Not seen.
+  (`status/<agent>.record.json`, `problem.text`). The Stop record's `error` reaches the event file with its words kept
+  apart (line breaks and tabs as spaces, at most 4 KiB) and changes nothing by itself: agy's failures come from the
+  terminal (ruling 3). A usage limit: "A 429 from a gateway" below.
 - **`done` and its Stop** (every captured pair with its transcript: 10 in stage 1, 2, 5, plus `stage6/donelink`): the
   `done` message is the reply's first line exactly as written (Markdown kept), cut to 199 characters and "…" when the
   line is longer than 200; the Stop record's reply (the transcript's last `PLANNER_RESPONSE` with content) begins
@@ -1399,8 +1398,10 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   failure's ("…request failed… connection refused") does not. The app: the terminal's `error` report makes every agy
   failure; a Stop whose `error` matches the rule (the hook script keeps the error's words apart, at most 4 KiB) only
   notes the turn's failure as a usage limit, and the `error` report then pauses the agent with its words, as it does
-  when its own words match the rule; otherwise it is a problem. No reset time is given, so none is shown. Bound: an
-  `error` report before its Stop whose words do not match shows a usage limit as a problem with agy's words.
+  when its own words match the rule; otherwise it is a problem. No reset time is given, so none is shown. Bounds: an
+  `error` report before its Stop, or a prompt record before its turn's `working`, with words that do not match,
+  shows a usage limit as a problem with agy's words; the turn run behind the start dialog has no turn under way, so
+  its quota Stop notes nothing and an `error` there with unmatched words is a problem too (not seen).
 - **`ANTIGRAVITY_EXECUTABLE_DATA_DIR`** does not move agy's data folder: set to an empty folder, agy left it empty and
   used `~/.gemini/antigravity-cli` as before (a new log there). In the program text it is the data folder agy gives
   its sidecars. No variable was found that moves agy's settings while its sign-in works.
@@ -1415,4 +1416,4 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
 
 ### Not seen
 
-`done` without a msg; `terminationReason` other than "NO_TOOL_CALL"; a Stop record with `error` set; what Escape does on the question or permission menu; what agy reports after start-up when signed out; the usage limit.
+`done` without a msg; what Escape does on the question or permission menu; what agy reports after start-up when signed out; the usage limit.

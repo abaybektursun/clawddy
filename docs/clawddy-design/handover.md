@@ -129,6 +129,8 @@ Not proven, or open:
   (`ANTIGRAVITY_EXECUTABLE_DATA_DIR` is for its sidecars). `AGY_CLI_HIDE_ACCOUNT_INFO=1` keeps the account out of
   the banner, for pictures.
 - A real sign-in completed after start-up: not done (it would use the owner's account).
+- A failed turn whose Stop comes with no `error` report leaves the agent working (the report makes failures): measured,
+  the report came 0.9 s after the Stop in the network failure; behind the gateway's setup screen none came.
 
 ## Build
 
