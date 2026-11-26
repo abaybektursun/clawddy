@@ -109,8 +109,14 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// report at all (agy, `AgentReportRules.workingStartsTurn`): a turn
     /// has started that no `working` showed, and its Stop record ends it.
     /// Set when the dialog shows on a launch with a first prompt; cleared
-    /// by that Stop or by a `working` (then the turn is a reported one).
+    /// by that Stop, by a `working` (then the turn is a reported one), or
+    /// when the launch ends or the agent stops first.
     var hiddenTurn = false
+    /// What a Stop that comes with no turn under way must begin with to be
+    /// the reply of the turn that ended last (agy): the first line its
+    /// `done` reported, without the "…" that marks it cut; empty for the
+    /// turn no report showed. nil: no Stop to come is that turn's.
+    var replyOpening: String?
     /// Prompts Clawddy sent while the turn worked, which the CLI holds
     /// until the turn ends (`AgentReportRules.queuedMessagesRunNextTurn`).
     var sentWhileWorking: [String] = []
@@ -363,6 +369,7 @@ private struct Reduction {
 
         case .surfaceDied(let generation, let byUser, let isViewed):
             if let generation, state.launchGeneration != generation { return }
+            endHiddenTurn()
             let underIt = state.processState == .running && !byUser
             endStartDialog(isViewed: isViewed, completing: !underIt)
             // A provider that was up and went without the user: its terminal
@@ -463,6 +470,7 @@ private struct Reduction {
             // A launch's provider exits once; a report printed again later
             // changes nothing.
             guard state.processState != .exited else { return }
+            endHiddenTurn()
             // "Pre-start" is the launch phase, not "not currently running":
             // a session that started has moved the process to .running, and
             // its exit, with any status, is no launch failure. A launch that
@@ -569,6 +577,13 @@ private struct Reduction {
                         launchGeneration: generation, eventID: eventID),
                     isViewed: isViewed)
             case .inactive:
+                // agy: only the reply of the turn that ended last replaces
+                // the one shown; a Stop that does not begin with what that
+                // turn's `done` reported is another turn's or an earlier
+                // step's (cli-facts, "`done` and its Stop").
+                if rules.doneWithMessageCompletes {
+                    guard let opening = state.replyOpening, message.hasPrefix(opening) else { return }
+                }
                 record.lastMessage = message
                 record.lastMessageAt = now
             }
@@ -750,10 +765,16 @@ private struct Reduction {
                 // bare; one with a summary ended something else, such as a
                 // compaction. agy's always carries the reply's first line,
                 // cut at 200 characters: the reply until its Stop record
-                // brings the whole of it.
+                // brings the whole of it. A Stop come during the turn is its
+                // reply only if it begins with that line: an earlier
+                // turn's Stop, or one before a wake-up in this turn, is not.
                 if report.message == nil || rules.doneWithMessageCompletes {
-                    if state.pendingMessage == nil, let message = report.message {
-                        state.pendingMessage = String(message.prefix(AgentRecord.textLimit))
+                    if rules.doneWithMessageCompletes {
+                        let opening = report.message.map(Self.opening(ofDone:)) ?? ""
+                        state.replyOpening = opening
+                        if let message = report.message, !(state.pendingMessage?.hasPrefix(opening) ?? false) {
+                            state.pendingMessage = String(message.prefix(AgentRecord.textLimit))
+                        }
                     }
                     if completion.provider == .codex { state.turnsEndedWithoutNotify += 1 }
                     complete(completion, isViewed: isViewed)
@@ -826,14 +847,16 @@ private struct Reduction {
                 state.inputSettling = true
                 effects.append(.inputSettling)
             } else {
-                becomeReady(isViewed: isViewed)
+                // An `error` that answers the dialog stops the agent with a
+                // problem: a turn ended behind it keeps its reply only.
+                becomeReady(isViewed: isViewed, completing: report != .error)
             }
         case .blocked, .clear:
             break
         }
     }
 
-    private mutating func becomeReady(isViewed: Bool) {
+    private mutating func becomeReady(isViewed: Bool, completing: Bool = true) {
         state.inputReady = true
         state.inputSettling = false
         effects.append(.inputReady)
@@ -841,7 +864,7 @@ private struct Reduction {
             change(to: .finished)
             record.problem = nil
         }
-        endStartDialog(isViewed: isViewed)
+        endStartDialog(isViewed: isViewed, completing: completing)
     }
 
     /// The start-up dialog is answered, or its process has gone: the agent
@@ -877,6 +900,10 @@ private struct Reduction {
     /// turn worked: they are no prompts, and a later prompt with the same
     /// words is the person's own.
     private mutating func forgetSendsGivenBack() {
+        guard !state.sentWhileWorking.isEmpty else { return }
+        // Every send since the turn's `working` is among them: no prompt
+        // awaits a turn now.
+        state.promptAwaitsTurn = false
         for prompt in state.sentWhileWorking {
             if let due = state.promptsDue.lastIndex(of: prompt) { state.promptsDue.remove(at: due) }
             if let sent = record.prompts.lastIndex(where: { $0.text == prompt }) { record.prompts.remove(at: sent) }
@@ -895,8 +922,10 @@ private struct Reduction {
     /// Starts a turn: the agent works, and what it asked, the problem it
     /// stopped with, its limit and its unread mark are behind it.
     private mutating func startTurn(turnID: String? = nil, activity: AgentActivityState) {
-        // A turn a report shows is no hidden one.
+        // A turn a report shows is no hidden one, and a Stop that comes now
+        // is no reply of the turn before.
         state.hiddenTurn = false
+        state.replyOpening = nil
         // What was sent while the turn before worked runs in this one.
         state.sentWhileWorking = []
         if rules.queuedMessagesRunNextTurn { clearQueued() }
@@ -1012,11 +1041,27 @@ private struct Reduction {
     }
 
     private mutating func finishStopping() {
+        endHiddenTurn()
         record.cutOff = false
         clearQueued()
         record.activity = nil
         record.question = nil
         record.interrupted = false
+    }
+
+    /// The turn no report showed ends without its Stop: its launch ended or
+    /// the agent stopped. A Stop still on its way brings its reply and
+    /// completes nothing.
+    private mutating func endHiddenTurn() {
+        guard state.hiddenTurn else { return }
+        state.hiddenTurn = false
+        state.replyOpening = ""
+    }
+
+    /// What a Stop's reply begins with when agy's `done` reported `message`:
+    /// the reply's first line, cut to 199 characters and "…" past 200.
+    private static func opening(ofDone message: String) -> String {
+        message.hasSuffix("…") ? String(message.dropLast()) : message
     }
 
     /// An `idle` or `clear` with no turn under way: the agent is not working,

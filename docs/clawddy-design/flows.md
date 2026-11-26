@@ -399,7 +399,8 @@ The prototype fakes these; the app must do them.
   hook `last_assistant_message`; Codex's turn-complete payload; agy's Stop hook,
   which reads the whole reply from its transcript, since its `done` report
   carries only the reply's first line, cut at 200 characters, shown until the
-  hook's arrives). Its first paragraph, Markdown marks removed, whitespace
+  hook's arrives; a hook reply that does not begin with that line is another
+  turn's or an earlier step's and is not shown). Its first paragraph, Markdown marks removed, whitespace
   collapsed.
 - Has a question: the question text from the CLI's hook, at once (agy: from its
   status report, which cuts a question at 180 characters).

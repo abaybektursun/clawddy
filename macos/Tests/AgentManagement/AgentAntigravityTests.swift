@@ -1021,8 +1021,8 @@ struct AgentAntigravityBridgeTests {
         #expect(agent.record.state == .asks)
         try h.osc(id, "state=working:app=antigravity")
         try h.osc(id, "state=done:app=antigravity:msg=\(b64("Ran."))")
-        try agyHook(h, id, "Stop", session: "c-1", text: "Ran it all.")
-        #expect(agent.record.state == .finished && agent.record.lastMessage == "Ran it all.")
+        try agyHook(h, id, "Stop", session: "c-1", text: "Ran.\nIt all passed.")
+        #expect(agent.record.state == .finished && agent.record.lastMessage == "Ran.\nIt all passed.")
         #expect(h.notifier.posted.filter { $0.identifier.hasSuffix(".completed") }.count == 1)
     }
 

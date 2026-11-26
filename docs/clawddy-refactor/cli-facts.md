@@ -1362,7 +1362,10 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   `done` message is the reply's first line exactly as written (Markdown kept), cut to 199 characters and "…" when the
   line is longer than 200; the Stop record's reply (the transcript's last `PLANNER_RESPONSE` with content) begins
   with it. `stage6/donelink`: a 239-character first line with a link, bold and code came as its first 199 characters
-  and "…".
+  and "…", the reply's later lines (an empty one, one starting with two spaces) only in the Stop. 7 more captured
+  `done`s have no transcript to compare (probes without hooks). No captured reply began with a blank line or spaces;
+  that case is not seen. A Stop that does not begin with its turn's `done` is another turn's or an earlier step's:
+  the wake-up's first Stop ("Waiting…", `stage5/wake2`) comes inside the turn whose `done` is the wake-up's reply.
 - **Several queued messages run together** (probe `stage5/queue2`, two turns): two messages typed while a turn
   ran waited for its `done`, then ran as one turn whose PreInvocation 0 had `lastUserInput` "Reply with the word
   one.\nReply with the word two." (joined by a newline), one Stop, one `done`.
