@@ -1407,6 +1407,15 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   its sidecars. No variable was found that moves agy's settings while its sign-in works.
 - **`AGY_CLI_HIDE_ACCOUNT_INFO=1`** keeps the account's address and plan out of the banner (the changelog's words;
   seen: the banner line shows the folder and the model only). For pictures of a real agy.
+- **The trust dialog's "Yes" under the app** (stage 8, once, with the owner's leave; harness `agy-s9-yes`, a throwaway
+  folder, three model turns). Launched with a first prompt: the tile asked "Trust this folder?" at once; SessionStart,
+  PreInvocation 0 and the Stop with the reply came while it asked (by 6 s). Return on "Yes" in the agent's terminal:
+  1.5 s later the tile was finished with the reply ("ok"), read since the agent was open; one announcement for the
+  question and one for the reply. A second prompt ran as a normal turn (finished, unread at home); a second agent in
+  the same folder started with no dialog. agy's change to `~/.gemini/antigravity-cli/settings.json`: one entry added
+  to `trustedWorkspaces` (the folder), nothing else (9 entries before, 10 after). The terminal's report bytes after
+  "Yes" were not captured (the app keeps no log of them); the stand-in's `idle` on the answer gives what the tile
+  showed.
 - **Several queued messages run together** (probe `stage5/queue2`, two turns): two messages typed while a turn
   ran waited for its `done`, then ran as one turn whose PreInvocation 0 had `lastUserInput` "Reply with the word
   one.\nReply with the word two." (joined by a newline), one Stop, one `done`.

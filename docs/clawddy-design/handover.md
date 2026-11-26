@@ -110,9 +110,6 @@ Proven later with the real agy under the harness (stage 6, 21 short turns; notes
   0.21 s with a 2 KB transcript and 0.18 s with 37 KB.
 
 Not proven, or open:
-- Answering the trust dialog "Yes" with the real agy: agy saves that answer into the owner's trusted folders, which
-  the rules forbid; later launches were trusted for their session only (`--settings`, from a harness wrapper). The
-  answer is proven against the stand-in.
 - In standard start mode agy runs in the owner's default mode (auto), which approves safe commands without asking;
   a permission request needs default mode (Shift+Tab in agy's terminal).
 - The hook folder is part of the agent's workspace, second in the model's list. agy sorts the workspace folders by
@@ -125,10 +122,14 @@ Not proven, or open:
   after its retries, a Stop with an `error` matching agy's own quota rule; the app shows that as paused at the usage
   limit, with the `error` report's words and no reset time. The `error` report of a quota failure itself was not seen
   (with a gateway agy shows its first-run setup, whose terms were not accepted), nor a limit from Google's servers.
-- The trust dialog's "Yes" with the real agy stays unproven: no variable moves agy's settings away from the owner's
-  (`ANTIGRAVITY_EXECUTABLE_DATA_DIR` is for its sidecars). `AGY_CLI_HIDE_ACCOUNT_INFO=1` keeps the account out of
-  the banner, for pictures.
-- A real sign-in completed after start-up: not done (it would use the owner's account).
+- The trust dialog's "Yes" with the real agy is proven (once, with the owner's leave, in a throwaway folder): the
+  first prompt's turn ran behind the dialog (its Stop came while the tile asked), "Yes" in the agent's terminal
+  ended the dialog and the turn finished with its reply (read, since the agent was open), one announcement of
+  each; a second prompt ran as a normal turn; a second agent in the folder started with no dialog. agy's only
+  change to the owner's settings was the folder added to its trusted list. Not captured: the terminal's report
+  bytes after "Yes" (the app keeps no log of them). `AGY_CLI_HIDE_ACCOUNT_INFO=1` keeps the account out of the
+  banner, for pictures.
+- A real sign-in completed inside the app: not done (the owner declined; agy is already signed in).
 - A failed turn whose Stop comes with no `error` report leaves the agent working (the report makes failures): measured,
   the report came 0.9 s after the Stop in the network failure; behind the gateway's setup screen none came.
 
