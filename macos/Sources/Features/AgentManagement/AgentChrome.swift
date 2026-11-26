@@ -295,6 +295,12 @@ final class AgentChip: AgentButton {
         needsLayout = true
     }
 
+    /// Words only, it takes no click: one falls through to the line, as on
+    /// the rest of its slab.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        isEnabled ? super.hitTest(point) : nil
+    }
+
     /// As wide as its words and its padding, at most 260 pt: past that the
     /// end of the words, the project's name, is cut.
     var fittingWidth: CGFloat { min(Self.maxWidth, (label.text?.width ?? 0) + 18) }

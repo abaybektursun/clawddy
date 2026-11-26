@@ -330,15 +330,27 @@ final class AgentLineView: NSView, AgentActivationClickSafeRegion {
         // The text between, as tall as its lines.
         let textX = 10 + chipWidth + 10
         let textWidth = max(40, right - 10 - textX)
+        // The text's height at the width it has now, whatever changed that
+        // width (typing, the chip, the window): measured after it is set.
+        if textView.frame.width != textWidth { textView.frame.size.width = textWidth }
         let textHeight = textView.textHeight
         let frame = NSRect(x: textX, y: textTop, width: textWidth, height: textHeight)
         if scroll.frame != frame { scroll.frame = frame }
-        if textView.frame.width != textWidth { textView.frame.size.width = textWidth }
         reveal.frame = CGRect(origin: .zero, size: frame.size)
         if textView.lineCount > textView.maxLines { textView.scrollRangeToVisible(textView.selectedRange()) }
+        // The slab follows its text: a host that sized it for other text
+        // places it again, at once, and the slab is laid out at its new
+        // height in this same pass.
+        if slabHeight != height {
+            onHeight?()
+            if bounds.height != height { layout() }
+        }
     }
 
     // MARK: For the harness and tests
+
+    /// The slab drawn, which must be as tall as the view.
+    var slabFrame: CGRect { slab.frame }
 
     /// The baselines of the chip's words and of the text's first line, in
     /// the window's coordinates from its top: equal to the pixel.

@@ -1448,7 +1448,8 @@ extension ClawddyController {
             windowController?.focus(.tiles)
             return true
         case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertBacktab(_:)):
-            guard windowController?.lineStartsNewAgent == true else { return false }
+            // Text being composed keeps its keys.
+            guard windowController?.lineStartsNewAgent == true, !line.hasMarkedText() else { return false }
             stepNewAgentProvider(selector == #selector(NSResponder.insertTab(_:)) ? 1 : -1)
             return true
         default:
@@ -1601,6 +1602,7 @@ extension ClawddyController {
             closePalette()
             return true
         case #selector(NSResponder.insertTab(_:)), #selector(NSResponder.insertBacktab(_:)):
+            guard !field.hasMarkedText() else { return false }
             stepNewAgentProvider(selector == #selector(NSResponder.insertTab(_:)) ? 1 : -1)
             return true
         default:

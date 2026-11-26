@@ -192,6 +192,7 @@ final class AgentWindowController: NSViewController {
         line.onText = { [weak self] in self?.actions.draft($0) }
         line.onChip = { [weak self] in self?.showCLIMenu(under: $0) }
         palettePanel.onChip = { [weak self] in self?.showCLIMenu(under: $0) }
+        palettePanel.onHeight = { [weak self] in self?.windowView.needsLayout = true }
         palettePanel.textView.command = { [weak self] in self?.actions.paletteCommand($0) ?? false }
         palettePanel.textView.onChange = { [weak self] in
             guard let self else { return }
@@ -617,6 +618,9 @@ final class AgentWindowController: NSViewController {
 
     private func showCLIMenu(under view: NSView) {
         showMenu(actions.cliMenu(), view)
+        // The menu's tracking took the pointer's exit: the chip's hover ends
+        // with it.
+        (view as? AgentButton)?.isHovered = false
     }
 
     /// The CLI new agents use changed (the chip, its key, the Agent menu):
@@ -628,9 +632,9 @@ final class AgentWindowController: NSViewController {
                 chip: newAgentChip(in: project), cli: model.newAgentProvider.displayName,
                 accessibility: newAgentAccessibility(in: project), back: paletteBack, palette: palette)
         }
-        let chip = paletteShown && palettePanel.mode == .new ? palettePanel.chip : line.chip
+        // Heard wherever the keys are, as the status line's words are.
         NSAccessibility.post(
-            element: chip, notification: .announcementRequested,
+            element: NSApp.mainWindow as Any, notification: .announcementRequested,
             userInfo: [.announcement: model.newAgentProvider.displayName, .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
 

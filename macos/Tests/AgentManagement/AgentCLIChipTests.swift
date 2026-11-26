@@ -173,6 +173,106 @@ extension AgentInteractionTests {
             #expect(d.controller.keyContext == .inside)
         }
 
+        /// The text's height follows its width, whatever changed it: a
+        /// draft that fits beside the Codex chip wraps beside the wider
+        /// Antigravity chip and unwraps again, in the home line and the
+        /// floating line; the text view is as tall as its text, the caret
+        /// shows, and the slab or panel is as tall as its text needs.
+        @Test func aDraftReflowsWhenTheChipChangesWidth() async throws {
+            let d = try await AgentWorkspaceDriver(.standard)
+            defer { d.close() }
+            let line = d.windowController.line
+            let palette = d.windowController.palettePanel
+            func draft(fitting view: AgentTextView) -> String {
+                let room = view.frame.width - 2 * (view.textContainer?.lineFragmentPadding ?? 0) - 2
+                var words = "t"
+                while ((words + " t") as NSString).size(withAttributes: [.font: view.font as Any]).width <= room { words += " t" }
+                return words
+            }
+            func caretShows(_ view: AgentTextView) -> Bool {
+                guard let layout = view.layoutManager, let container = view.textContainer else { return false }
+                let glyph = layout.glyphIndexForCharacter(at: max(0, view.selectedRange().location - 1))
+                let rect = layout.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: container)
+                    .offsetBy(dx: view.textContainerOrigin.x, dy: view.textContainerOrigin.y)
+                return view.visibleRect.insetBy(dx: -1, dy: -1).contains(rect)
+            }
+            func expectFits(_ view: AgentTextView, lines: Int, host: () -> Bool, _ what: Comment) {
+                #expect(view.lineCount == lines, what)
+                #expect(view.frame.height == view.textHeight, what)
+                #expect(caretShows(view), what)
+                #expect(host(), what)
+            }
+
+            // The home line, set to Codex.
+            d.windowController.focus(.line)
+            try await d.key(Self.tab)
+            #expect(d.model.newAgentProvider == .codex)
+            try await d.type(draft(fitting: line.textView))
+            let slabFits = { line.frame.height == line.slabHeight && line.slabFrame.height == line.frame.height }
+            expectFits(line.textView, lines: 1, host: slabFits, "home, Codex")
+            try await d.key(Self.tab)
+            try await d.settle()
+            expectFits(line.textView, lines: 2, host: slabFits, "home, Antigravity")
+            try await d.key(Self.tab, .maskShift)
+            try await d.settle()
+            expectFits(line.textView, lines: 1, host: slabFits, "home, Codex again")
+
+            // The floating new-agent line.
+            try await d.key(45, .maskCommand)
+            try await d.type(draft(fitting: palette.textView))
+            expectFits(palette.textView, lines: 1, host: { palette.frame.height == palette.preferredHeight }, "floating, Codex")
+            try await d.key(Self.tab)
+            try await d.settle()
+            expectFits(palette.textView, lines: 2, host: { palette.frame.height == palette.preferredHeight }, "floating, Antigravity")
+            try await d.key(Self.tab, .maskShift)
+            try await d.settle()
+            expectFits(palette.textView, lines: 1, host: { palette.frame.height == palette.preferredHeight }, "floating, Codex again")
+        }
+
+        /// A reply's chip is words only: a click on it gives the line the
+        /// keys, as the rest of its slab does.
+        @Test func aClickOnAReplysChipFocusesTheLine() async throws {
+            let d = try await AgentWorkspaceDriver(.standard)
+            defer { d.close() }
+            var shown = 0
+            d.windowController.showMenu = { _, _ in shown += 1 }
+            try await d.key(AgentWorkspaceDriver.downArrow)
+            let line = d.windowController.line
+            #expect(line.chipText.hasPrefix("Reply to "))
+            try await d.click(at: line.chip.convert(NSPoint(x: line.chip.bounds.midX, y: line.chip.bounds.midY), to: nil))
+            #expect(shown == 0)
+            #expect(d.firstResponder === line.textView)
+        }
+
+        /// Tab while text is being composed is the input method's: the CLI
+        /// stays.
+        @Test func tabWhileComposingChangesNothing() async throws {
+            let d = try await AgentWorkspaceDriver(.standard)
+            defer { d.close() }
+            let field = d.windowController.line.textView
+            d.windowController.focus(.line)
+            field.setMarkedText("ka", selectedRange: NSRange(location: 2, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+            #expect(field.hasMarkedText())
+            field.doCommand(by: #selector(NSResponder.insertTab(_:)))
+            #expect(d.model.newAgentProvider == .claudeCode)
+            field.unmarkText()
+            field.doCommand(by: #selector(NSResponder.insertTab(_:)))
+            #expect(d.model.newAgentProvider == .codex)
+        }
+
+        /// The chip's hover ends when its menu closes.
+        @Test func theChipsHoverEndsWithItsMenu() async throws {
+            let d = try await AgentWorkspaceDriver(.standard)
+            defer { d.close() }
+            let chip = d.windowController.line.chip
+            var hoveredDuringMenu: Bool?
+            d.windowController.showMenu = { _, _ in hoveredDuringMenu = chip.isHovered }
+            chip.isHovered = true
+            try await d.click(at: chip.convert(NSPoint(x: chip.bounds.midX, y: chip.bounds.midY), to: nil))
+            #expect(hoveredDuringMenu != nil)
+            #expect(!chip.isHovered && chip.phase == .rest)
+        }
+
         /// A start uses the CLI the chip names.
         @Test func aStartUsesTheCLIShown() async throws {
             let d = try await AgentWorkspaceDriver(.standard)

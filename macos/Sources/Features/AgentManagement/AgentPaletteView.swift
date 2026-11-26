@@ -47,6 +47,8 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
     let chip = AgentChip()
     /// A press on the new-agent chip: the controller shows the CLIs' menu.
     var onChip: ((NSView) -> Void)?
+    /// Its height for its text changed: the window places it again.
+    var onHeight: (() -> Void)?
     private let divider = AgentLayer()
     private let hints: [(AgentKeyCap, AgentTextLayer)] = [(AgentKeyCap(), AgentTextLayer()), (AgentKeyCap(), AgentTextLayer())]
     private var palette = ClawddyPalette.prototype
@@ -200,10 +202,13 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
                 width: chipWidth, height: 24)
             textX = 16 + chipWidth + 10
         }
+        // The text's height at the width it has now, whatever changed that
+        // width (the chip, the window): measured after it is set.
+        let textWidth = max(40, width - 16 - textX)
+        if textView.frame.width != textWidth { textView.frame.size.width = textWidth }
         let textHeight = textView.textHeight
-        let frame = NSRect(x: textX, y: 14, width: max(40, width - 16 - textX), height: textHeight)
+        let frame = NSRect(x: textX, y: 14, width: textWidth, height: textHeight)
         if scroll.frame != frame { scroll.frame = frame }
-        if textView.frame.width != frame.width { textView.frame.size.width = frame.width }
 
         let dividerY = 14 + textHeight + 12
         divider.frame = CGRect(x: 0, y: dividerY, width: width, height: 1)
@@ -228,6 +233,9 @@ final class AgentPaletteView: NSView, AgentActivationClickSafeRegion {
             x += labelWidth + 18
         }
         if textView.lineCount > textView.maxLines { textView.scrollRangeToVisible(textView.selectedRange()) }
+        // Its height follows its text: a host that sized it for other text
+        // places it again.
+        if preferredHeight != bounds.height { onHeight?() }
     }
 
     /// The pointer moved to `point` (window coordinates), from the window's
