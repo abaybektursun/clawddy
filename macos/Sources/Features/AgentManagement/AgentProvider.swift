@@ -313,7 +313,9 @@ struct AgentFailure: Equatable, Sendable {
 
     /// The turn stopped at a usage limit. Claude's kinds, read in its binary
     /// (2.1.331): `rate_limit` and `billing_error` ("usage limit reached").
-    var isUsageLimit: Bool { error == "rate_limit" || error == "billing_error" }
+    var isUsageLimit: Bool { error == Self.usageLimitKind || error == "billing_error" }
+    /// The kind a usage limit is given (Claude's own; agy's quota failure).
+    static let usageLimitKind = "rate_limit"
     /// The session's sign-in no longer works.
     var isLogin: Bool { error == "authentication_failed" || error == "oauth_org_not_allowed" }
 }
@@ -387,6 +389,11 @@ struct AgentReportRules: Equatable, Sendable {
     /// them into the running turn, which ends once (probes.md, "Sending
     /// while the CLI works").
     var queuedMessagesRunNextTurn: Bool
+    /// The record that tells a failure's kind is written before the
+    /// failure's `error` report (agy's Stop, 0.9 s before it, probe
+    /// `stage6/midturn2`), not after it (Claude's StopFailure): an `error`
+    /// that follows a usage limit is that limit's words.
+    var failureRecordComesFirst = false
 
     /// Claude Code's; Codex's differ only in `turnStartDelay`.
     static let standard = Self(

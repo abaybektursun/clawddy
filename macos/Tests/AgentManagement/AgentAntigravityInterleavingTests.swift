@@ -55,6 +55,9 @@ struct AgentAntigravityInterleavingTests {
         case death
         /// The person closes agy's terminal.
         case close
+        /// A failed turn's Stop: no reply, agy's error as the hook script
+        /// keeps it (spaces and parentheses dropped).
+        case failedStop(String)
 
         static let working = Item.report(state: "working", kind: nil, message: nil)
         static let idle = Item.report(state: "idle", kind: nil, message: nil)
@@ -84,10 +87,13 @@ struct AgentAntigravityInterleavingTests {
         var afterRecords = 0
     }
 
-    /// A record, which comes once `after` items of the reports channel have.
+    /// A record, which comes once `after` items of the reports channel have;
+    /// `shows`: what the tile shows once it has come, for the one record
+    /// that changes it (a quota failure's Stop).
     struct Record {
         var item: Item
         var after: Int
+        var shows: Shown?
     }
 
     /// One or more turns: both channels, and what must hold at the end.
@@ -96,6 +102,8 @@ struct AgentAntigravityInterleavingTests {
             case completed(reply: String)
             case interrupted
             case failed(text: String)
+            /// Paused at a usage limit, the limit's words these.
+            case paused(text: String)
             /// Its terminal died or agy exited failing: the agent stops with
             /// the problem, and a reply completed before stays unread.
             case stopped
@@ -116,7 +124,7 @@ struct AgentAntigravityInterleavingTests {
                 reports: reports + next.reports.map {
                     Report(item: $0.item, shows: $0.shows, afterRecords: $0.afterRecords == 0 ? 0 : $0.afterRecords + records.count)
                 },
-                records: records + next.records.map { Record(item: $0.item, after: $0.after + reports.count) },
+                records: records + next.records.map { Record(item: $0.item, after: $0.after + reports.count, shows: $0.shows) },
                 prompts: prompts + next.prompts, completions: completions + next.completions, end: next.end)
         }
     }
@@ -246,6 +254,24 @@ struct AgentAntigravityInterleavingTests {
             prompts: ["task \(n)"], completions: 0, end: .failed(text: "Network \(n)."))
     }
 
+    /// A usage limit (probe `stage7/quota2`): the Stop with agy's quota
+    /// error is written 0.9 s before the `error` report (`stage6/midturn2`),
+    /// so it comes before it (the other order: the named test
+    /// `aQuotaFailurePausesAndOtherFailuresStayProblems`); paused, with the
+    /// report's words.
+    static let quotaError = "generatingandexecuting:RESOURCE_EXHAUSTEDcode429:Resourcehasbeenexhaustede.g.checkquota."
+    static func quotaFailed(_ n: Int) -> Case {
+        let paused = Shown(state: .paused, replies: [nil])
+        return Case(
+            name: "quota",
+            reports: [
+                Report(item: .working, shows: works),
+                Report(item: .error("Quota \(n)."), shows: paused, afterRecords: 2),
+            ],
+            records: [Record(item: .prompt("task \(n)"), after: 0), Record(item: .failedStop(quotaError), after: 1, shows: paused)],
+            prompts: ["task \(n)"], completions: 0, end: .paused(text: "Quota \(n)."))
+    }
+
     /// Sent from the app's line: the send, the `idle` agy reports at the
     /// first key after a `done`, then the turn.
     static func sent(_ n: Int) -> Case {
@@ -263,7 +289,8 @@ struct AgentAntigravityInterleavingTests {
     }
 
     static let kinds: [(Int) -> Case] = [
-        normal, afterKey, wakeUp, wakeInTurn, interrupted, permission, question, failedAtOnce, failedEarly, failedLate, sent,
+        normal, afterKey, wakeUp, wakeInTurn, interrupted, permission, question, failedAtOnce, failedEarly, failedLate, quotaFailed,
+        sent,
     ]
 
     /// Turns after which the agent's process is gone: only last.
@@ -410,6 +437,14 @@ struct AgentAntigravityInterleavingTests {
             return [.surfaceDied(generation: generation, byUser: false, isViewed: viewed)]
         case .close:
             return [.surfaceDied(generation: generation, byUser: true, isViewed: viewed)]
+        case .failedStop(let error):
+            let object: [String: Any] = [
+                "schemaVersion": 1, "provider": "antigravity", "launchGeneration": generation.uuidString,
+                "hookEventName": "Stop", "sessionID": "c-1", "error": error,
+            ]
+            let raw = try JSONDecoder().decode(AgentRawProviderEvent.self, from: JSONSerialization.data(withJSONObject: object))
+            let meaning = try #require(AntigravityProvider.hookEvents["Stop"])
+            return meaning(raw).map { provider($0) }
         }
     }
 
@@ -441,6 +476,9 @@ struct AgentAntigravityInterleavingTests {
             case .record(let k):
                 item = c.records[k].item
                 isRecord = true
+                if let shows = c.records[k].shows {
+                    shown = Shown(state: shows.state ?? shown.state, replies: shows.replies ?? shown.replies)
+                }
             }
             let before = state.record.state
             let (after, completed) = try reduce(state, item, viewed: viewed)
@@ -476,6 +514,10 @@ struct AgentAntigravityInterleavingTests {
             if record.unread && !c.name.hasSuffix("failed at once") { found.append("unread under a problem") }
         case .stopped:
             if record.problem?.kind != .exited { found.append("problem \(String(describing: record.problem))") }
+        case .paused(let text):
+            if record.state != .paused || record.problem != nil { found.append("not paused: \(record.state)") }
+            if record.limit?.message != text { found.append("limit \(String(describing: record.limit))") }
+            if record.unread { found.append("unread while paused") }
         }
         if state.turnState != .inactive { found.append("turn \(state.turnState)") }
         if state.promptAwaitsTurn { found.append("promptAwaitsTurn") }
@@ -483,7 +525,7 @@ struct AgentAntigravityInterleavingTests {
         if state.endedBeforeItsPrompt != nil { found.append("endedBeforeItsPrompt") }
         // After a failure a reply on its way waits for nothing: the next
         // turn's start drops it, and nothing applies it before.
-        if state.pendingMessage != nil, record.state != .problem { found.append("pendingMessage") }
+        if state.pendingMessage != nil, record.state != .problem, record.state != .paused { found.append("pendingMessage") }
         if !state.promptsDue.isEmpty { found.append("promptsDue \(state.promptsDue)") }
         if !state.sentWhileWorking.isEmpty { found.append("sentWhileWorking") }
         if state.hiddenTurn { found.append("hiddenTurn") }
@@ -669,7 +711,31 @@ struct AgentAntigravityInterleavingTests {
     }
 
     /// The number of runs `allFaults` makes, so a change to the cases shows.
-    static let expectedRuns = 22470
+    static let expectedRuns = 23554
+
+    /// agy's quota failure, by agy's own rule for its errors: the Stop with
+    /// the quota error pauses the agent, and the `error` report that follows
+    /// gives the limit its words; the other order too. A network failure's
+    /// Stop stays a problem with agy's words.
+    @Test func aQuotaFailurePausesAndOtherFailuresStayProblems() throws {
+        let network = "generatingandexecuting:requestfailed:Posthttps://daily-cloudcode-pa.googleapis.com/v1internal:"
+            + "streamGenerateContentaltsse:proxyconnecttcp:dialtcp127.0.0.1:18783:connect:connectionrefused"
+        #expect(AntigravityProvider.isQuota(Self.quotaError))
+        #expect(AntigravityProvider.isQuota("generating and executing: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota)."))
+        #expect(!AntigravityProvider.isQuota(network))
+        for order in [[Item.failedStop(Self.quotaError), .error("Out of quota.")], [.error("Out of quota."), .failedStop(Self.quotaError)]] {
+            var state = Self.finishedAgent(unread: false)
+            for item in [Item.working, .prompt("task")] + order { state = try Self.reduce(state, item, viewed: false).0 }
+            #expect(state.record.state == .paused && state.record.problem == nil, "\(order)")
+            #expect(state.record.limit?.message == "Out of quota.", "\(order)")
+            #expect(state.record.sentence(cli: .antigravity) == .cli("Out of quota."), "\(order)")
+        }
+        var state = Self.finishedAgent(unread: false)
+        for item in [Item.working, .prompt("task"), .failedStop(network), .error("There was a network issue.")] {
+            state = try Self.reduce(state, item, viewed: false).0
+        }
+        #expect(state.record.state == .problem && state.record.problem?.text == "There was a network issue.")
+    }
 
     /// Review of the fixes 2, trigger A: a wake-up turn of its own, its
     /// `done` before its Stop. Two turns, two completions.

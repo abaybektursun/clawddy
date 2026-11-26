@@ -827,11 +827,19 @@ private struct Reduction {
             }
 
         case .error:
+            // agy's usage limit came first, from its Stop, with no words: the
+            // report is its words, and the agent stays paused. A limit that
+            // has its words meets a new failure.
+            if rules.failureRecordComesFirst, record.state == .paused, record.limit?.message == nil {
+                let text = report.message?.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let text, !text.isEmpty { record.limit?.message = text }
+                return
+            }
             // Never a blip: a failure can come 106 ms after its `working`.
             if state.turnState == .starting { startTurn(activity: .executing) }
             // A failure this report raises has its `StopFailure` record to
             // come; one the record raised first has had it.
-            if record.state != .problem && record.state != .paused { state.stopFailuresDue += 1 }
+            if record.state != .problem && record.state != .paused && !rules.failureRecordComesFirst { state.stopFailuresDue += 1 }
             fail(AgentFailure(text: report.message))
         }
     }
@@ -1029,10 +1037,13 @@ private struct Reduction {
         let text = failure.text?.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = text?.isEmpty == false ? text : nil
         if failure.isUsageLimit {
+            // With no words of its own, the failure report's (agy's `error`
+            // that came before its Stop) are the limit's.
+            let reported = record.problem?.kind == .error ? record.problem?.text : nil
             if record.state != .paused { change(to: .paused) }
             record.problem = nil
             record.limit = AgentRecord.UsageLimit(
-                message: message ?? record.limit?.message,
+                message: message ?? record.limit?.message ?? reported,
                 resetsAt: failure.resetsAt ?? record.limit?.resetsAt)
             finishStopping()
             return

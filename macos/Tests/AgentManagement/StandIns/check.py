@@ -976,6 +976,23 @@ def check_agy_wake(tmp):
         run.close()
 
 
+def check_agy_quota(tmp):
+    """agy: a quota failure during a turn writes its Stop, with agy's error, before the `error` report (probe stage7/quota2)."""
+    script = {"steps": [{"wait": "prompt"}, {"fail": "quota", "text": "Quota reached."}]}
+    run = Run(os.path.join(tmp, "quota"), "agy", ["--add-dir", "$HOOKDIR"], script=script, sid="default")
+    try:
+        run.wait("idle", lambda: "idle" in run.states())
+        run.type("go")
+        run.key("enter")
+        run.wait("the error", lambda: run.states()[-1] == "error")
+        stop = run.hooks("Stop")
+        expect(len(stop) == 1 and stop[0]["terminationReason"] == "ERROR" and "RESOURCE_EXHAUSTED" in stop[0]["error"],
+               f"Stop: {stop}")
+        return "quota: Stop with RESOURCE_EXHAUSTED and terminationReason ERROR, then error"
+    finally:
+        run.close()
+
+
 CHECKS = [v for k, v in sorted(globals().items()) if k.startswith("check_")]
 
 

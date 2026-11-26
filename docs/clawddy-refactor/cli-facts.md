@@ -1384,6 +1384,21 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   `/private` added), so a folder there sorts after `/Users` and `/Volumes`; hooks load from it with no trust
   question. No other way loads hooks: `--settings` hooks are not loaded (docs), the global and plugin places are
   under `~/.gemini/config`, and no environment variable moves that folder (binary strings).
+- **A 429 from a gateway: the nearest to a real limit that can be caused** (probes `stage7/quota`, `quota2`, no model
+  turn). `AGY_LLM_GATEWAY_URL=http://127.0.0.1:<port>` (named in agy's program text) sends agy's model requests to
+  that server: `GET /v1/models`, `GET /v1beta/models`, then `POST /v1beta/models/<model>:streamGenerateContent`.
+  Answered 429 with `{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":
+  "RESOURCE_EXHAUSTED"}}` (the server kept only method and path), agy retried (21 POSTs) and after 156 s wrote a
+  **Stop record** with `terminationReason` "ERROR", no reply, and `error` "generating and executing: RESOURCE_EXHAUSTED
+  (code 429): Resource has been exhausted (e.g. check quota)." The `error` report and its screen were not seen: with a
+  gateway set, agy shows its first-run setup (`blocked kind=question` "Finish setup": a color scheme, then "Terms of
+  Service & Data Use" to accept), which stays over the turn; finishing it means accepting the terms, not done. It
+  rewrote agy's `cache/onboarding.json` (`enterpriseOnboardingComplete` false); the owner's `settings.json` was
+  unchanged. agy's own test for a quota failure, in its program text, is `QUOTA_RE =
+  /RESOURCE_EXHAUSTED|quota|\b429\b|exhausted your capacity|rate.?limit/i`; the captured error matches it, a network
+  failure's ("…request failed… connection refused") does not. The app reads the Stop's `error` with that rule (as
+  the hook script keeps it, spaces and parentheses dropped): a match is a usage limit (paused), and the `error` report
+  around it gives the limit its words; no reset time is given, so none is shown.
 - **Several queued messages run together** (probe `stage5/queue2`, two turns): two messages typed while a turn
   ran waited for its `done`, then ran as one turn whose PreInvocation 0 had `lastUserInput` "Reply with the word
   one.\nReply with the word two." (joined by a newline), one Stop, one `done`.

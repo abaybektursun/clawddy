@@ -39,9 +39,24 @@ struct AntigravityProvider: Sendable {
             return events
         },
         "Stop": { record in
-            [.sessionBound(sessionID: record.sessionID)] + (record.text.map { [.messageReported($0)] } ?? [])
+            var events: [AgentDomainEvent] = [.sessionBound(sessionID: record.sessionID)]
+            events += record.text.map { [.messageReported($0)] } ?? []
+            // A turn that failed on a usage limit, by agy's own rule for
+            // its errors (cli-facts, "A 429 from a gateway").
+            if let error = record.error, isQuota(error) {
+                events.append(.turnFailed(AgentFailure(error: AgentFailure.usageLimitKind)))
+            }
+            return events
         },
     ]
+
+    /// agy's own test for a quota failure (`QUOTA_RE` in its program text),
+    /// matched against the error as the hook script keeps it: spaces and
+    /// parentheses dropped, so "429" is matched only where it stands alone.
+    static func isQuota(_ error: String) -> Bool {
+        error.range(of: #"RESOURCE_EXHAUSTED|quota|\b429\b|exhausted\s*your\s*capacity|rate.?limit"#,
+                    options: [.regularExpression, .caseInsensitive]) != nil
+    }
 
     /// The payload fields the hook script reads for agy (`cli-facts.md`,
     /// agy, "Hooks"): the event's name, the conversation, the invocation,
@@ -80,7 +95,8 @@ struct AntigravityProvider: Sendable {
         AgentProviderEntry(
             reports: AgentReportRules(
                 doneWithMessageCompletes: true, signInStandTime: 2, workingMessageIsActivity: false,
-                turnStartDelay: 0, askingAtStartIsStarted: true, queuedMessagesRunNextTurn: true),
+                turnStartDelay: 0, askingAtStartIsStarted: true, queuedMessagesRunNextTurn: true,
+                failureRecordComesFirst: true),
             hookEvents: Self.hookEvents,
             prepareIntegration: { prepareIntegration() },
             prepareLaunch: { prepareLaunch($0) },

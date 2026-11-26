@@ -107,7 +107,11 @@ LINEs and "steps"), with these differences:
                                           and Stop, then after 2 s agy's own
                                           PreInvocation 0 with the turn's
                                           prompt; the next steps follow
-            {"fail": KIND, "text": "..."} every kind reports `error`
+            {"fail": KIND, "text": "..."} every kind reports `error`; "quota"
+                                          and "network" fail during the turn,
+                                          so a Stop with agy's error runs
+                                          first (probes stage6/midturn2,
+                                          stage7/quota2)
             {"finish": "text"}            "summary", "plus", "minus" unused
   A prompt submitted while no turn is open opens one; its work is the next
   steps, or the default turn (a few tool lines and a short reply).
@@ -483,6 +487,12 @@ class Agy(base.StandIn):
         if not self.turn_open:
             self.start_turn(None)
         text = text or FAILED
+        # A failure during the turn: its Stop, with agy's error, runs first.
+        errors = {"quota": "generating and executing: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).",
+                  "network": "generating and executing: request failed: proxyconnect tcp: connect: connection refused"}
+        if kind in errors:
+            self.hook("Stop", continuationActive=False, error=errors[kind], executionNum=0, fullyIdle=True,
+                      terminationReason="ERROR")
         self.add(("err", text))
         self.add(("plain", f"{GREY}Error ID: {uuid.uuid4()}-1{RESET}"))
         self.draw()

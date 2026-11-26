@@ -121,7 +121,10 @@ Not proven, or open:
   cache folder (`/var/folders/…/C/<app data folder name>/<agent id>/agy`), which sorts after any project under
   `/Users` or `/Volumes`: 0 of 3 runs touched it (plan decision 1). It would still sort before a project under
   `/var` itself. Closing an agent's terminal removes the agent's hook folder; `harness.nu stop` removes the run's.
-- A usage limit from the real agy: cannot be forced; not seen.
+- A usage limit from the real agy: half proven. A local gateway answering 429 (`AGY_LLM_GATEWAY_URL`) makes agy write,
+  after its retries, a Stop with an `error` matching agy's own quota rule; the app shows that as paused at the usage
+  limit, with the `error` report's words and no reset time. The `error` report of a quota failure itself was not seen
+  (with a gateway agy shows its first-run setup, whose terms were not accepted), nor a limit from Google's servers.
 - A real sign-in completed after start-up: not done (it would use the owner's account).
 
 ## Build
