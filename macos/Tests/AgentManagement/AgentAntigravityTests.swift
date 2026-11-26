@@ -270,7 +270,7 @@ struct AgentAntigravityHookScriptTests {
             ["type": "GENERIC", "content": "started"], ["type": "PLANNER_RESPONSE", "content": "Waiting for it to finish."],
         ]))
         #expect(wake.step == "PLANNER_RESPONSE")
-        #expect(AntigravityProvider.hookEvents["PreInvocation"]?(wake) == [.sessionBound(sessionID: "c-1")])
+        #expect(AntigravityProvider.hookEvents["PreInvocation"]?(wake) == [.sessionBound(sessionID: "c-1"), .selfStarted])
         // Review of the fixes, defect 4: a blank line at the end is no step,
         // and only invocation 0 reads the transcript.
         let file = sandbox.home.appendingPathComponent(".gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl")
@@ -807,7 +807,8 @@ struct AgentAntigravityBridgeTests {
         #expect(try h.binding(id).sessionID == "c-1")
         #expect(try h.agent(id).record.queued == nil && h.agent(id).record.state == .working)
         try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "1", text: "fix the tide chart")
-        let cut = String(repeating: "word ", count: 39) + "wor…"
+        // Cut as agy cuts it: 199 characters and "…".
+        let cut = String(repeating: "word ", count: 39) + "word…"
         try h.osc(id, "state=done:app=antigravity:msg=\(b64(cut))")
         let agent = try h.agent(id)
         #expect(agent.record.state == .finished && agent.record.lastMessage == cut)

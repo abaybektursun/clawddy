@@ -1341,8 +1341,9 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   at 0.15 s and no other report; the screen "Welcome to the Antigravity CLI. You are currently not signed in.",
   "Select login method:", "> 1. Google OAuth", "  2. Use a Google Cloud project". Nothing opens a browser until a
   method is chosen (a stub `open` first on the `PATH` was never called). agy makes its data folder under that `HOME`.
-- **A failure before any model call** (proxy variables naming a closed port, under the app): `working`, then about 6 s
-  later `error` "failed to construct executor: plan model not specified; you must specify a valid model", the screen
+- **A failure before any model call** (proxy variables naming a closed port, under the app): the tile worked from the
+  send, and agy's `error` "failed to construct executor: plan model not specified; you must specify a valid model"
+  came (in the stage 1 probe of the same failure, 10 ms after Return with no `working` before it); the screen
   "⚠ <that text>" and "Error ID: …", and **no hook record** (a prompt typed in the terminal is then in no record).
   The process keeps its environment: the next prompt in it fails the same way.
 - **A network failure during a turn** (probe `stage6/midturn2`, a local proxy killed 4 s into a turn, one turn):
@@ -1364,7 +1365,10 @@ Seen with the real `agy` launched by Clawddy (stage 5 of the plan; 13 model turn
   with it. `stage6/donelink`: a 239-character first line with a link, bold and code came as its first 199 characters
   and "…", the reply's later lines (an empty one, one starting with two spaces) only in the Stop. 7 more captured
   `done`s have no transcript to compare (probes without hooks). No captured reply began with a blank line or spaces;
-  that case is not seen. A Stop that does not begin with its turn's `done` is another turn's or an earlier step's:
+  that case is not seen. So an uncut line is the reply's whole first line (the reply equals it or goes on after a
+  line break), and only a 200-character line ending in "…" is a beginning. Hook records keep their order, so a
+  Stop that came before a turn's prompt record (or agy's own start) is an earlier turn's, even with the same first
+  line. A Stop that does not open with its turn's `done` line is another turn's or an earlier step's:
   the wake-up's first Stop ("Waiting…", `stage5/wake2`) comes inside the turn whose `done` is the wake-up's reply.
 - **Workspace folders, sorted** (the hook-place probes, 9 model turns, `redesign-notes/agy/stage6/hookplace.txt`): agy
   sorts its workspace folders by path, whatever the order of the launch folder and `--add-dir` (all 138 conversations

@@ -332,6 +332,10 @@ enum AgentDomainEvent: Equatable, Sendable {
     /// a `working` waits to settle, since the prompt's record can arrive
     /// after a short turn has ended.
     case promptSubmitted(String?)
+    /// The CLI started a step of its own, with no prompt (agy, when a
+    /// background command ends): a reply reported before it is not this
+    /// step's.
+    case selfStarted
     /// The agent's last message of the turn.
     case messageReported(String)
     /// The question the agent asks, in full.

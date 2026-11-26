@@ -23,13 +23,19 @@ import Testing
 /// `done` carries the first line of the reply, cut to 199 characters and
 /// "…" past 200; the Stop the whole reply (cli-facts, "`done` and its Stop").
 ///
-/// A record comes only once the reports written before it have come
-/// (`Record.after`): a Stop after its turn's last report but `done` (for a
-/// failed turn, after its `working`: the Stop at 0.9 s before the `error`,
-/// probe `stage6/midturn2`; behind the start dialog, after the trust
-/// report: `stage5/trustprompt`); a prompt sent from the app after the send.
-/// A prompt record may come before its turn's `working` and before the
-/// previous turn's `done` (`stage5/queue2`).
+/// What may come before what (`Record.after`, `Report.afterRecords`): a
+/// record only once the reports written before it have come: a Stop after
+/// its turn's last report but `done` (for a failed turn, after its
+/// `working`: the Stop at 0.9 s before the `error`, probe
+/// `stage6/midturn2`; behind the start dialog, after the trust report:
+/// `stage5/trustprompt`); a prompt sent from the app, or typed after the
+/// first key's `idle`, after that. A prompt record may come before its
+/// turn's `working` and before the previous turn's `done`
+/// (`stage5/queue2`). A turn's `done` comes after its start record (its
+/// prompt, or agy's own start): agy runs the PreInvocation hook, which
+/// writes it, before it calls the model, and a reply takes longer than the
+/// record's quarter second. An exit or a terminal death during a turn comes
+/// after its prompt's record.
 @MainActor
 struct AgentAntigravityInterleavingTests {
     private static let rules = AntigravityProvider(
@@ -47,6 +53,8 @@ struct AgentAntigravityInterleavingTests {
         case exit(Int)
         /// The terminal dies under agy.
         case death
+        /// The person closes agy's terminal.
+        case close
 
         static let working = Item.report(state: "working", kind: nil, message: nil)
         static let idle = Item.report(state: "idle", kind: nil, message: nil)
@@ -63,15 +71,17 @@ struct AgentAntigravityInterleavingTests {
     }
 
     /// What the tile shows once a report has come: its state, and the
-    /// replies it may show (nil: the ones it might show before).
+    /// replies it may show (nil: as before it).
     struct Shown {
-        var state: AgentRecord.State
+        var state: AgentRecord.State?
         var replies: [String?]?
     }
 
     struct Report {
         var item: Item
         var shows: Shown
+        /// The items of the records channel that come before it.
+        var afterRecords = 0
     }
 
     /// A record, which comes once `after` items of the reports channel have.
@@ -86,6 +96,9 @@ struct AgentAntigravityInterleavingTests {
             case completed(reply: String)
             case interrupted
             case failed(text: String)
+            /// Its terminal died or agy exited failing: the agent stops with
+            /// the problem, and a reply completed before stays unread.
+            case stopped
         }
 
         var name: String
@@ -99,7 +112,10 @@ struct AgentAntigravityInterleavingTests {
         /// This case, then `next`.
         func then(_ next: Case) -> Case {
             Case(
-                name: "\(name), \(next.name)", reports: reports + next.reports,
+                name: "\(name), \(next.name)",
+                reports: reports + next.reports.map {
+                    Report(item: $0.item, shows: $0.shows, afterRecords: $0.afterRecords == 0 ? 0 : $0.afterRecords + records.count)
+                },
                 records: records + next.records.map { Record(item: $0.item, after: $0.after + reports.count) },
                 prompts: prompts + next.prompts, completions: completions + next.completions, end: next.end)
         }
@@ -107,14 +123,32 @@ struct AgentAntigravityInterleavingTests {
 
     static let works = Shown(state: .working, replies: [nil])
     static let asks = Shown(state: .asks, replies: [nil])
+    static let unchanged = Shown(state: nil, replies: nil)
     static func finished(_ done: String, _ reply: String) -> Shown { Shown(state: .finished, replies: [done, reply]) }
 
-    static func normal(_ n: Int) -> Case {
-        let reply = "Reply \(n).\nIts second line."
-        return Case(
-            name: "normal",
-            reports: [Report(item: .working, shows: works), Report(item: .done("Reply \(n)."), shows: finished("Reply \(n).", reply))],
+    /// A typed turn: `working`, `done` with the reply's first line, its
+    /// prompt and Stop.
+    static func typed(_ name: String, _ n: Int, done: String, reply: String) -> Case {
+        Case(
+            name: name,
+            reports: [Report(item: .working, shows: works), Report(item: .done(done), shows: finished(done, reply), afterRecords: 1)],
             records: [Record(item: .prompt("task \(n)"), after: 0), Record(item: .stop(reply), after: 1)],
+            prompts: ["task \(n)"], completions: 1, end: .completed(reply: reply))
+    }
+
+    static func normal(_ n: Int) -> Case { typed("normal", n, done: "Reply \(n).", reply: "Reply \(n).\nIts second line.") }
+
+    /// The `idle` agy reports at the first key after a `done`, then a typed
+    /// turn.
+    static func afterKey(_ n: Int) -> Case {
+        let reply = "Keyed \(n).\nIts second line."
+        return Case(
+            name: "first key",
+            reports: [
+                Report(item: .idle, shows: unchanged), Report(item: .working, shows: works),
+                Report(item: .done("Keyed \(n)."), shows: finished("Keyed \(n).", reply), afterRecords: 1),
+            ],
+            records: [Record(item: .prompt("task \(n)"), after: 1), Record(item: .stop(reply), after: 2)],
             prompts: ["task \(n)"], completions: 1, end: .completed(reply: reply))
     }
 
@@ -123,7 +157,7 @@ struct AgentAntigravityInterleavingTests {
         let reply = "Woke \(n).\nThe command ended."
         return Case(
             name: "wake-up",
-            reports: [Report(item: .working, shows: works), Report(item: .done("Woke \(n)."), shows: finished("Woke \(n).", reply))],
+            reports: [Report(item: .working, shows: works), Report(item: .done("Woke \(n)."), shows: finished("Woke \(n).", reply), afterRecords: 1)],
             records: [Record(item: .selfStart, after: 0), Record(item: .stop(reply), after: 1)],
             prompts: [], completions: 1, end: .completed(reply: reply))
     }
@@ -134,7 +168,10 @@ struct AgentAntigravityInterleavingTests {
         let reply = "Slept \(n).\nThe command ended."
         return Case(
             name: "wake-up in the turn",
-            reports: [Report(item: .working, shows: works), Report(item: .done("Slept \(n)."), shows: finished("Slept \(n).", reply))],
+            reports: [
+                Report(item: .working, shows: works),
+                Report(item: .done("Slept \(n)."), shows: finished("Slept \(n).", reply), afterRecords: 3),
+            ],
             records: [
                 Record(item: .prompt("task \(n)"), after: 0), Record(item: .stop("Waiting for sleep \(n)."), after: 1),
                 Record(item: .selfStart, after: 1), Record(item: .stop(reply), after: 1),
@@ -159,7 +196,7 @@ struct AgentAntigravityInterleavingTests {
             name: "permission",
             reports: [
                 Report(item: .working, shows: works), Report(item: .approve, shows: asks), Report(item: .working, shows: works),
-                Report(item: .done(done), shows: finished(done, reply)),
+                Report(item: .done(done), shows: finished(done, reply), afterRecords: 1),
             ],
             records: [Record(item: .prompt("task \(n)"), after: 0), Record(item: .stop(reply), after: 3)],
             prompts: ["task \(n)"], completions: 1, end: .completed(reply: reply))
@@ -171,14 +208,23 @@ struct AgentAntigravityInterleavingTests {
             name: "question",
             reports: [
                 Report(item: .working, shows: works), Report(item: .question, shows: asks), Report(item: .working, shows: works),
-                Report(item: .done("**Picked \(n).**"), shows: finished("**Picked \(n).**", reply)),
+                Report(item: .done("**Picked \(n).**"), shows: finished("**Picked \(n).**", reply), afterRecords: 1),
             ],
             records: [Record(item: .prompt("task \(n)"), after: 0), Record(item: .stop(reply), after: 3)],
             prompts: ["task \(n)"], completions: 1, end: .completed(reply: reply))
     }
 
-    /// A failure before any model call (stage 6, a closed proxy port): no
-    /// record at all, so a prompt typed in the terminal is in none.
+    /// A failure before any model call, the stage 1 shape (a closed proxy
+    /// port): `error` 10 ms after Return with no `working`, and no record at
+    /// all, so a prompt typed in the terminal is in none.
+    static func failedAtOnce(_ n: Int) -> Case {
+        Case(
+            name: "failed at once",
+            reports: [Report(item: .error("Failed \(n)."), shows: Shown(state: .problem, replies: nil))],
+            records: [], prompts: [], completions: 0, end: .failed(text: "Failed \(n)."))
+    }
+
+    /// The same failure as the app saw it, a `working` before the `error`.
     static func failedEarly(_ n: Int) -> Case {
         Case(
             name: "failed early",
@@ -209,13 +255,50 @@ struct AgentAntigravityInterleavingTests {
             name: "sent",
             reports: [
                 Report(item: .send("task \(n)"), shows: pending), Report(item: .idle, shows: pending),
-                Report(item: .working, shows: works), Report(item: .done("Sent \(n)."), shows: finished("Sent \(n).", reply)),
+                Report(item: .working, shows: works),
+                Report(item: .done("Sent \(n)."), shows: finished("Sent \(n).", reply), afterRecords: 1),
             ],
             records: [Record(item: .prompt("task \(n)"), after: 1), Record(item: .stop(reply), after: 3)],
             prompts: ["task \(n)"], completions: 1, end: .completed(reply: reply))
     }
 
-    static let kinds: [(Int) -> Case] = [normal, wakeUp, wakeInTurn, interrupted, permission, question, failedEarly, failedLate, sent]
+    static let kinds: [(Int) -> Case] = [
+        normal, afterKey, wakeUp, wakeInTurn, interrupted, permission, question, failedAtOnce, failedEarly, failedLate, sent,
+    ]
+
+    /// Turns after which the agent's process is gone: only last.
+    static func diesMidTurn(_ n: Int) -> Case {
+        Case(
+            name: "dies mid-turn",
+            reports: [Report(item: .working, shows: works), Report(item: .death, shows: Shown(state: .problem, replies: [nil]), afterRecords: 1)],
+            records: [Record(item: .prompt("task \(n)"), after: 0)],
+            prompts: ["task \(n)"], completions: 0, end: .stopped)
+    }
+
+    static func exitsMidTurn(_ n: Int) -> Case {
+        Case(
+            name: "exits mid-turn",
+            reports: [Report(item: .working, shows: works), Report(item: .exit(0), shows: Shown(state: .finished, replies: [nil]), afterRecords: 1)],
+            records: [Record(item: .prompt("task \(n)"), after: 0)],
+            prompts: ["task \(n)"], completions: 0, end: .interrupted)
+    }
+
+    /// agy ended, by Control-D or its terminal dying, just after `done`, its
+    /// Stop still to come.
+    static func exitsAfterDone(_ n: Int) -> Case {
+        var turn = typed("exits after done", n, done: "Last \(n).", reply: "Last \(n).\nIts second line.")
+        turn.reports.append(Report(item: .exit(0), shows: unchanged))
+        return turn
+    }
+
+    static func diesAfterDone(_ n: Int) -> Case {
+        var turn = typed("dies after done", n, done: "Last \(n).", reply: "Last \(n).\nIts second line.")
+        turn.reports.append(Report(item: .death, shows: Shown(state: .problem, replies: nil)))
+        turn.end = .stopped
+        return turn
+    }
+
+    static let lastKinds: [(Int) -> Case] = [diesMidTurn, exitsMidTurn, exitsAfterDone, diesAfterDone]
 
     /// Two prompts sent while a turn works: agy runs them joined by a
     /// newline as its next turn (`stage5/queue2`), or an interrupt gives
@@ -228,8 +311,8 @@ struct AgentAntigravityInterleavingTests {
             name: "queued, joined",
             reports: [
                 Report(item: .working, shows: works), Report(item: .send("one"), shows: waiting), Report(item: .send("two"), shows: waiting),
-                Report(item: .done("Reply 1."), shows: finished("Reply 1.", first)), Report(item: .working, shows: works),
-                Report(item: .done("Both."), shows: finished("Both.", both)),
+                Report(item: .done("Reply 1."), shows: finished("Reply 1.", first), afterRecords: 1), Report(item: .working, shows: works),
+                Report(item: .done("Both."), shows: finished("Both.", both), afterRecords: 3),
             ],
             records: [
                 Record(item: .prompt("task 1"), after: 0), Record(item: .stop(first), after: 1),
@@ -247,8 +330,18 @@ struct AgentAntigravityInterleavingTests {
         return [joined, givenBack]
     }()
 
-    /// Every merge of the case's two channels in which each record comes
-    /// after the reports it needs.
+    /// Consecutive turns whose replies share a first line, and a short
+    /// first line that begins the turn before's (review of the pairing 2,
+    /// note 1).
+    static let sharedLines: [Case] = [
+        typed("same line", 1, done: "Done.", reply: "Done.\nUpdated the parser.")
+            .then(typed("same line", 2, done: "Done.", reply: "Done.\nUpdated the tests.")),
+        typed("long line", 1, done: "No, the tests failed.", reply: "No, the tests failed.\nSee the log.")
+            .then(typed("its beginning", 2, done: "No", reply: "No\nNothing to change.")),
+    ]
+
+    /// Every merge of the case's two channels that keeps each one's order
+    /// and what may come before what.
     enum Step {
         case report(Int)
         case record(Int)
@@ -261,7 +354,9 @@ struct AgentAntigravityInterleavingTests {
                 all.append(path)
                 return
             }
-            if reports < c.reports.count { walk(reports + 1, records, path + [.report(reports)]) }
+            if reports < c.reports.count && c.reports[reports].afterRecords <= records {
+                walk(reports + 1, records, path + [.report(reports)])
+            }
             if records < c.records.count && c.records[records].after <= reports { walk(reports, records + 1, path + [.record(records)]) }
         }
         walk(0, 0, [])
@@ -313,6 +408,8 @@ struct AgentAntigravityInterleavingTests {
             return [provider(.providerExited(status: status))]
         case .death:
             return [.surfaceDied(generation: generation, byUser: false, isViewed: viewed)]
+        case .close:
+            return [.surfaceDied(generation: generation, byUser: true, isViewed: viewed)]
         }
     }
 
@@ -340,7 +437,7 @@ struct AgentAntigravityInterleavingTests {
             case .report(let r):
                 item = c.reports[r].item
                 isRecord = false
-                shown = Shown(state: c.reports[r].shows.state, replies: c.reports[r].shows.replies ?? shown.replies)
+                shown = Shown(state: c.reports[r].shows.state ?? shown.state, replies: c.reports[r].shows.replies ?? shown.replies)
             case .record(let k):
                 item = c.records[k].item
                 isRecord = true
@@ -355,7 +452,7 @@ struct AgentAntigravityInterleavingTests {
             if completed > 0 && !replies.contains(record.lastMessage) { found.append("notified \(record.lastMessage ?? "nil")") }
             if record.state == .finished && record.problem != nil { found.append("finished with a problem") }
             if isRecord && before == .problem && record.state == .finished { found.append("a record turned a problem into finished") }
-            if record.state != shown.state { found.append("shows \(record.state), not \(shown.state)") }
+            if record.state != shown.state { found.append("shows \(record.state), not \(String(describing: shown.state))") }
             if !replies.contains(record.lastMessage) { found.append("reply \(record.lastMessage ?? "nil")") }
             if !found.isEmpty { return ["step \(index) (\(item))"] + found }
         }
@@ -374,7 +471,11 @@ struct AgentAntigravityInterleavingTests {
             if record.unread { found.append("unread after an interrupt") }
         case .failed(let text):
             if record.problem?.text != text { found.append("problem \(String(describing: record.problem))") }
-            if record.unread { found.append("unread under a problem") }
+            // A failure with no `working` leaves the reply before it as it
+            // was, read or not; one after a `working` read it.
+            if record.unread && !c.name.hasSuffix("failed at once") { found.append("unread under a problem") }
+        case .stopped:
+            if record.problem?.kind != .exited { found.append("problem \(String(describing: record.problem))") }
         }
         if state.turnState != .inactive { found.append("turn \(state.turnState)") }
         if state.promptAwaitsTurn { found.append("promptAwaitsTurn") }
@@ -391,28 +492,77 @@ struct AgentAntigravityInterleavingTests {
 
     /// How the start dialog ends, with the first prompt's turn behind it.
     enum DialogEnd: CaseIterable {
-        case accepted, declined, exitedFailing, terminalDied, failed
+        case accepted, acceptedThenTurn, declined, closedByPerson, exitedFailing, terminalDied, failed
 
-        var reports: [Item] {
+        static let reply = "First.\nMore."
+        static let nextReply = "Reply 2.\nMore."
+
+        /// After the trust report.
+        var reports: [Report] {
+            func shown(_ item: Item) -> Report { Report(item: item, shows: works) }
             switch self {
-            case .accepted: [.idle]
+            case .accepted: return [shown(.idle)]
+            // The next turn starts once the reply behind the dialog is in
+            // (a prompt typed while that turn ran would queue behind it: not
+            // generated), and its `done` after its prompt's record.
+            case .acceptedThenTurn:
+                return [shown(.idle), Report(item: .working, shows: works, afterRecords: 3),
+                        Report(item: .done("Reply 2."), shows: works, afterRecords: 4)]
             // "No, exit": `idle`, exit status 0, `idle` (`stage5/trustprompt`).
-            case .declined: [.idle, .exit(0), .idle]
-            case .exitedFailing: [.exit(1)]
-            case .terminalDied: [.death]
-            case .failed: [.error("Broke.")]
+            case .declined: return [shown(.idle), shown(.exit(0)), shown(.idle)]
+            case .closedByPerson: return [shown(.close)]
+            case .exitedFailing: return [shown(.exit(1))]
+            case .terminalDied: return [shown(.death)]
+            case .failed: return [shown(.error("Broke."))]
+            }
+        }
+
+        /// SessionStart and the prompt may come before the trust report
+        /// (0.16 s); the Stop comes after it (5.1 s); a next prompt after the
+        /// person accepted.
+        var records: [Record] {
+            var records = [
+                Record(item: .sessionStart, after: 0), Record(item: .prompt("first task"), after: 0),
+                Record(item: .stop(Self.reply), after: 1),
+            ]
+            if self == .acceptedThenTurn {
+                records += [Record(item: .prompt("task 2"), after: 2), Record(item: .stop(Self.nextReply), after: 3)]
+            }
+            return records
+        }
+
+        /// What the tile shows after `reportsSeen` reports (the trust report
+        /// first), the Stop behind the dialog seen or not.
+        func shows(after reportsSeen: Int, stopSeen: Bool) -> AgentRecord.State {
+            switch (self, reportsSeen) {
+            case (_, 0): return .working
+            case (_, 1): return .asks
+            case (.accepted, _), (.declined, 2), (.acceptedThenTurn, 2): return stopSeen ? .finished : .working
+            case (.acceptedThenTurn, 3): return .working
+            case (.acceptedThenTurn, _), (.declined, _), (.closedByPerson, _): return .finished
+            case (.exitedFailing, _), (.terminalDied, _), (.failed, _): return .problem
+            }
+        }
+
+        /// The turns completed, when the Stop came after `stopAfter` reports:
+        /// a Stop before the launch ends completes the turn; after it, the
+        /// turn ended with its launch and the Stop only brings its reply.
+        func completions(stopAfter: Int) -> Int {
+            switch self {
+            case .accepted: return 1
+            case .acceptedThenTurn: return 2
+            case .declined: return stopAfter < 3 ? 1 : 0
+            case .closedByPerson: return stopAfter < 2 ? 1 : 0
+            case .exitedFailing, .terminalDied, .failed: return 0
             }
         }
     }
 
     /// The first prompt's turn behind the start dialog, the dialog ending
-    /// `end`, in `order` (reports: the trust report, then `end`'s). The
-    /// turn completes when its Stop has come and the dialog has been
-    /// answered, unless the launch ends first; ended with a failure, the
-    /// agent stops with a problem; its reply is kept on every path.
-    static func dialogFaults(_ end: DialogEnd, _ order: [Step], records: [Item], viewed: Bool) throws -> [String] {
-        let reply = "First.\nMore."
-        let reports: [Item] = [.trust] + end.reports
+    /// `end`, in `order`.
+    static func dialogFaults(_ end: DialogEnd, _ order: [Step], viewed: Bool) throws -> [String] {
+        let reports = [Report(item: .trust, shows: works)] + end.reports
+        let records = end.records
         var state = AgentRuntimeSnapshot(
             surfaceState: .open, processState: .launching, activityState: .unknown, telemetryHealth: .awaiting,
             launchGeneration: generation, record: AgentRecord())
@@ -425,47 +575,39 @@ struct AgentAntigravityInterleavingTests {
             let item: Item
             switch step {
             case .report(let r):
-                item = reports[r]
+                item = reports[r].item
                 reportsSeen += 1
             case .record(let k):
-                item = records[k]
-                if item == .stop(reply) { stopAfter = reportsSeen }
+                item = records[k].item
+                if item == .stop(DialogEnd.reply) { stopAfter = reportsSeen }
             }
             let before = state.record.state
             let (after, completed) = try reduce(state, item, viewed: viewed)
             state = after
             completions += completed
             let record = state.record
-            let expected: AgentRecord.State
-            switch (end, reportsSeen) {
-            case (_, 0): expected = .working
-            case (_, 1): expected = .asks
-            case (.accepted, _), (.declined, 2): expected = stopAfter == nil ? .working : .finished
-            case (.declined, _): expected = .finished
-            case (.exitedFailing, _), (.terminalDied, _), (.failed, _): expected = .problem
-            }
+            let expected = end.shows(after: reportsSeen, stopSeen: stopAfter != nil)
+            let replies: [String?] = end == .acceptedThenTurn && reportsSeen >= 3
+                ? (reportsSeen == 3 ? [nil] : ["Reply 2.", DialogEnd.nextReply]) : [nil, DialogEnd.reply]
             var found: [String] = []
-            if completed > 0 && record.lastMessage != reply { found.append("notified \(record.lastMessage ?? "nil")") }
+            if completed > 0 && (record.lastMessage == nil || !replies.contains(record.lastMessage)) {
+                found.append("notified \(record.lastMessage ?? "nil")")
+            }
             if record.state == .finished && record.problem != nil { found.append("finished with a problem") }
             if case .record = step, before == .problem, record.state == .finished { found.append("a record turned a problem into finished") }
             if record.state != expected { found.append("shows \(record.state), not \(expected)") }
-            if record.lastMessage != nil && record.lastMessage != reply { found.append("reply \(record.lastMessage ?? "nil")") }
+            if !replies.contains(record.lastMessage) { found.append("reply \(record.lastMessage ?? "nil")") }
             if !found.isEmpty { return ["step \(index) (\(item))"] + found }
         }
-        let completes: Bool
-        switch end {
-        case .accepted: completes = true
-        // The Stop before the exit completes the turn; after it, the turn
-        // ended with its launch, and the Stop only brings its reply.
-        case .declined: completes = (stopAfter ?? 3) < 3
-        case .exitedFailing, .terminalDied, .failed: completes = false
-        }
+        let expected = end.completions(stopAfter: stopAfter ?? reports.count)
         var found: [String] = []
         let record = state.record
-        if completions != (completes ? 1 : 0) { found.append("\(completions) completions") }
-        if record.lastMessage != reply { found.append("last reply \(record.lastMessage ?? "nil")") }
-        if record.unread != (completes && !viewed) { found.append("unread \(record.unread)") }
-        if record.prompts.map(\.text) != ["first task"] { found.append("prompts \(record.prompts.map(\.text))") }
+        if completions != expected { found.append("\(completions) completions") }
+        let last = end == .acceptedThenTurn ? DialogEnd.nextReply : DialogEnd.reply
+        if record.lastMessage != last { found.append("last reply \(record.lastMessage ?? "nil")") }
+        if record.unread != (expected > 0 && !viewed) { found.append("unread \(record.unread)") }
+        let prompts = end == .acceptedThenTurn ? ["first task", "task 2"] : ["first task"]
+        if record.prompts.map(\.text) != prompts { found.append("prompts \(record.prompts.map(\.text))") }
         if state.stateBeforeStartDialog != nil || state.completedBehindDialog != nil { found.append("start dialog left") }
         if state.hiddenTurn { found.append("hiddenTurn") }
         if state.pendingMessage != nil, record.state != .problem { found.append("pendingMessage") }
@@ -473,9 +615,14 @@ struct AgentAntigravityInterleavingTests {
     }
 
     /// Every case and every merge; the runs, and each failure with its order.
+    /// Not generated, as named tests cover them: the dialog with no first
+    /// prompt (`theTrustDialogAtStartIsNoTurn`), the sign-in report
+    /// (`aSignIn…`, `heldKeysDoNotGoIntoTheSignIn`), a resumed conversation
+    /// (`aResumeChecksTheConversationAndItsLock`), `PreInvocation` 1
+    /// (`preInvocation…`).
     static func allFaults() throws -> (runs: Int, failures: [String]) {
-        var cases: [Case] = kinds.map { $0(1) } + queued
-        for first in kinds { for second in kinds { cases.append(first(1).then(second(2))) } }
+        var cases: [Case] = kinds.map { $0(1) } + lastKinds.map { $0(1) } + queued + sharedLines
+        for first in kinds { for second in kinds + lastKinds { cases.append(first(1).then(second(2))) } }
         var runs = 0
         var failures: [String] = []
         for c in cases {
@@ -491,18 +638,14 @@ struct AgentAntigravityInterleavingTests {
                 }
             }
         }
-        // SessionStart and the prompt may come before the trust report
-        // (0.16 s); the Stop comes after it (5.1 s).
-        let records: [Item] = [.sessionStart, .prompt("first task"), .stop("First.\nMore.")]
         for end in DialogEnd.allCases {
             let dialog = Case(
-                name: "\(end)", reports: ([.trust] + end.reports).map { Report(item: $0, shows: works) },
-                records: [Record(item: records[0], after: 0), Record(item: records[1], after: 0), Record(item: records[2], after: 1)],
+                name: "\(end)", reports: [Report(item: .trust, shows: works)] + end.reports, records: end.records,
                 prompts: [], completions: 0, end: .interrupted)
             for order in orders(dialog) {
                 for viewed in [false, true] {
                     runs += 1
-                    let found = try dialogFaults(end, order, records: records, viewed: viewed)
+                    let found = try dialogFaults(end, order, viewed: viewed)
                     if !found.isEmpty { failures.append("behind the dialog, \(end), viewed \(viewed) \(order): \(found)") }
                 }
             }
@@ -526,13 +669,13 @@ struct AgentAntigravityInterleavingTests {
     }
 
     /// The number of runs `allFaults` makes, so a change to the cases shows.
-    static let expectedRuns = 32940
+    static let expectedRuns = 22470
 
     /// Review of the fixes 2, trigger A: a wake-up turn of its own, its
-    /// `done` before its records. Two turns, two completions.
+    /// `done` before its Stop. Two turns, two completions.
     @Test func aWakeUpTurnsDoneBeforeItsRecords() throws {
         let order: [Item] = [.working, .prompt("sleep, then say slept"), .stop("Waiting.\nThe command runs."), .done("Waiting."),
-                             .working, .done("slept"), .selfStart, .stop("slept\nThe command ended.")]
+                             .working, .selfStart, .done("slept"), .stop("slept\nThe command ended.")]
         var state = Self.finishedAgent(unread: false)
         var completions = 0
         for item in order { let r = try Self.reduce(state, item, viewed: false); state = r.0; completions += r.1 }
@@ -542,11 +685,12 @@ struct AgentAntigravityInterleavingTests {
     }
 
     /// Review of the pairing, fault 2: the Stop of the turn before comes
-    /// once the next turn works, and that turn's `done` before its own
+    /// once the next turn works (before that turn's prompt record: the hook
+    /// channel keeps its order), and that turn's `done` before its own
     /// Stop. The completion notifies the turn's own reply.
     @Test func theTurnBeforesStopDuringTheNextTurn() throws {
-        let order: [Item] = [.working, .prompt("task 1"), .done("Reply 1."), .working, .prompt("task 2"),
-                             .stop("Reply 1.\nMore."), .done("Reply 2.")]
+        let order: [Item] = [.working, .prompt("task 1"), .done("Reply 1."), .working, .stop("Reply 1.\nMore."),
+                             .prompt("task 2"), .done("Reply 2.")]
         var state = Self.finishedAgent(unread: false)
         var completions = 0
         for item in order { let r = try Self.reduce(state, item, viewed: false); state = r.0; completions += r.1 }
@@ -556,17 +700,41 @@ struct AgentAntigravityInterleavingTests {
         #expect(state.record.lastMessage == "Reply 2.\nMore.")
     }
 
+    /// Review of the pairing 2, note 1: two turns whose replies start with
+    /// the same line, the first turn's Stop late. The next turn's prompt
+    /// record ends its claim: the completion notifies the turn's own line.
+    @Test func aLateStopWithTheSameFirstLineIsNotTheNextTurns() throws {
+        let order: [Item] = [.working, .prompt("task 1"), .done("Done."), .working, .stop("Done.\nUpdated the parser."),
+                             .prompt("task 2"), .done("Done.")]
+        var state = Self.finishedAgent(unread: false)
+        for item in order { state = try Self.reduce(state, item, viewed: false).0 }
+        #expect(state.record.lastMessage == "Done.")
+        state = try Self.reduce(state, .stop("Done.\nUpdated the tests."), viewed: false).0
+        #expect(state.record.lastMessage == "Done.\nUpdated the tests.")
+    }
+
+    /// Review of the pairing 2, note 1: an uncut `done` line is a whole
+    /// first line; "No" is not the beginning of "No, the tests failed.".
+    @Test func anUncutLineMatchesOnlyAWholeFirstLine() throws {
+        var state = Self.finishedAgent(unread: false)
+        for item in [Item.working, .prompt("task 1"), .done("No")] { state = try Self.reduce(state, item, viewed: false).0 }
+        state = try Self.reduce(state, .stop("No, the tests failed.\nSee the log."), viewed: false).0
+        #expect(state.record.lastMessage == "No")
+        state = try Self.reduce(state, .stop("No\nNothing to change."), viewed: false).0
+        #expect(state.record.lastMessage == "No\nNothing to change.")
+    }
+
     /// Review of the pairing, fault 2 (`stage5/wake2`): the wake-up's
     /// `done` before its Stop; the notified reply is the wake-up's, not the
     /// step before it.
     @Test func aWakeUpInsideTheTurnDoneBeforeItsRecords() throws {
-        let order: [Item] = [.working, .prompt("sleep, then say slept"), .stop("Waiting."), .done("slept")]
+        let order: [Item] = [.working, .prompt("sleep, then say slept"), .stop("Waiting."), .selfStart, .done("slept")]
         var state = Self.finishedAgent(unread: false)
         var completions = 0
         for item in order { let r = try Self.reduce(state, item, viewed: false); state = r.0; completions += r.1 }
         #expect(completions == 1)
         #expect(state.record.lastMessage == "slept")
-        for item in [Item.selfStart, .stop("slept\nThe command ended.")] { state = try Self.reduce(state, item, viewed: false).0 }
+        state = try Self.reduce(state, .stop("slept\nThe command ended."), viewed: false).0
         #expect(state.record.lastMessage == "slept\nThe command ended.")
         #expect(state.pendingMessage == nil)
     }
@@ -576,11 +744,7 @@ struct AgentAntigravityInterleavingTests {
     /// stopped with the problem, not finished, and nothing is notified;
     /// the reply is kept.
     @Test func aLateStopAfterTheDialogEndedInAFailure() throws {
-        var state = AgentRuntimeSnapshot(
-            surfaceState: .open, processState: .launching, activityState: .unknown, telemetryHealth: .awaiting,
-            launchGeneration: Self.generation, record: AgentRecord())
-        state = AgentStateReducer.reduce(state, event: .launchRequested(generation: Self.generation, prompted: true), rules: Self.rules).state
-        state = AgentStateReducer.reduce(state, event: .sent(prompt: "first task", by: .person), rules: Self.rules).state
+        var state = Self.launchedWithAPrompt()
         for item in [Item.trust, .prompt("first task"), .exit(1)] { state = try Self.reduce(state, item, viewed: false).0 }
         #expect(state.record.state == .problem)
         let (after, completions) = try Self.reduce(state, .stop("First."), viewed: false)
@@ -588,5 +752,27 @@ struct AgentAntigravityInterleavingTests {
         #expect(after.record.state == .problem)
         #expect(!after.record.unread)
         #expect(after.record.lastMessage == "First.")
+    }
+
+    /// Review of the pairing 2, note 3: a failure of the report channel
+    /// stops the agent after the turn behind the dialog ended and before
+    /// the person answers. The answer does not turn the problem into
+    /// finished; the reply is kept.
+    @Test func aStopBehindTheDialogStaysAProblemWhenItIsAnswered() throws {
+        var state = Self.launchedWithAPrompt()
+        for item in [Item.trust, .prompt("first task"), .stop("First.")] { state = try Self.reduce(state, item, viewed: false).0 }
+        state = AgentStateReducer.reduce(state, event: .reportFailed, rules: Self.rules).state
+        let (after, completions) = try Self.reduce(state, .idle, viewed: false)
+        #expect(completions == 0)
+        #expect(after.record.state == .problem && after.record.problem?.kind == .reportFailed)
+        #expect(after.record.lastMessage == "First.")
+    }
+
+    static func launchedWithAPrompt() -> AgentRuntimeSnapshot {
+        var state = AgentRuntimeSnapshot(
+            surfaceState: .open, processState: .launching, activityState: .unknown, telemetryHealth: .awaiting,
+            launchGeneration: generation, record: AgentRecord())
+        state = AgentStateReducer.reduce(state, event: .launchRequested(generation: generation, prompted: true), rules: rules).state
+        return AgentStateReducer.reduce(state, event: .sent(prompt: "first task", by: .person), rules: rules).state
     }
 }

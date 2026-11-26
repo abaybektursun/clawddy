@@ -112,10 +112,11 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// by that Stop, by a `working` (then the turn is a reported one), or
     /// when the launch ends or the agent stops first.
     var hiddenTurn = false
-    /// What a Stop that comes with no turn under way must begin with to be
-    /// the reply of the turn that ended last (agy): the first line its
-    /// `done` reported, without the "…" that marks it cut; empty for the
-    /// turn no report showed. nil: no Stop to come is that turn's.
+    /// The first line agy's `done` reported for the turn that ended last,
+    /// which a Stop that comes with no turn under way must open with to be
+    /// that turn's reply (`Reduction.reply(_:opensWith:)`); empty for the
+    /// turn no report showed (any Stop is its reply). nil: no Stop to come
+    /// is that turn's.
     var replyOpening: String?
     /// Prompts Clawddy sent while the turn worked, which the CLI holds
     /// until the turn ends (`AgentReportRules.queuedMessagesRunNextTurn`).
@@ -511,7 +512,7 @@ private struct Reduction {
         switch domainEvent {
         case .turnCompleted, .messageReported:
             confirmProviderAlive()
-        case .turnFailed, .promptSubmitted, .questionReported:
+        case .turnFailed, .promptSubmitted, .selfStarted, .questionReported:
             // A prompt or a failure the event file delivers after the exit
             // report starts or fails no turn: the provider has gone.
             guard state.processState != .exited else { return }
@@ -550,6 +551,13 @@ private struct Reduction {
             // One reported during a turn waits behind it, unless queued
             // messages run as their own next turn (agy), whose records come
             // only when that turn starts.
+            // agy: the hook channel keeps its order, so a Stop waiting in
+            // this turn came before this prompt's record: an earlier turn's.
+            // A prompt Clawddy sent while the turn worked starts the next
+            // turn (agy queues it), and the Stop waiting is this turn's.
+            if rules.workingStartsTurn && underWay != .inactive && !Self.isQueued(text, sent: state.sentWhileWorking) {
+                state.pendingMessage = nil
+            }
             if let text {
                 recordPrompt(text, queued: !rules.queuedMessagesRunNextTurn && underWay != .starting && underWay != .inactive)
             }
@@ -557,6 +565,11 @@ private struct Reduction {
                 endTurn()
                 complete(endedEarly, isViewed: isViewed)
             }
+
+        case .selfStarted:
+            // A Stop waiting in the turn came before agy started its next
+            // step itself (a wake-up): an earlier step's or turn's.
+            if rules.workingStartsTurn && state.turnState != .inactive { state.pendingMessage = nil }
 
         case .messageReported(let text):
             // Claude's `Stop` is written just before its `done`, but the
@@ -582,7 +595,7 @@ private struct Reduction {
                 // turn's `done` reported is another turn's or an earlier
                 // step's (cli-facts, "`done` and its Stop").
                 if rules.doneWithMessageCompletes {
-                    guard let opening = state.replyOpening, message.hasPrefix(opening) else { return }
+                    guard let line = state.replyOpening, Self.reply(message, opensWith: line) else { return }
                 }
                 record.lastMessage = message
                 record.lastMessageAt = now
@@ -770,9 +783,10 @@ private struct Reduction {
                 // turn's Stop, or one before a wake-up in this turn, is not.
                 if report.message == nil || rules.doneWithMessageCompletes {
                     if rules.doneWithMessageCompletes {
-                        let opening = report.message.map(Self.opening(ofDone:)) ?? ""
-                        state.replyOpening = opening
-                        if let message = report.message, !(state.pendingMessage?.hasPrefix(opening) ?? false) {
+                        let line = report.message ?? ""
+                        state.replyOpening = line
+                        if let message = report.message,
+                           !(state.pendingMessage.map { Self.reply($0, opensWith: line) } ?? false) {
                             state.pendingMessage = String(message.prefix(AgentRecord.textLimit))
                         }
                     }
@@ -1042,6 +1056,12 @@ private struct Reduction {
 
     private mutating func finishStopping() {
         endHiddenTurn()
+        // A turn that ended behind the start dialog keeps its reply only:
+        // the agent stopped before the dialog was answered.
+        if state.completedBehindDialog != nil {
+            state.completedBehindDialog = nil
+            applyPendingMessage()
+        }
         record.cutOff = false
         clearQueued()
         record.activity = nil
@@ -1058,10 +1078,22 @@ private struct Reduction {
         state.replyOpening = ""
     }
 
-    /// What a Stop's reply begins with when agy's `done` reported `message`:
-    /// the reply's first line, cut to 199 characters and "…" past 200.
-    private static func opening(ofDone message: String) -> String {
-        message.hasSuffix("…") ? String(message.dropLast()) : message
+    /// Whether `reply` is the one whose first line agy's `done` reported as
+    /// `line` (cli-facts, "`done` and its Stop"): a line cut to 199
+    /// characters and "…" begins the reply; an uncut one is its whole first
+    /// line. An empty line: any reply.
+    private static func reply(_ reply: String, opensWith line: String) -> Bool {
+        if line.isEmpty { return true }
+        if line.count == 200 && line.hasSuffix("…") { return reply.hasPrefix(line.dropLast()) }
+        return reply == line || reply.hasPrefix(line + "\n")
+    }
+
+    /// Whether the prompt `raw` is one Clawddy sent while the turn worked,
+    /// alone or joined with the others (agy runs them as the next turn).
+    private static func isQueued(_ raw: String?, sent: [String]) -> Bool {
+        guard let raw else { return false }
+        let text = String(AgentRecord.prompt(raw).prefix(AgentRecord.textLimit))
+        return sent.contains(text) || joinedRun(of: sent, equalTo: text) != nil
     }
 
     /// An `idle` or `clear` with no turn under way: the agent is not working,
