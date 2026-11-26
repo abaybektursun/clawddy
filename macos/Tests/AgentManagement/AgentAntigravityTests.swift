@@ -235,7 +235,7 @@ struct AgentAntigravityHookScriptTests {
             ["type": "GENERIC", "content": "started"], ["type": "PLANNER_RESPONSE", "content": "Waiting for it to finish."],
         ]))
         #expect(wake.step == "PLANNER_RESPONSE")
-        #expect(AntigravityProvider.hookEvents["PreInvocation"]?(wake) == [.sessionBound(sessionID: "c-1"), .selfStarted])
+        #expect(AntigravityProvider.hookEvents["PreInvocation"]?(wake) == [.sessionBound(sessionID: "c-1")])
         // Review of the fixes, defect 4: a blank line at the end is no step,
         // and only invocation 0 reads the transcript.
         let file = sandbox.home.appendingPathComponent(".gemini/antigravity-cli/brain/c-1/.system_generated/logs/transcript_full.jsonl")
@@ -975,9 +975,10 @@ struct AgentAntigravityBridgeTests {
     }
 
     /// Review of the fixes, defect 3: a wake-up turn (agy starting an
-    /// invocation itself) waits for no prompt, so the next real prompt,
-    /// its record before its `working`, reads the unread reply, is
-    /// recorded once, and is not queued.
+    /// invocation itself) records no prompt, and the next real prompt, its
+    /// record before its `working`, is recorded once, not queued; its
+    /// `working` reads the unread reply (agy's prompt records change only
+    /// the prompts, `everyMergeOfReportsAndRecords`).
     @Test func aWakeUpTurnWaitsForNoPrompt() throws {
         let h = try AgentBridgeHarness()
         defer { h.remove() }
@@ -995,9 +996,9 @@ struct AgentAntigravityBridgeTests {
         let agent = try h.agent(id)
         #expect(agent.record.state == .finished && agent.record.unread && agent.record.lastMessage == "slept")
         try agyHook(h, id, "PreInvocation", session: "c-1", invocation: "0", step: "USER_INPUT", text: "next")
-        #expect(!agent.record.unread)
         #expect(agent.record.prompts.map(\.text) == ["sleep, then say slept", "next"] && agent.record.queued == nil)
         try h.osc(id, "state=working:app=antigravity")
+        #expect(!agent.record.unread)
         #expect(agent.record.sentence(cli: .antigravity) == .cli("next"))
         try agyHook(h, id, "Stop", session: "c-1", text: "Next.")
         try h.osc(id, "state=done:app=antigravity:msg=\(b64("Next."))")

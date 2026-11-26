@@ -344,9 +344,6 @@ enum AgentDomainEvent: Equatable, Sendable {
     /// the launch script.
     case sessionEnded
     case providerExited(status: Int)
-    /// The CLI started an invocation itself, no prompt behind it: agy
-    /// waking after a background command (`AntigravityProvider`).
-    case selfStarted
 }
 
 /// How the reducer reads one CLI's terminal reports where the CLIs differ

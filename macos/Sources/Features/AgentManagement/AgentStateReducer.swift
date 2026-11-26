@@ -105,14 +105,12 @@ struct AgentRuntimeSnapshot: Equatable, Sendable {
     /// prompt before its folder-trust question is answered): it completes
     /// when the dialog does, so the agent asks until then.
     var completedBehindDialog: AgentCompletionID?
-    /// A turn its `working` started has not had its prompt's record yet
-    /// (`AgentReportRules.workingStartsTurn`): the next prompt record is
-    /// that turn's prompt, even after the turn has ended.
-    var turnAwaitsItsPrompt = false
-    /// The record that opens a turn (its prompt, or agy starting one
-    /// itself) came before the report that starts it
-    /// (`AgentReportRules.workingStartsTurn`): the turn waits for no prompt.
-    var promptCameFirst = false
+    /// The launch's first prompt runs behind a start-up dialog with no
+    /// report at all (agy, `AgentReportRules.workingStartsTurn`): a turn
+    /// has started that no `working` showed, and its Stop record ends it.
+    /// Set when the dialog shows on a launch with a first prompt; cleared
+    /// by that Stop or by a `working` (then the turn is a reported one).
+    var hiddenTurn = false
     /// Prompts Clawddy sent while the turn worked, which the CLI holds
     /// until the turn ends (`AgentReportRules.queuedMessagesRunNextTurn`).
     var sentWhileWorking: [String] = []
@@ -517,7 +515,7 @@ private struct Reduction {
             // `clear` is no sign of life: Claude sends it when the folder
             // trust dialog is declined and when it exits.
             if report.state != .clear { confirmProviderAlive() }
-        case .sessionBound, .manualCompactionStarted, .turnActivityChanged, .sessionEnded, .providerExited, .selfStarted:
+        case .sessionBound, .manualCompactionStarted, .turnActivityChanged, .sessionEnded, .providerExited:
             break
         }
         state.telemetryHealth = .live
@@ -532,18 +530,21 @@ private struct Reduction {
             let underWay = state.turnState
             let endedEarly = state.endedBeforeItsPrompt
             state.endedBeforeItsPrompt = nil
-            // The prompt of a turn its `working` started, which may have
-            // ended already: it is that turn's, and reads nothing.
-            let ownTurn = state.turnAwaitsItsPrompt
-            state.turnAwaitsItsPrompt = false
-            if rules.workingStartsTurn && !ownTurn && underWay == .inactive { state.promptCameFirst = true }
-            // Any other prompt reads the turn before it.
-            if record.unread && !ownTurn {
+            // A prompt reads the turn before it, unless every turn has its
+            // `working` (agy): that report reads it, and the record, which
+            // can come before it or after the turn ended, changes nothing
+            // but the prompts.
+            if record.unread && !rules.workingStartsTurn {
                 record.unread = false
                 effects.append(.unreadChanged)
             }
             if state.turnState == .starting || endedEarly != nil { startTurn(activity: .reasoning) }
-            if let text { recordPrompt(text, queued: !ownTurn && underWay != .starting && underWay != .inactive) }
+            // One reported during a turn waits behind it, unless queued
+            // messages run as their own next turn (agy), whose records come
+            // only when that turn starts.
+            if let text {
+                recordPrompt(text, queued: !rules.queuedMessagesRunNextTurn && underWay != .starting && underWay != .inactive)
+            }
             if let endedEarly {
                 endTurn()
                 complete(endedEarly, isViewed: isViewed)
@@ -556,12 +557,10 @@ private struct Reduction {
             let message = String(text.prefix(AgentRecord.textLimit))
             switch state.turnState {
             case .active, .compaction, .starting: state.pendingMessage = message
-            case .inactive where state.promptCameFirst:
-                // A turn that ran with no report at all, its prompt's record
-                // and now its reply: agy runs a launch's first prompt behind
-                // its folder-trust dialog, reporting nothing. It is that
-                // turn's end.
-                state.promptCameFirst = false
+            case .inactive where state.hiddenTurn:
+                // The end of the turn no report showed: agy runs a launch's
+                // first prompt behind its folder-trust dialog.
+                state.hiddenTurn = false
                 state.promptAwaitsTurn = false
                 state.pendingMessage = message
                 complete(
@@ -659,15 +658,6 @@ private struct Reduction {
                 effects.append(.sessionMissing)
             }
 
-        case .selfStarted:
-            // agy started an invocation itself: no prompt record comes for
-            // its turn, the one under way or the one about to start.
-            if state.turnState == .inactive {
-                state.promptCameFirst = true
-            } else {
-                state.turnAwaitsItsPrompt = false
-            }
-
         case .providerExited:
             break
         }
@@ -728,6 +718,8 @@ private struct Reduction {
                 // no turn. Answered, the agent is as it was. (A turn under
                 // way asks within it, whatever its CLI's readiness says.)
                 if record.state != .asks { state.stateBeforeStartDialog = record.state }
+                // A launch's first prompt runs behind it (agy).
+                if rules.workingStartsTurn && state.promptAwaitsTurn { state.hiddenTurn = true }
                 if rules.askingAtStartIsStarted { effects.append(.startedAsking) }
             } else if state.turnState == .inactive || state.turnState == .starting {
                 startTurn(activity: .executing)
@@ -782,9 +774,6 @@ private struct Reduction {
             if wasUnderWay && record.state != .problem && record.state != .paused {
                 finish(interrupted: true)
                 forgetSendsGivenBack()
-                // An interrupted turn takes no prompt record after it.
-                state.turnAwaitsItsPrompt = false
-                state.promptCameFirst = false
             } else {
                 leaveWorkingWithoutTurn()
             }
@@ -795,8 +784,6 @@ private struct Reduction {
             let known = state.activityState != .unknown
             let wasUnderWay = state.turnState != .inactive && state.turnState != .starting
             endTurn()
-            state.turnAwaitsItsPrompt = false
-            state.promptCameFirst = false
             if !known { state.activityState = .unknown }
             if wasUnderWay && record.state == .working {
                 finish(interrupted: true)
@@ -908,10 +895,8 @@ private struct Reduction {
     /// Starts a turn: the agent works, and what it asked, the problem it
     /// stopped with, its limit and its unread mark are behind it.
     private mutating func startTurn(turnID: String? = nil, activity: AgentActivityState) {
-        // A turn whose opening record came first waits for no prompt; any
-        // other turn of a CLI that reports every turn waits for its own.
-        if rules.workingStartsTurn { state.turnAwaitsItsPrompt = !state.promptCameFirst }
-        state.promptCameFirst = false
+        // A turn a report shows is no hidden one.
+        state.hiddenTurn = false
         // What was sent while the turn before worked runs in this one.
         state.sentWhileWorking = []
         if rules.queuedMessagesRunNextTurn { clearQueued() }
@@ -996,9 +981,7 @@ private struct Reduction {
     /// that has already failed only takes what this failure adds.
     private mutating func fail(_ failure: AgentFailure) {
         endTurn()
-        // A failed turn takes no prompt record after it.
-        state.turnAwaitsItsPrompt = false
-        state.promptCameFirst = false
+        // A failed turn's prompt has had its turn.
         state.promptAwaitsTurn = false
         let text = failure.text?.trimmingCharacters(in: .whitespacesAndNewlines)
         let message = text?.isEmpty == false ? text : nil
